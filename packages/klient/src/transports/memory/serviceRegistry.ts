@@ -30,6 +30,7 @@ import { ISessionInteractionService } from '@moonshot-ai/agent-core-v2/session/i
 import { ISessionApprovalService } from '@moonshot-ai/agent-core-v2/session/approval/approval';
 import { ISessionQuestionService } from '@moonshot-ai/agent-core-v2/session/question/question';
 import { ISessionSkillCatalog } from '@moonshot-ai/agent-core-v2/session/sessionSkillCatalog/skillCatalog';
+import { IResearchService } from '@moonshot-ai/agent-core-v2/features/research/research';
 import { ISessionTitleService } from '@moonshot-ai/agent-core-v2/session/sessionTitle/sessionTitle';
 import { IAgentPromptService } from '@moonshot-ai/agent-core-v2/agent/prompt/prompt';
 import { IAgentSkillService } from '@moonshot-ai/agent-core-v2/agent/skill/skill';
@@ -47,8 +48,6 @@ import { IAgentTaskService } from '@moonshot-ai/agent-core-v2/agent/task/task';
 import { IAgentUsageService } from '@moonshot-ai/agent-core-v2/agent/usage/usage';
 import { IAgentMcpService } from '@moonshot-ai/agent-core-v2/agent/mcp/mcp';
 import { IAgentFullCompactionService } from '@moonshot-ai/agent-core-v2/agent/fullCompaction/fullCompaction';
-import { IAgentResearchService } from '@moonshot-ai/agent-core-v2/features/aitpResearch/research/agentResearch';
-import { IAgentAitpModeService } from '@moonshot-ai/agent-core-v2/features/aitpResearch/mode/agentAitpMode';
 import { IAgentGoalService } from '@moonshot-ai/agent-core-v2/agent/goal/goal';
 
 /** Wire service name (decorator id string) → token. */
@@ -74,6 +73,7 @@ export const serviceTokens: Readonly<Record<string, ServiceIdentifier<unknown>>>
   sessionApprovalService: ISessionApprovalService,
   sessionQuestionService: ISessionQuestionService,
   sessionSkillCatalog: ISessionSkillCatalog,
+  researchService: IResearchService,
   sessionTitleService: ISessionTitleService,
   agentPromptService: IAgentPromptService,
   agentSkillService: IAgentSkillService,
@@ -91,8 +91,6 @@ export const serviceTokens: Readonly<Record<string, ServiceIdentifier<unknown>>>
   agentTaskService: IAgentTaskService,
   agentMcpService: IAgentMcpService,
   agentFullCompactionService: IAgentFullCompactionService,
-  agentResearchService: IAgentResearchService,
-  agentAitpModeService: IAgentAitpModeService,
   agentGoalService: IAgentGoalService,
 };
 

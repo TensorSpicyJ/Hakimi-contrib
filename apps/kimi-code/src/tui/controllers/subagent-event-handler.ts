@@ -91,7 +91,6 @@ export class SubAgentEventHandler {
     const swarmProgress = this.agentSwarmProgress.get(parentToolCallId);
     if (swarmProgress !== undefined) {
       this.applySubagentEventToSwarmProgress(swarmProgress, event, childAgentId);
-      this.requestRender();
       return true;
     }
 
@@ -651,7 +650,27 @@ export class SubAgentEventHandler {
     this.host.updateActivityPane();
   }
 
+  private agentSwarmGridHeightFrame:
+    | { readonly columns: number; readonly rows: number; readonly value: number | undefined }
+    | undefined;
+
   private agentSwarmGridHeight(): number | undefined {
+    const { state } = this.host;
+    const terminalRows = state.ui.terminal.rows;
+    const terminalColumns = state.ui.terminal.columns;
+    const frame = this.agentSwarmGridHeightFrame;
+    if (frame !== undefined && frame.columns === terminalColumns && frame.rows === terminalRows) {
+      return frame.value;
+    }
+    const entry = { columns: terminalColumns, rows: terminalRows, value: this.measureAgentSwarmGridHeight() };
+    this.agentSwarmGridHeightFrame = entry;
+    queueMicrotask(() => {
+      if (this.agentSwarmGridHeightFrame === entry) this.agentSwarmGridHeightFrame = undefined;
+    });
+    return entry.value;
+  }
+
+  private measureAgentSwarmGridHeight(): number | undefined {
     const { state } = this.host;
     const terminalRows = state.ui.terminal.rows;
     const terminalColumns = state.ui.terminal.columns;

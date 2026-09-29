@@ -28,7 +28,6 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/plan',       desc: 'commands.plan.desc' },
   { name: '/swarm',      desc: 'commands.swarm.desc', acceptsInput: true },
   { name: '/goal',       desc: 'commands.goal.desc', acceptsInput: true },
-  { name: '/research',   desc: 'commands.research.desc', acceptsInput: true },
   { name: '/btw',        desc: 'commands.btw.desc', acceptsInput: true },
   { name: '/auto',       desc: 'commands.auto.desc' },
   { name: '/yolo',       desc: 'commands.yolo.desc' },
@@ -85,11 +84,8 @@ export function stripSkillPrefix(name: string): string {
  */
 export function buildSlashItems(
   skills: ReadonlyArray<{ name: string; description: string; source?: string }> = [],
-  options: { researchEnabled?: boolean } = {},
 ): SlashCommand[] {
-  const builtins = options.researchEnabled === true
-    ? SLASH_COMMANDS
-    : SLASH_COMMANDS.filter((command) => command.name !== '/research');
+  const builtins = SLASH_COMMANDS;
   const skillItems: SlashCommand[] = skills.map((s) => ({
     name: s.source === 'builtin' ? `/${s.name}` : `/${SKILL_COMMAND_PREFIX}${s.name}`,
     desc: s.description,

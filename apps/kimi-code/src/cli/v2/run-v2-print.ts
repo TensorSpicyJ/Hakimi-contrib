@@ -20,6 +20,7 @@ import { readFile } from 'node:fs/promises';
 
 import {
   IAgentGoalService,
+  IAgentLoopService,
   IAgentLifecycleService,
   IAgentPermissionModeService,
   IAgentProfileService,
@@ -29,11 +30,13 @@ import {
   IBootstrapService,
   IConfigService,
   IEventBus,
+  IHostFileSystem,
   IOAuthToolkit,
   ISessionCronService,
   ISessionIndex,
   ISessionManager,
   ITelemetryService,
+  IWorkspaceInstanceManager,
   PRINT_MAX_TURNS_DEFAULT,
   PRINT_WAIT_CEILING_S_DEFAULT,
   applyPrintModeConfigDefaults,
@@ -53,10 +56,27 @@ import {
   type IAgentScopeHandle,
   type ISessionScopeHandle,
   type LoopRunResult,
+  type McpServerConfig,
   type PrintBackgroundMode,
   type Scope,
 } from '@moonshot-ai/agent-core-v2';
-import { createKimiDefaultHeaders, createKimiDeviceId } from '@moonshot-ai/kimi-code-oauth';
+import {
+  loadMcpServersDetailed,
+  resolveMcpJsonPaths,
+} from '@moonshot-ai/agent-core-v2/workspace/workspaceMcpConfig/internal/config-loader';
+import {
+  createKimiDefaultHeaders,
+  createKimiDeviceId,
+  KIMI_CODE_PROVIDER_NAME,
+} from '@moonshot-ai/kimi-code-oauth';
+import {
+  initializeTelemetry,
+  setCrashPhase,
+  setTelemetryContext,
+  setTelemetryModel,
+  shouldEnableTelemetry,
+  shutdownTelemetry,
+} from '@moonshot-ai/kimi-telemetry';
 import { resolve } from 'pathe';
 
 import {
@@ -154,16 +174,26 @@ export async function runV2Print(
   // user left unset are filled, in the memory layer.
   await applyPrintModeConfigDefaults(configService);
   const defaultModel = configService.get<string>('defaultModel') ?? undefined;
-  let telemetryEnabled = true;
+  let configTelemetryEnabled = true;
   try {
-    telemetryEnabled = configService.get('telemetry') !== false;
+    configTelemetryEnabled = configService.get('telemetry') !== false;
   } catch {
-    telemetryEnabled = true;
+    configTelemetryEnabled = true;
   }
+  const telemetryEnabled = shouldEnableTelemetry({ enabled: configTelemetryEnabled });
   for (const diagnostic of configService.diagnostics()) {
     if (diagnostic.severity === 'warning') {
       stderr.write(`Warning: ${diagnostic.message}\n`);
     }
+  }
+
+  // Print mode has no trust prompt, so the engine's workspace-trust gate
+  // would silently drop project-level MCP servers — say so on stderr.
+  try {
+    const gated = await listTrustGatedMcpServers(app, workDir, homeDir);
+    if (gated.length > 0) stderr.write(formatTrustGatedMcpWarning(gated));
+  } catch {
+    // Best-effort: a broken mcp.json or trust store must not fail the run.
   }
 
   let restorePermission = async (): Promise<void> => {};
@@ -173,12 +203,14 @@ export async function runV2Print(
   const cleanup = async (): Promise<void> => {
     const pending = (cleanupPromise ??= (async () => {
       removeTerminationCleanup?.();
+      setCrashPhase('shutdown');
       try {
         await restorePermission();
       } finally {
         if (telemetryService !== undefined) {
           await raceWithTimeout(telemetryService.shutdown(), CLI_SHUTDOWN_TIMEOUT_MS);
         }
+        await shutdownTelemetry({ timeoutMs: CLI_SHUTDOWN_TIMEOUT_MS }).catch(() => {});
         app.dispose();
       }
     })());
@@ -191,7 +223,10 @@ export async function runV2Print(
     // `session_load_failed` fire inside create()/resume(), so an appender wired
     // up only after resolveNativeSession() would drop them to the null appender.
     // The model below is the best known up front; a resumed session's real
-    // model is reconciled via setContext once resolved.
+    // model is reconciled once resolved (v2 via setContext, v1 via
+    // setTelemetryModel). The v1 pipeline is initialized here too: the
+    // process-wide crash handlers report through its default client, so its
+    // sink must be attached before the run can crash.
     telemetryService = app.accessor.get(ITelemetryService);
     if (telemetryEnabled) {
       telemetryService.setAppender(
@@ -203,12 +238,27 @@ export async function runV2Print(
           getAccessToken: async () => (await auth.getCachedAccessToken()) ?? null,
         }),
       );
+      // No `first_launch` on the v1 client: the v2 side already tracks it via
+      // `telemetryService.track2` below, so tracking here would double-send.
+      initializeTelemetry({
+        homeDir,
+        deviceId,
+        appName: CLI_USER_AGENT_PRODUCT,
+        version,
+        uiMode: PROMPT_UI_MODE,
+        model: opts.model ?? defaultModel,
+        getAccessToken: async () =>
+          (await auth.getCachedAccessToken(KIMI_CODE_PROVIDER_NAME)) ?? null,
+      });
     }
 
     const resolved = await resolveNativeSession(app, opts, workDir, defaultModel, stderr);
     restorePermission = resolved.restorePermission;
 
     telemetryService.setContext({ sessionId: resolved.session.id, model: resolved.telemetryModel });
+    setTelemetryContext({ sessionId: resolved.session.id });
+    setTelemetryModel(resolved.telemetryModel);
+    setCrashPhase('runtime');
     if (firstLaunch) {
       telemetryService.track2('first_launch');
     }
@@ -397,6 +447,55 @@ async function resolveNativeSession(
   };
 }
 
+export interface TrustGatedMcpServer {
+  readonly name: string;
+  readonly target: string;
+}
+
+/**
+ * Project-level MCP servers the workspace-trust gate leaves out in this
+ * folder, identified by the origin of each entry in the final merged config
+ * (mirrors the SDK's `getWorkspaceTrustInfo`). Empty when the folder is trusted
+ * or nothing project-level is declared.
+ */
+export async function listTrustGatedMcpServers(
+  app: Scope,
+  workDir: string,
+  homeDir: string,
+): Promise<readonly TrustGatedMcpServer[]> {
+  const workspace = await app.accessor
+    .get(IWorkspaceInstanceManager)
+    .getOrCreate({ root: workDir });
+  if (await workspace.program.trust.get()) return [];
+  const fs = app.accessor.get(IHostFileSystem);
+  const [paths, loaded] = await Promise.all([
+    resolveMcpJsonPaths({ fs, cwd: workDir, homeDir }),
+    loadMcpServersDetailed({ fs, cwd: workDir, homeDir, includeProject: true }),
+  ]);
+  const projectPaths = new Set([paths.projectRoot, paths.project]);
+  return Object.entries(loaded.servers)
+    .filter(([name]) => projectPaths.has(loaded.origins[name] ?? ''))
+    .map(([name, config]) => ({ name, target: describeMcpTarget(config) }))
+    .toSorted((a, b) => a.name.localeCompare(b.name));
+}
+
+export function formatTrustGatedMcpWarning(servers: readonly TrustGatedMcpServer[]): string {
+  const noun = servers.length === 1 ? 'server' : 'servers';
+  const list = servers.map((server) => `${server.name} (${server.target})`).join(', ');
+  return (
+    `Warning: this folder is not trusted; skipped ${servers.length} project-level MCP ${noun}: ${list}.\n` +
+    '  Run `kimi` here and choose "Trust this folder" to enable them.\n\n'
+  );
+}
+
+function describeMcpTarget(config: McpServerConfig): string {
+  if (config.transport === 'stdio') {
+    const args = config.args === undefined ? '' : ` ${config.args.join(' ')}`;
+    return `stdio: ${config.command}${args}`;
+  }
+  return `${config.transport}: ${config.url}`;
+}
+
 async function runNativeTurn(
   app: Scope,
   session: ISessionScopeHandle,
@@ -466,6 +565,7 @@ async function runNativeTurn(
           now: () => Date.now(),
           goalActive: () => goalService.getGoal().goal?.status === 'active',
           cronNextFireAt: () => cronService.getNextFireTime(),
+          turnActive: () => agent.accessor.get(IAgentLoopService).status().state === 'running',
         });
       } catch (error) {
         // A steered turn that fails fails the run (v1 parity). Anything else
@@ -679,12 +779,28 @@ export interface PrintBackgroundPolicyInput {
    * `exit`/`drain` too (v1 parity). Omitted = no cron waiting.
    */
   readonly cronNextFireAt?: () => number | null;
+  /**
+   * Reports whether the agent loop has a turn in flight. A turn steered by a
+   * cron fire is pending work the schedule alone cannot see: a fired
+   * one-shot task disappears from `cronNextFireAt` at once, and a recurring
+   * one keeps reporting the same past fire time until the tick can run
+   * again. While this returns true the policy waits the turn out instead of
+   * reading either signal as quiescence or a wedged tick. Omitted = no
+   * in-flight turn is ever observed.
+   */
+  readonly turnActive?: () => boolean;
 }
 
 /**
  * Apply the print-mode (`kimi -p`) background-resource policy after the main
  * turn completes. A single loop re-evaluates the Session's live resources in
  * order on every round and stays alive while any of them is pending:
+ *  - turn    : while the loop has a turn in flight (e.g. steered by a cron
+ *              fire), wait it out — the schedule cannot represent it: a fired
+ *              one-shot task vanishes from `cronNextFireAt` at once, and a
+ *              recurring one reports the same past fire time until the tick
+ *              runs again, so neither signal may be read as quiescence or a
+ *              wedged tick mid-turn.
  *  - goal    : while a goal is `active`, keep waiting for its continuation
  *              turns (bounded by `ceilingS` as a safety net), regardless of
  *              the background mode; the goal summary drives the exit code.
@@ -717,6 +833,23 @@ export async function applyPrintBackgroundPolicy(
   let lastPastFireAt: number | undefined;
   let cronWedged = false;
   for (;;) {
+    // (0) turn: an in-flight turn (e.g. steered by a cron fire) is pending
+    // work the schedule cannot represent — a fired one-shot task is gone
+    // from `cronNextFireAt`, and a recurring one reports a frozen past fire
+    // time while the tick waits for the loop to go idle. Wait the turn out
+    // before reading either signal as quiescence or a wedged tick.
+    if (input.turnActive?.() === true) {
+      const ended = await input.turnEndings.next(deadline - input.now(), input.skipTurnId);
+      if (ended !== null && ended.reason !== 'completed') {
+        throw new PrintSteeredTurnFailedError(formatTurnEndingFailure(ended));
+      }
+      if (ended === null) {
+        input.warn(`print turn wait ceiling reached (${input.ceilingS}s), finishing`);
+        return;
+      }
+      continue;
+    }
+
     // (a) goal: while a goal is `active`, keep waiting for its continuation
     // turns. Also wake on a short poll: a goal can leave `active` without any
     // further turn.ended (budget block at a turn boundary, or a pause after a

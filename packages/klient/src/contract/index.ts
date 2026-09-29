@@ -27,10 +27,6 @@ import {
   agentTokenCountingContract,
   agentUsageContract,
 } from './agent/services.js';
-import {
-  agentAitpModeContract,
-  agentResearchContract,
-} from './agent/research.js';
 import { authContract, authSummaryContract } from './global/auth.js';
 import { capabilitiesContract } from './global/capabilities.js';
 import { catalogContract } from './global/catalog.js';
@@ -51,6 +47,7 @@ import { sessionMetadataContract } from './session/metadata.js';
 import { sessionQuestionContract } from './session/question.js';
 import { sessionSkillCatalogContract } from './session/skills.js';
 import { sessionTitleContract } from './session/title.js';
+import { researchContract } from './session/research.js';
 
 export const globalContract: KlientContract = {
   // core (app scope)
@@ -76,6 +73,7 @@ export const globalContract: KlientContract = {
   sessionQuestionService: sessionQuestionContract,
   sessionSkillCatalog: sessionSkillCatalogContract,
   sessionTitleService: sessionTitleContract,
+  researchService: researchContract,
   // agent scope
   agentPromptService: agentPromptContract,
   agentSkillService: agentSkillContract,
@@ -93,8 +91,6 @@ export const globalContract: KlientContract = {
   agentTaskService: agentTaskContract,
   agentMcpService: agentMcpContract,
   agentFullCompactionService: agentFullCompactionContract,
-  agentResearchService: agentResearchContract,
-  agentAitpModeService: agentAitpModeContract,
   agentGoalService: agentGoalContract,
 };
 

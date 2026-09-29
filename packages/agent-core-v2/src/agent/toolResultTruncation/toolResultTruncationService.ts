@@ -11,7 +11,10 @@ import { randomUUID } from 'node:crypto';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
-import type { ExecutableToolResult } from '#/tool/toolContract';
+import {
+  DEFAULT_TOOL_RESULT_MAX_CHARS,
+  type ExecutableToolResult,
+} from '#/tool/toolContract';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import type { ContentPart } from '#/kosong/contract/message';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
@@ -21,7 +24,6 @@ import {
   type ToolResultTruncationInput,
 } from './toolResultTruncation';
 
-const TOOL_RESULT_MAX_CHARS = 50_000;
 const TOOL_RESULT_PREVIEW_CHARS = 2_000;
 
 const encoder = new TextEncoder();
@@ -42,8 +44,9 @@ export class ToolResultTruncationService implements IAgentToolResultTruncationSe
   async truncateForModel<T extends ExecutableToolResult>(
     input: ToolResultTruncationInput<T>,
   ): Promise<T> {
+    if (input.result.spillExempt === true) return input.result;
     const text = persistableToolResultText(input.result.output);
-    if (text === undefined || text.length <= TOOL_RESULT_MAX_CHARS) return input.result;
+    if (text === undefined || text.length <= DEFAULT_TOOL_RESULT_MAX_CHARS) return input.result;
     if (input.result.truncated === true) return input.result;
 
     const saved = await this.saveToolResult(input.toolName, input.toolCallId, text);
@@ -88,7 +91,7 @@ function renderPersistedToolResult(
   outputPath: string,
 ): string {
   const lines = [
-    `Tool output exceeded ${String(TOOL_RESULT_MAX_CHARS)} characters; showing a preview only.`,
+    `Tool output exceeded ${String(DEFAULT_TOOL_RESULT_MAX_CHARS)} characters; showing a preview only.`,
     `tool_name: ${toolName}`,
     `tool_call_id: ${toolCallId}`,
     `output_size_chars: ${String(text.length)}`,

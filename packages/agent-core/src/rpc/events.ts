@@ -20,8 +20,6 @@ export type {
   McpServerStatusEvent,
   McpServerStatusPayload,
   PluginCommandActivatedEvent,
-  ResearchUpdatedEvent,
-  AitpModeUpdatedEvent,
   SessionCreatedEvent,
   SessionMetaUpdatedEvent,
   SessionStatusChangedEvent,
@@ -50,34 +48,6 @@ export type {
   TurnStepStartedEvent,
   UsageStatus,
   WarningEvent,
-} from '@moonshot-ai/protocol';
-
-// AITP Research Mode — non-event wire types (snapshot, command, sub-shapes).
-// Re-exported here so the node-sdk (which depends on agent-core, not on the
-// protocol package directly) can import them through this barrel.
-export type {
-  ResearchStatusSnapshot,
-  ResearchCommand,
-  ResearchCommandRequest,
-  ResearchCommandResponse,
-  ResearchEvidencePacket,
-  ResearchRunState,
-  ResearchRunStage,
-  ResearchSchedulerState,
-  ResearchQuestion,
-  ResearchLine,
-  ResearchLineStatus,
-  ResearchFocus,
-  ResearchAlert,
-  ResearchAlertKind,
-  ResearchCommittedCursor,
-  ResearchGoalSummary,
-  AitpAdapterHealth,
-  AitpModePhase,
-  ResearchLoopStatus,
-  QuestionWorkflow,
-  QuestionEpistemic,
-  QuestionPersistence,
 } from '@moonshot-ai/protocol';
 
 export type { KimiErrorPayload } from '../errors';

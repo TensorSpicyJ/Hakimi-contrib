@@ -82,10 +82,27 @@ export function contentToCoreParts(content: WireContent): ContentPart[] {
   const parts: ContentPart[] = [];
   for (const part of content) {
     if (part.type === 'text') parts.push({ type: 'text', text: part.text });
-    else if (part.type === 'image' && part.source.kind === 'url') parts.push({ type: 'image_url', imageUrl: { url: part.source.url, id: part.source.id } });
-    else if (part.type === 'image' && part.source.kind === 'base64') parts.push({ type: 'image_url', imageUrl: { url: `data:${part.source.media_type};base64,${part.source.data}` } });
-    else if (part.type === 'video' && part.source.kind === 'url') parts.push({ type: 'video_url', videoUrl: { url: part.source.url, id: part.source.id } });
-    else if (part.type === 'video' && part.source.kind === 'base64') parts.push({ type: 'video_url', videoUrl: { url: `data:${part.source.media_type};base64,${part.source.data}` } });
+    else if (part.type === 'image' && part.source.kind === 'url') {
+      parts.push({
+        type: 'image_url',
+        imageUrl: { url: part.source.url, id: part.source.id, name: part.name },
+      });
+    } else if (part.type === 'image' && part.source.kind === 'base64') {
+      parts.push({
+        type: 'image_url',
+        imageUrl: { url: `data:${part.source.media_type};base64,${part.source.data}`, name: part.name },
+      });
+    } else if (part.type === 'video' && part.source.kind === 'url') {
+      parts.push({
+        type: 'video_url',
+        videoUrl: { url: part.source.url, id: part.source.id, name: part.name },
+      });
+    } else if (part.type === 'video' && part.source.kind === 'base64') {
+      parts.push({
+        type: 'video_url',
+        videoUrl: { url: `data:${part.source.media_type};base64,${part.source.data}`, name: part.name },
+      });
+    }
   }
   return parts;
 }
@@ -154,18 +171,18 @@ export async function resolvePromptMediaFiles(
       // bytes are still the user's content, though: persist them as a
       // path-referenced attachment so the model can read and convert them
       // itself (best effort — the plain notice stands in when persisting
-      // fails). Inline base64 has no original name, so the file is addressed
-      // by content hash with a name derived from the sniffed format.
+      // fails). When the client supplied an attachment name, retain it;
+      // otherwise derive a stable fallback from the sniffed format.
       const effectiveMime = resolveEffectiveImageMime(
         part.source.media_type,
         decodeBase64Prefix(part.source.data),
       );
       if (!isModelAcceptedImageMime(effectiveMime)) {
         const bytes = Buffer.from(part.source.data, 'base64');
-        const name = `image.${imageExtensionForMime(effectiveMime)}`;
+        const name = part.name ?? `image.${imageExtensionForMime(effectiveMime)}`;
         const persisted = await persistAttachmentBytes(
           bytes,
-          `${createHash('sha256').update(bytes).digest('hex').slice(0, 32)}-${name}`,
+          `${createHash('sha256').update(bytes).digest('hex').slice(0, 32)}-${sanitizeAttachmentName(name)}`,
           await resolveAttachmentsDir(),
         );
         content.push({
@@ -208,6 +225,7 @@ export async function resolvePromptMediaFiles(
         });
         content.push({
           type: 'image',
+          name: part.name,
           source: { kind: 'base64', media_type: compressed.mimeType, data: compressed.base64 },
         });
         changed = true;
@@ -254,6 +272,7 @@ export async function resolvePromptMediaFiles(
 
     const file = await store.get(part.source.file_id);
     assertMediaFile(file, part.type);
+    const name = part.name ?? file.meta.name;
     if (part.type === 'image') {
       const data = await readFileOrStream(file);
       let mediaType = file.meta.media_type;
@@ -268,14 +287,14 @@ export async function resolvePromptMediaFiles(
       if (!isModelAcceptedImageMime(mediaType)) {
         const persisted = await persistAttachmentBytes(
           data,
-          `${file.meta.id}-${sanitizeAttachmentName(file.meta.name)}`,
+          `${file.meta.id}-${sanitizeAttachmentName(name)}`,
           await resolveAttachmentsDir(),
         );
         content.push({
           type: 'text',
           text: persisted === null
-            ? buildUnsupportedImageNotice(mediaType, file.meta.name)
-            : buildAttachedFileNotice(file.meta.name, mediaType, file.meta.size, persisted),
+            ? buildUnsupportedImageNotice(mediaType, name)
+            : buildAttachedFileNotice(name, mediaType, file.meta.size, persisted),
         });
         changed = true;
         continue;
@@ -312,6 +331,7 @@ export async function resolvePromptMediaFiles(
       mediaType = compressed.mimeType;
       content.push({
         type: 'image',
+        name,
         source: {
           kind: 'base64',
           media_type: mediaType,
@@ -330,6 +350,7 @@ export async function resolvePromptMediaFiles(
     const cachePath = await materializeVideoToCache(file, cacheDir);
     content.push({
       type: 'video',
+      name,
       source: { kind: 'url', url: buildKimiFileUrl(file.meta.id, cachePath) },
     });
     changed = true;

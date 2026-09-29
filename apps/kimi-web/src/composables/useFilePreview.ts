@@ -31,6 +31,7 @@ export function useFilePreview({ client, detailTarget }: UseFilePreviewOptions) 
   const previewTarget = ref<FilePreviewRequest | null>(null);
   const previewFile = ref<FileData | null>(null);
   const previewLoading = ref(false);
+  const previewIsResearchNote = ref(false);
   const previewError = ref<string | null>(null);
   // Normalized workspace-relative path of the currently-open preview. Used for
   // the download URL so it matches the server's relative-path contract even when
@@ -54,7 +55,7 @@ export function useFilePreview({ client, detailTarget }: UseFilePreviewOptions) 
     const path = previewNormalizedPath.value;
     return path ? client.getFileDownloadUrl(path) : null;
   });
-  const previewExternalActions = computed(() => previewTarget.value !== null);
+  const previewExternalActions = computed(() => previewTarget.value !== null && !previewIsResearchNote.value);
 
   function trimTrailingSlash(path: string): string {
     return path.length > 1 ? path.replace(/\/+$/, '') : path;
@@ -117,6 +118,7 @@ export function useFilePreview({ client, detailTarget }: UseFilePreviewOptions) 
       return;
     }
     const requestSeq = ++previewRequestSeq;
+    previewIsResearchNote.value = false;
     revokeMediaObjectUrl();
     detailTarget.value = 'file';
     previewFile.value = null;
@@ -161,12 +163,52 @@ export function useFilePreview({ client, detailTarget }: UseFilePreviewOptions) 
     return match?.[1];
   }
 
+  /** Reads only the daemon's selected AITP note, including an allowed ancestor
+   *  topic outside cwd; the generic filesystem preview boundary stays intact. */
+  async function openResearchNote(path: string): Promise<void> {
+    const sessionId = client.activeSessionId.value;
+    if (!sessionId) return;
+    if (detailTarget.value === 'file' && previewIsResearchNote.value && previewTarget.value?.path === path) {
+      closeFilePreview();
+      return;
+    }
+    const requestSeq = ++previewRequestSeq;
+    revokeMediaObjectUrl();
+    detailTarget.value = 'file';
+    previewIsResearchNote.value = true;
+    previewTarget.value = { path };
+    previewNormalizedPath.value = null;
+    previewFile.value = null;
+    previewError.value = null;
+    previewLoading.value = true;
+    try {
+      const note = await getKimiWebApi().getSessionResearchNote(sessionId);
+      if (requestSeq !== previewRequestSeq) return;
+      if (!note || note.topic.path !== path) {
+        previewError.value = t('researchContext.noteChanged');
+        return;
+      }
+      const isLatex = /\.tex$/i.test(note.topic.path);
+      previewFile.value = {
+        path: note.topic.path, content: note.content, encoding: 'utf-8',
+        mime: isLatex ? 'text/plain' : 'text/markdown', languageId: isLatex ? 'latex' : 'markdown', isBinary: false,
+        size: new TextEncoder().encode(note.content).length, truncated: note.truncated,
+      };
+    } catch (cause) {
+      if (requestSeq === previewRequestSeq) previewError.value = cause instanceof Error ? cause.message : t('filePreview.errors.loadFailed');
+    } finally {
+      if (requestSeq === previewRequestSeq) previewLoading.value = false;
+    }
+  }
+
   function openMediaPreview(media: ToolMedia): void {
+    previewIsResearchNote.value = false;
     if (media.kind !== 'image' && media.kind !== 'video') return;
     const seq = ++previewRequestSeq;
     revokeMediaObjectUrl();
     detailTarget.value = 'file';
     previewTarget.value = null;
+    previewIsResearchNote.value = false;
     previewNormalizedPath.value = null;
     previewError.value = null;
     const isVideo = media.kind === 'video';
@@ -253,6 +295,8 @@ export function useFilePreview({ client, detailTarget }: UseFilePreviewOptions) 
     previewError,
     previewDownloadUrl,
     previewExternalActions,
+    previewIsResearchNote,
+    openResearchNote,
     openFilePreview,
     openMediaPreview,
     closeFilePreview,

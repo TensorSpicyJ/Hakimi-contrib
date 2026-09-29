@@ -196,6 +196,7 @@ export function registerApprovalsRoutes(app: ApprovalRouteHost, core: Scope): vo
 export function toWireApproval(interaction: Interaction, sessionId: string): {
   approval_id: string;
   session_id: string;
+  agent_id: string;
   turn_id?: number;
   tool_call_id: string;
   tool_name: string;
@@ -208,6 +209,7 @@ export function toWireApproval(interaction: Interaction, sessionId: string): {
   return {
     approval_id: interaction.id,
     session_id: sessionId,
+    agent_id: interaction.origin.agentId ?? 'main',
     turn_id: interaction.origin.turnId,
     tool_call_id: p.toolCallId ?? interaction.id,
     tool_name: p.toolName,

@@ -149,4 +149,22 @@ describe('AcpHostFileSystem', () => {
 
     expect(await readFile(path, 'utf8')).toBe('old:new');
   });
+
+  it('creates and disposes temporary directories on the local filesystem', async () => {
+    const fs = makeFileSystem({
+      readTextFile: async () => ({ content: '' }),
+      writeTextFile: async () => {},
+    });
+
+    const temporary = await fs.createTempDirectory('acp-fs-temp-');
+    tempDir = temporary.path;
+    const path = join(temporary.path, 'buffer.txt');
+    await writeFile(path, 'temporary');
+
+    expect(await readFile(path, 'utf8')).toBe('temporary');
+
+    await temporary.dispose();
+    tempDir = undefined;
+    await expect(readFile(path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });

@@ -42,6 +42,9 @@ export const SUBAGENT_TOOL_OUTPUT_MAX_CHARS = 8000;
 // beyond the cap.
 export const SUBAGENT_ARG_STRING_MAX_CHARS = 16 * 1024;
 
+export const MAX_FINAL_OUTPUT_LABEL_CHARS = 400;
+export const MAX_FINAL_OUTPUT_LABEL_CODE_UNITS = 2_000;
+
 // Animation frames are shared by the login/update loaders and live thinking.
 export const BRAILLE_SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 export const BRAILLE_SPINNER_INTERVAL_MS = 80;

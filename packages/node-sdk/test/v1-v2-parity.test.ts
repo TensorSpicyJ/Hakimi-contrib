@@ -192,7 +192,6 @@ const NON_PARITY_SKILL_NAMES = new Set(['check-hakimi-docs', 'tower']);
 const NON_PARITY_TOOL_NAMES = new Set([
   'select_tools',
   'TowerInit',
-  'EnterAITPMode',
   'GetProviderUsage',
   'SetSubagentPreset',
 ]);
@@ -480,8 +479,8 @@ function projectResumedAgents(
  * - `tools`: compared as sorted {name, active, source} triples. Tool
  *   DESCRIPTIONS are engine-owned constants that legitimately drift between
  *   the engines. Frozen v1 additionally registers `select_tools`; v2 owns the
- *   tower entry point, AITP Research Mode entry, provider-usage query, and
- *   subagent-preset mutation. Those engine-specific tools are projected out.
+ *   tower entry point, provider-usage query, and subagent-preset mutation.
+ *   Those engine-specific tools are projected out.
  *   A model-less agent's roster is not compared at all (v1 initializes builtin
  *   tools only on a profiled agent; v2 exposes them unbound).
  */
@@ -563,7 +562,7 @@ async function closeAll(...harnesses: readonly KimiHarness[]): Promise<void> {
  * and skew the comparison; the original values are restored on cleanup.
  */
 const CONFIG_ENV_PATTERN =
-  /^(KIMI_MODEL_|KIMI_LOOP_|KIMI_MCP_|KIMI_WEB_|KIMI_IMAGE_|KIMI_CODE_BACKGROUND_|KIMI_CODE_MODEL_CATALOG_|KIMI_CODE_EXPERIMENTAL_AITP_RESEARCH_MODE$|KIMI_CODE_EXPERIMENTAL_FLAG$)/;
+  /^(KIMI_MODEL_|KIMI_LOOP_|KIMI_MCP_|KIMI_WEB_|KIMI_IMAGE_|KIMI_CODE_BACKGROUND_|KIMI_CODE_MODEL_CATALOG_|KIMI_CODE_EXPERIMENTAL_FLAG$)/;
 
 function scrubConfigEnv(): () => void {
   const saved: Record<string, string> = {};

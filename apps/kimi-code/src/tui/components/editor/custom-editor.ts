@@ -120,6 +120,8 @@ interface CustomEditorOptions {
 
 export class CustomEditor extends Editor {
   public onEscape?: () => void;
+  /** Open the research/agent directory from an empty prompt. */
+  public onEmptyLeft?: () => boolean;
   /**
    * Fired for every input that is not a lone Escape. Used to disarm a pending
    * double-Esc so only two consecutive Escape presses trigger the shortcut.
@@ -377,6 +379,11 @@ export class CustomEditor extends Editor {
         this.consumingPaste = false;
         this.consumeBuffer = '';
       }
+      return;
+    }
+
+    if (matchesKey(normalized, Key.left) && this.inputMode === 'prompt' &&
+        this.getText() === '' && !this.isShowingAutocomplete() && this.onEmptyLeft?.()) {
       return;
     }
 

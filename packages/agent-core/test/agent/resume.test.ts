@@ -1764,4 +1764,28 @@ describe('limitAgentReplayByTurns', () => {
     // trailing reminder stays attached to the last kept turn.
     expect(limited).toEqual(records.slice(11));
   });
+
+  it('treats cron fires and missed deliveries as turn boundaries', () => {
+    const cronRound = (i: number): AgentReplayRecord[] => [
+      replayMessage('user', `cron fire ${i}`, {
+        kind: 'cron_job',
+        jobId: 'job-1',
+        cron: '*/15 * * * *',
+        recurring: true,
+        coalescedCount: 1,
+        stale: false,
+      }),
+      replayMessage('assistant', `cron report ${i}`),
+    ];
+    const records = [
+      replayMessage('user', 'manual prompt', { kind: 'user' }),
+      ...Array.from({ length: 20 }, (_, i) => cronRound(i)).flat(),
+      replayMessage('user', 'missed delivery', { kind: 'cron_missed', count: 3 }),
+      replayMessage('assistant', 'missed report'),
+    ];
+    const limited = limitAgentReplayByTurns(records, 3);
+    // The manual prompt and the first 18 cron turns fall away: a cron-only
+    // history must be trimmed too, not mounted whole.
+    expect(limited).toEqual(records.slice(37));
+  });
 });

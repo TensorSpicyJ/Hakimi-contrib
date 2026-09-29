@@ -181,6 +181,15 @@ class FakeTaskService implements IAgentTaskService {
     } as AgentTaskInfo;
   }
 
+  async suppressAllTerminalNotifications(): Promise<void> {
+    for (const entry of this.entries.values()) {
+      entry.info = {
+        ...entry.info,
+        terminalNotificationSuppressed: true,
+      } as AgentTaskInfo;
+    }
+  }
+
   detach(taskId: string): AgentTaskInfo | undefined {
     const entry = this.entries.get(taskId);
     if (entry === undefined) return undefined;

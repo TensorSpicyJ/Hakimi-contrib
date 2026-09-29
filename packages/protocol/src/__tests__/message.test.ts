@@ -89,6 +89,29 @@ describe('messageContentSchema variants', () => {
     expect(parsed.source.kind).toBe('file');
   });
 
+  it('preserves optional media attachment names and rejects blank names', () => {
+    expect(imageContentSchema.parse({
+      type: 'image',
+      source: { kind: 'url', url: 'https://example.com/a.png' },
+      name: 'photo.png',
+    }).name).toBe('photo.png');
+    expect(videoContentSchema.parse({
+      type: 'video',
+      source: { kind: 'url', url: 'https://example.com/a.mp4' },
+      name: 'clip.mp4',
+    }).name).toBe('clip.mp4');
+    expect(imageContentSchema.safeParse({
+      type: 'image',
+      source: { kind: 'url', url: 'https://example.com/a.png' },
+      name: '',
+    }).success).toBe(false);
+    expect(videoContentSchema.safeParse({
+      type: 'video',
+      source: { kind: 'url', url: 'https://example.com/a.mp4' },
+      name: '',
+    }).success).toBe(false);
+  });
+
   it('parses file content', () => {
     const parsed = fileContentSchema.parse({
       type: 'file',

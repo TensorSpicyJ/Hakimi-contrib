@@ -58,21 +58,20 @@ describe('BootstrapService (scoped)', () => {
 });
 
 describe('resolveBootstrapOptions', () => {
-  it('prefers explicit homeDir over KIMI_CODE_HOME over osHomeDir', () => {
-    expect(
-      resolveBootstrapOptions({ homeDir: '/a', osHomeDir: '/b', env: {}, clientIdentity: stubClientIdentity })
-        .homeDir,
-    ).toBe('/a');
+  it.each([
+    { homeDir: '/explicit', env: { HAKIMI_HOME: '/hakimi', KIMI_CODE_HOME: '/legacy' }, expected: '/explicit' },
+    { homeDir: undefined, env: { HAKIMI_HOME: '/hakimi', KIMI_CODE_HOME: '/legacy' }, expected: '/hakimi' },
+    { homeDir: undefined, env: { KIMI_CODE_HOME: '/legacy' }, expected: '/legacy' },
+    { homeDir: undefined, env: {}, expected: '/users/example/.hakimi' },
+  ])('resolves config under $expected for the selected home', ({ homeDir, env, expected }) => {
     expect(
       resolveBootstrapOptions({
-        osHomeDir: '/b',
-        env: { KIMI_CODE_HOME: '/c' },
+        homeDir,
+        osHomeDir: '/users/example',
+        env,
         clientIdentity: stubClientIdentity,
-      }).homeDir,
-    ).toBe('/c');
-    expect(
-      resolveBootstrapOptions({ osHomeDir: '/b', env: {}, clientIdentity: stubClientIdentity }).homeDir,
-    ).toBe('/b/.kimi-code');
+      }),
+    ).toMatchObject({ homeDir: expected, configPath: `${expected}/config.toml` });
   });
 
   it('passes through an explicit clientIdentity', () => {

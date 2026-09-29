@@ -26,8 +26,6 @@ import type {
   KimiEventConnection,
   ProviderUsageResult,
   QuestionResponse,
-  ResearchCommand,
-  ResearchStatusSnapshot,
 } from '../../api/types';
 import {
   loadWorkspaceNameOverrides,
@@ -49,7 +47,6 @@ import type {
 } from '../../types';
 import type { ExtendedState, PromptAttachment } from '../useKimiWebClient';
 import type { UseModelProviderState } from './useModelProviderState';
-import type { ResearchRequestCoordinator } from './researchRequest';
 import type { UseSideChat } from './useSideChat';
 import type { UseTaskPoller } from './useTaskPoller';
 
@@ -60,7 +57,6 @@ const MESSAGES_PAGE_SIZE = 50;
 export const SESSIONS_INITIAL_PAGE_SIZE = 5;
 const PROMPT_NOT_FOUND_CODE = 40402;
 const WORKSPACE_NOT_FOUND_CODE = 40410;
-const VALIDATION_FAILED_CODE = 40001;
 // Shared "already resolved" conflict (40902). The daemon reuses it for both
 // approvals and questions when a second client races the resolve, so a
 // duplicate submit is reported as a conflict even though the desired end
@@ -244,8 +240,6 @@ export interface UseWorkspaceStateDeps {
   hasLoadedMessages: (sessionId: string) => boolean;
   refreshSessionStatus: (sessionId: string) => Promise<void>;
   refreshSessionGoal: (sessionId: string) => Promise<void>;
-  refreshSessionResearch: (sessionId: string) => Promise<ResearchStatusSnapshot | null>;
-  researchRequests: ResearchRequestCoordinator;
   /** Persist profile fields to the daemon. Resolves false (after surfacing the
    *  failure itself) when the daemon rejected the patch — awaited callers that
    *  order strictly after the profile must NOT proceed on false. */
@@ -301,8 +295,6 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     hasLoadedMessages,
     refreshSessionStatus,
     refreshSessionGoal,
-    refreshSessionResearch,
-    researchRequests,
     persistSessionProfile,
     mergedWorkspaces,
     workspacesView,
@@ -375,7 +367,6 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     void loadGitStatus(sessionId);
     void refreshSessionStatus(sessionId);
     void refreshSessionGoal(sessionId);
-    void refreshSessionResearch(sessionId);
     if (!Object.prototype.hasOwnProperty.call(modelProvider.skillsBySession.value, sessionId)) {
       void modelProvider.loadSkillsForSession(sessionId);
     }
@@ -1571,8 +1562,9 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
       const content: import('../../api/types').AppMessageContent[] = [];
       if (text) content.push({ type: 'text', text });
       for (const att of attachments ?? []) {
-        if (att.kind === 'video') content.push({ type: 'video', source: { kind: 'file', fileId: att.fileId } });
-        else if (att.kind === 'file') {
+        if (att.kind === 'video') {
+          content.push({ type: 'video', name: att.name, source: { kind: 'file', fileId: att.fileId } });
+        } else if (att.kind === 'file') {
           content.push({
             type: 'file',
             fileId: att.fileId,
@@ -1580,7 +1572,9 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
             mediaType: att.mediaType || 'application/octet-stream',
             size: att.size ?? 0,
           });
-        } else content.push({ type: 'image', source: { kind: 'file', fileId: att.fileId } });
+        } else {
+          content.push({ type: 'image', name: att.name, source: { kind: 'file', fileId: att.fileId } });
+        }
       }
       if (content.length === 0) {
         rawState.inFlightBySession = { ...rawState.inFlightBySession, [sid]: false };
@@ -1779,8 +1773,9 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     const content: import('../../api/types').AppMessageContent[] = [];
     if (merged) content.push({ type: 'text', text: merged });
     for (const att of mergedAttachments) {
-      if (att.kind === 'video') content.push({ type: 'video', source: { kind: 'file', fileId: att.fileId } });
-      else if (att.kind === 'file') {
+      if (att.kind === 'video') {
+        content.push({ type: 'video', name: att.name, source: { kind: 'file', fileId: att.fileId } });
+      } else if (att.kind === 'file') {
         content.push({
           type: 'file',
           fileId: att.fileId,
@@ -1788,7 +1783,9 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
           mediaType: att.mediaType || 'application/octet-stream',
           size: att.size ?? 0,
         });
-      } else content.push({ type: 'image', source: { kind: 'file', fileId: att.fileId } });
+      } else {
+        content.push({ type: 'image', name: att.name, source: { kind: 'file', fileId: att.fileId } });
+      }
     }
     const tempId = nextOptimisticMsgId();
     const optimisticMsg: AppMessage = {
@@ -2354,57 +2351,6 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
       });
   }
 
-  async function refreshResearchById(
-    sessionId: string,
-  ): Promise<ResearchStatusSnapshot | null> {
-    if (rawState.backend !== 'v2') return null;
-    return refreshSessionResearch(sessionId);
-  }
-
-  async function refreshResearch(): Promise<void> {
-    const sessionId = rawState.activeSessionId;
-    if (!sessionId) return;
-    await refreshResearchById(sessionId);
-  }
-
-  async function commandResearchById(
-    sessionId: string,
-    command: ResearchCommand,
-  ): Promise<ResearchStatusSnapshot | null> {
-    if (rawState.backend !== 'v2') return null;
-    try {
-      // The coordinator serializes same-session POSTs and blocks sidecar GETs
-      // behind the full mutation queue. The resolved value is exactly the
-      // authoritative snapshot that won the response/live-event race.
-      return await researchRequests.mutate(
-        rawState,
-        sessionId,
-        () => {
-          if (rawState.backend !== 'v2') {
-            return Promise.reject(new Error('Research unavailable on legacy backend'));
-          }
-          return getKimiWebApi().commandSessionResearch(sessionId, command);
-        },
-      );
-    } catch (err) {
-      if (isDaemonApiError(err) && err.code === VALIDATION_FAILED_CODE) {
-        // Validation includes stale expectedRevision. Re-read the same session;
-        // an active-session switch must never redirect this recovery request.
-        await refreshSessionResearch(sessionId);
-      }
-      pushOperationFailure('commandResearch', err, { sessionId });
-      return null;
-    }
-  }
-
-  async function commandResearch(
-    command: ResearchCommand,
-  ): Promise<ResearchStatusSnapshot | null> {
-    const sessionId = rawState.activeSessionId;
-    if (!sessionId) return null;
-    return commandResearchById(sessionId, command);
-  }
-
   /** Persist and apply a new permission mode. Approval decisions are owned by
    *  the daemon (auto/yolo are resolved server-side), so any pending approvals
    *  are left for the user to answer explicitly. */
@@ -2964,10 +2910,6 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     toggleGoalMode,
     createGoal,
     controlGoal,
-    refreshResearch,
-    refreshResearchById,
-    commandResearch,
-    commandResearchById,
     setPermission,
     dismissWarning,
     renameSession,

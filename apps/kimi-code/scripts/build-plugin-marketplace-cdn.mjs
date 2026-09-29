@@ -228,6 +228,7 @@ function parseArgs(args) {
   const out = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (arg === '--') continue;
     if (arg === '--plugins-root') {
       out.pluginsRoot = requiredValue(args, ++i, arg);
       continue;

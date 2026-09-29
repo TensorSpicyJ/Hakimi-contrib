@@ -8,6 +8,7 @@ import type { FileData, FilePreviewRequest } from '../types';
 import { copyTextToClipboard } from '../lib/clipboard';
 import SegmentedControl from './ui/SegmentedControl.vue';
 import Button from './ui/Button.vue';
+import Banner from './ui/Banner.vue';
 import IconButton from './ui/IconButton.vue';
 import Icon from './ui/Icon.vue';
 import PanelHeader from './ui/PanelHeader.vue';
@@ -532,6 +533,8 @@ function truncatePath(path: string, maxLen = 55): string {
           <Icon v-else class="fp-check" name="check" size="md" />
         </IconButton>
       </PanelHeader>
+
+      <Banner v-if="file.truncated" variant="warning">{{ t('researchContext.noteTruncated') }}</Banner>
 
       <!-- Body: Markdown -->
       <div v-if="contentKind === 'markdown'" class="fp-body" :class="{ 'fp-markdown': markdownMode === 'preview' }">

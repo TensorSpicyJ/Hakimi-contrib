@@ -11,15 +11,6 @@
       "source": "./official/kimi-datasource"
     },
     {
-      "id": "theory-physics",
-      "tier": "official",
-      "displayName": "Theory Physics",
-      "version": "0.1.2",
-      "description": "Upper-layer routing handbook for sustained theoretical-physics research.",
-      "keywords": ["physics", "research", "derivation", "numerics", "literature"],
-      "source": "./official/theory-physics"
-    },
-    {
       "id": "kimi-webbridge",
       "tier": "official",
       "displayName": "Kimi WebBridge",
@@ -27,6 +18,16 @@
       "description": "Control your real browser from Kimi Code.",
       "keywords": ["browser", "automation", "webbridge"],
       "source": "./official/kimi-webbridge"
+    },
+    {
+      "id": "aitp",
+      "tier": "curated",
+      "displayName": "AITP Research Protocol",
+      "version": "1.1.0",
+      "description": "Skills for theoretical and computational physics research and research notes.",
+      "homepage": "https://github.com/bhjia-phys/AITP-Research-Protocol",
+      "keywords": ["physics", "research", "notes", "skills"],
+      "source": "https://github.com/bhjia-phys/AITP-Research-Protocol/releases/download/v1.1.0/aitp-1.1.0.zip"
     },
     {
       "id": "superpowers",

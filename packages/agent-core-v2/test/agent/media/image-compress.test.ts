@@ -56,9 +56,14 @@ import {
 } from '#/agent/media/image-compress';
 import { sniffImageDimensions } from '#/agent/media/file-type';
 import {
+  DEFAULT_INLINE_IMAGE_BYTE_BUDGET,
+  providerImagePolicy,
+} from '#/agent/media/providerImagePolicy';
+import {
   normalizeImageMime,
   unsupportedImageMimeFromUrl,
 } from '#/agent/media/image-format-policy';
+import '#/kosong/provider/providers/kimi/kimi.contrib';
 
 
 async function solidPng(width: number, height: number, color = 0x3366ccff): Promise<Uint8Array> {
@@ -533,6 +538,25 @@ describe('compressImageForModel — performance', () => {
 });
 
 
+describe('providerImagePolicy', () => {
+  it('uses declared Kimi capabilities and baseline defaults otherwise', () => {
+    const kimi = providerImagePolicy('kimi');
+    expect(kimi.acceptedMimes).toEqual(
+      new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/heic', 'image/heif']),
+    );
+    expect(kimi.inlineByteBudget).toBe(5 * 1024 * 1024);
+
+    for (const providerType of [undefined, 'unknown-provider']) {
+      const baseline = providerImagePolicy(providerType);
+      expect(baseline.acceptedMimes).toEqual(
+        new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']),
+      );
+      expect(baseline.inlineByteBudget).toBe(DEFAULT_INLINE_IMAGE_BYTE_BUDGET);
+    }
+  });
+});
+
+
 describe('compressImageContentParts', () => {
   function dataUrl(mime: string, bytes: Uint8Array): string {
     return `data:${mime};base64,${Buffer.from(bytes).toString('base64')}`;
@@ -608,6 +632,18 @@ describe('compressImageContentParts', () => {
     }
   });
 
+  it('passes Kimi-native BMP, HEIC, and HEIF formats without widening other providers', async () => {
+    for (const mime of ['image/bmp', 'image/heic', 'image/heif']) {
+      const url = dataUrl(mime, new Uint8Array([1, 2, 3]));
+      const parts = [{ type: 'image_url' as const, imageUrl: { url } }];
+      const { parts: kimi } = await compressImageContentParts(parts, { providerType: 'kimi' });
+      expect(kimi[0]).toEqual({ type: 'image_url', imageUrl: { url } });
+
+      const { parts: baseline } = await compressImageContentParts(parts);
+      expect(baseline[0]).toMatchObject({ type: 'text' });
+    }
+  });
+
   it('forwards accepted MIME aliases in canonical form', async () => {
     const bytes = new Uint8Array([1, 2, 3]);
     const base64 = Buffer.from(bytes).toString('base64');
@@ -676,6 +712,13 @@ describe('gateImageFormatParts', () => {
       type: 'image_url',
       imageUrl: { url: `data:image/jpeg;base64,${base64}` },
     });
+  });
+
+  it('keeps Kimi-native inline formats at prompt ingress', () => {
+    const url = dataUrl('image/heic', new Uint8Array([1, 2, 3]));
+    expect(gateImageFormatParts([{ type: 'image_url', imageUrl: { url } }], 'kimi')).toEqual([
+      { type: 'image_url', imageUrl: { url } },
+    ]);
   });
 
   it('rewrites an accepted MIME carrying parameters to the bare canonical form', () => {

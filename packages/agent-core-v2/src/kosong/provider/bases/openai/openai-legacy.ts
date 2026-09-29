@@ -82,7 +82,13 @@ import {
   type ToolMessageConversion,
   toolToOpenAI,
 } from './openai-common';
-import { ReasoningKeyDialect } from './reasoning-key';
+import {
+  convertReasoningDetails,
+  DEFAULT_REASONING_KEY,
+  extractReasoningDetails,
+  REASONING_DETAILS_KEY,
+  ReasoningKeyDialect,
+} from './reasoning-key';
 import {
   mergeRequestHeaders,
   requireProviderApiKey,
@@ -221,12 +227,21 @@ function convertMessage(
 ): OpenAIMessage {
   let reasoningContent = '';
   let hasReasoningPart = false;
+  const reasoningDetails: Record<string, unknown>[] = [];
   const nonThinkParts: ContentPart[] = [];
 
   for (const part of message.content) {
     if (part.type === 'think') {
       hasReasoningPart = true;
       reasoningContent += part.think;
+      if (part.detailsIndex !== undefined) {
+        if (part.think.length > 0) {
+          reasoningDetails.push({ type: 'summary', summary: part.think });
+        }
+        if (part.encrypted !== undefined) {
+          reasoningDetails.push({ type: 'encrypted', encrypted: part.encrypted });
+        }
+      }
     } else {
       nonThinkParts.push(part);
     }
@@ -287,7 +302,10 @@ function convertMessage(
     result.content = '';
   }
 
-  if (hasReasoningPart || (preserveThinking && message.role === 'assistant')) {
+  if (reasoningDetails.length > 0) {
+    result[REASONING_DETAILS_KEY] = reasoningDetails;
+    result[DEFAULT_REASONING_KEY] = reasoningContent;
+  } else if (hasReasoningPart || (preserveThinking && message.role === 'assistant')) {
     result[reasoningKey] = reasoningContent;
   }
 
@@ -447,9 +465,15 @@ export class OpenAILegacyStreamedMessage implements StreamedMessage {
     const message = response.choices[0]?.message;
     if (!message) return;
 
-    const reasoning = reasoningKeyDialect.observe(message);
-    if (reasoning !== undefined) {
-      yield { type: 'think', think: reasoning } satisfies StreamedMessagePart;
+    const reasoningDetails =
+      reasoningKeyDialect.hasExplicitKey() ? undefined : extractReasoningDetails(message);
+    if (reasoningDetails !== undefined) {
+      yield* convertReasoningDetails(reasoningDetails);
+    } else {
+      const reasoning = reasoningKeyDialect.observe(message);
+      if (reasoning !== undefined) {
+        yield { type: 'think', think: reasoning } satisfies StreamedMessagePart;
+      }
     }
 
     if (message.content) {
@@ -496,9 +520,15 @@ export class OpenAILegacyStreamedMessage implements StreamedMessage {
 
         const delta = choice.delta;
 
-        const reasoning = reasoningKeyDialect.observe(delta);
-        if (reasoning !== undefined) {
-          yield { type: 'think', think: reasoning } satisfies StreamedMessagePart;
+        const reasoningDetails =
+          reasoningKeyDialect.hasExplicitKey() ? undefined : extractReasoningDetails(delta);
+        if (reasoningDetails !== undefined) {
+          yield* convertReasoningDetails(reasoningDetails);
+        } else {
+          const reasoning = reasoningKeyDialect.observe(delta);
+          if (reasoning !== undefined) {
+            yield { type: 'think', think: reasoning } satisfies StreamedMessagePart;
+          }
         }
 
         if (delta.content) {

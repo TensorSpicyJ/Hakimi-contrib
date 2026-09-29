@@ -10,13 +10,15 @@ import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
 import { resetUnexpectedErrorHandler, setUnexpectedErrorHandler } from '#/_base/errors/unexpectedError';
-import { Event } from '#/_base/event';
+import { Event, Emitter } from '#/_base/event';
 import { IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
 import { IConfigService } from '#/app/config/config';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentGoalService } from '#/agent/goal/goal';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import type { IAgentScopeHandle } from '#/_base/di/scope';
 import { IGoalDeadlineScheduler } from '#/agent/goal/goalDeadlineScheduler';
 import { GoalDeadlineSchedulerService } from '#/agent/goal/goalDeadlineSchedulerService';
 import { AgentGoalService } from '#/agent/goal/goalService';
@@ -107,12 +109,14 @@ let wire: IWireService;
 let svc: IAgentGoalService;
 let log: IAppendLogStore;
 let eventBus: IEventBus;
+let willClose: Emitter<IAgentScopeHandle>;
 
 function buildHost(key: string): {
   wire: IWireService;
   svc: IAgentGoalService;
   log: IAppendLogStore;
   eventBus: IEventBus;
+  willClose: Emitter<IAgentScopeHandle>;
 } {
   const ix = disposables.add(new TestInstantiationService());
   ix.stub(IFileSystemStorageService, new InMemoryStorageService());
@@ -128,6 +132,14 @@ function buildHost(key: string): {
   ix.stub(ITelemetryService, createTelemetryStub());
   ix.stub(IAgentToolExecutorService, createToolExecutorStub());
   ix.stub(IConfigService, createConfigStub());
+  const willClose = new Emitter<IAgentScopeHandle>();
+  disposables.add(willClose);
+  ix.stub(IAgentLifecycleService, {
+    _serviceBrand: undefined,
+    onDidCreate: Event.None,
+    onDidDispose: Event.None,
+    onWillClose: willClose.event,
+  } as unknown as IAgentLifecycleService);
   ix.set(IAgentStateService, new AgentStateService());
   ix.set(IGoalDeadlineScheduler, new SyncDescriptor(GoalDeadlineSchedulerService));
   const wire = registerTestAgentWire(ix, testWireScope(SCOPE, key), {
@@ -145,6 +157,7 @@ function buildHost(key: string): {
     svc: ix.get(IAgentGoalService),
     log: ix.get(IAppendLogStore),
     eventBus: ix.get(IEventBus),
+    willClose,
   };
 }
 
@@ -155,6 +168,7 @@ beforeEach(() => {
   svc = host.svc;
   log = host.log;
   eventBus = host.eventBus;
+  willClose = host.willClose;
 });
 
 afterEach(() => disposables.dispose());
@@ -417,5 +431,37 @@ describe('AgentGoalService (wire-backed)', () => {
     } finally {
       resetUnexpectedErrorHandler();
     }
+  });
+
+  it('pauses an active goal when the agent closes', async () => {
+    const created = await svc.createGoal({ objective: 'long haul' });
+    expect(created.status).toBe('active');
+
+    willClose.fire({ id: 'main' } as unknown as IAgentScopeHandle);
+
+    expect(svc.getGoal().goal?.status).toBe('paused');
+    expect(svc.getGoal().goal?.terminalReason).toBe('Paused after agent closed');
+    const records = await readRecords();
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        type: 'goal.update',
+        status: 'paused',
+        reason: 'Paused after agent closed',
+      }),
+    );
+  });
+
+  it('ignores a close notification for another agent and for inactive goals', async () => {
+    willClose.fire({ id: 'agent-2' } as unknown as IAgentScopeHandle);
+    expect(svc.getGoal().goal).toBeNull();
+
+    await svc.createGoal({ objective: 'long haul' });
+    await svc.pauseGoal({ reason: 'break' });
+    const paused = modelOf(wire)?.wallClockMs;
+
+    willClose.fire({ id: 'main' } as unknown as IAgentScopeHandle);
+
+    expect(svc.getGoal().goal?.status).toBe('paused');
+    expect(modelOf(wire)?.wallClockMs).toBe(paused);
   });
 });

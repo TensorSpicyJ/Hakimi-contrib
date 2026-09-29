@@ -3,8 +3,8 @@
  *
  * Defines the common approval, review, and decision vocabulary used by transient
  * tool approvals and durable domain-specific gates. The contract deliberately
- * does not own research state or plan state; those domains retain their own
- * durable records while sharing the same interaction transport. Scope-agnostic.
+ * does not own durable domain state; each domain retains its own records while
+ * sharing the same interaction transport. Scope-agnostic.
  */
 
 import { createDecorator } from '#/_base/di/instantiation';

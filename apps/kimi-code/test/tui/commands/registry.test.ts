@@ -3,7 +3,6 @@ import {
   findBuiltInSlashCommand,
   parseSlashInput,
   presetArgumentCompletions,
-  researchArgumentCompletions,
   resolveSlashCommandAvailability,
   addDirArgumentCompletions,
   sortSlashCommands,
@@ -31,6 +30,13 @@ describe('parseSlashInput', () => {
 });
 
 describe('built-in slash command registry', () => {
+  it('research navigation when a turn is active is idle-only while status stays readable', () => {
+    const research = findBuiltInSlashCommand('research');
+    expect(research).toBeDefined();
+    expect(resolveSlashCommandAvailability(research!, 'status')).toBe('always');
+    expect(resolveSlashCommandAvailability(research!, 'back')).toBe('idle-only');
+    expect(resolveSlashCommandAvailability(research!, 'off')).toBe('idle-only');
+  });
   it('finds built-ins by name or alias', () => {
     expect(findBuiltInSlashCommand('exit')?.name).toBe('exit');
     expect(findBuiltInSlashCommand('quit')?.name).toBe('exit');
@@ -220,39 +226,8 @@ describe('built-in slash command registry', () => {
     expect(resolveSlashCommandAvailability(command!, '')).toBe('always');
   });
 
-  it('registers research without an experimental gate and with subcommand-aware availability', () => {
-    const research = findBuiltInSlashCommand('research');
-    expect(research).toBeDefined();
-    expect((research as KimiSlashCommand).experimentalFlag).toBeUndefined();
-    // status / pause / resume are always available
-    expect(resolveSlashCommandAvailability(research!, '')).toBe('always');
-    expect(resolveSlashCommandAvailability(research!, 'status')).toBe('always');
-    expect(resolveSlashCommandAvailability(research!, 'pause')).toBe('always');
-    expect(resolveSlashCommandAvailability(research!, 'resume')).toBe('always');
-    // on / off / manage / alignment / question actions are idle-only
-    expect(resolveSlashCommandAvailability(research!, 'on')).toBe('idle-only');
-    expect(resolveSlashCommandAvailability(research!, 'off')).toBe('idle-only');
-    expect(resolveSlashCommandAvailability(research!, 'manage')).toBe('idle-only');
-    expect(resolveSlashCommandAvailability(research!, 'align same_program_goal')).toBe('idle-only');
-    expect((research as KimiSlashCommand).argumentHint).toContain('align <relation>');
-    expect(resolveSlashCommandAvailability(research!, 'edit q1 -- text')).toBe('idle-only');
-    expect(resolveSlashCommandAvailability(research!, 'focus q1 -- action')).toBe('idle-only');
-    expect(resolveSlashCommandAvailability(research!, 'defer q1')).toBe('idle-only');
-  });
-
-  it('offers research subcommand argument completions', () => {
-    const values = (prefix: string): string[] | null => {
-      const items = researchArgumentCompletions(prefix);
-      return items === null ? null : items.map((item) => item.value);
-    };
-    expect(values('')).toEqual([
-      'status', 'on', 'off', 'pause', 'resume', 'manage', 'align',
-      'edit', 'focus', 'defer', 'block', 'close', 'reopen', 'line',
-    ]);
-    expect(values('s')).toEqual(['status']);
-    expect(values('st')).toEqual(['status']);
-    expect(values('status')).toBeNull();
-    // After a space, completion returns null (free text)
-    expect(researchArgumentCompletions('on ')).toBeNull();
+  it('offers research navigation and mode controls', () => {
+    const research = findBuiltInSlashCommand('research') as KimiSlashCommand;
+    expect(research.completeArgs?.('')?.map((option) => option.value)).toEqual(['status', 'agents', 'back', 'on', 'off']);
   });
 });

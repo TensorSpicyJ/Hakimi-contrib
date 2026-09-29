@@ -28,6 +28,14 @@ const SWARM_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
   { value: 'off', description: 'Turn swarm mode off' },
 ];
 
+const RESEARCH_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
+  { value: 'status', description: 'Show the current research question and note' },
+  { value: 'agents', description: 'Browse foreground and background agents' },
+  { value: 'back', description: 'Return to the parent research topic' },
+  { value: 'on', description: 'Enable AITP research mode' },
+  { value: 'off', description: 'Disable research mode for this session' },
+];
+
 const PRESET_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
   { value: 'edit', description: 'Create or configure an agent preset' },
   { value: 'off', description: 'Clear the active subagent preset' },
@@ -50,29 +58,6 @@ export function goalArgumentCompletions(argumentPrefix: string): AutocompleteIte
     );
   }
   return completeLeadingArg(GOAL_ARG_COMPLETIONS, argumentPrefix);
-}
-
-/** Subcommands offered when autocompleting `/research <…>`. */
-const RESEARCH_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
-  { value: 'status', description: 'Show research mode status' },
-  { value: 'on', description: 'Enter research mode' },
-  { value: 'off', description: 'Exit research mode' },
-  { value: 'pause', description: 'Pause the research loop' },
-  { value: 'resume', description: 'Resume the research loop' },
-  { value: 'manage', description: 'Open the question manager' },
-  { value: 'align', description: 'Confirm or clear Goal-to-AITP alignment' },
-  { value: 'edit', description: 'Edit a question' },
-  { value: 'focus', description: 'Set focus on a question' },
-  { value: 'defer', description: 'Defer a question' },
-  { value: 'block', description: 'Block a question' },
-  { value: 'close', description: 'Close a question' },
-  { value: 'reopen', description: 'Reopen a question' },
-  { value: 'line', description: 'Switch research line' },
-];
-
-/** Argument autocompletion for the `/research` command (subcommands). */
-export function researchArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
-  return completeLeadingArg(RESEARCH_ARG_COMPLETIONS, argumentPrefix);
 }
 
 /** Argument autocompletion for the `/swarm` command (subcommands). */
@@ -347,19 +332,11 @@ export const BUILTIN_SLASH_COMMANDS = [
   {
     name: 'research',
     aliases: [],
-    description: 'Manage AITP Research Mode',
+    description: 'Browse AITP research topics and the current question',
     priority: 80,
-    argumentHint:
-      '[status|on|off|pause|resume|manage|align <relation>|edit|focus|defer|block|close|reopen|line] | <questionId>',
-    completeArgs: researchArgumentCompletions,
-    // status / pause / resume are safe while streaming; on / off / manage /
-    // alignment / question actions start or steer a turn and so are idle-only.
-    availability: (args) => {
-      const trimmed = args.trim();
-      return trimmed === '' || trimmed === 'status' || trimmed === 'pause' || trimmed === 'resume'
-        ? 'always'
-        : 'idle-only';
-    },
+    argumentHint: '[status|agents|back|on|off|<note path>]',
+    completeArgs: (prefix) => completeLeadingArg(RESEARCH_ARG_COMPLETIONS, prefix),
+    availability: (args) => ['status', 'agents'].includes(args.trim()) ? 'always' : 'idle-only',
   },
   {
     name: 'preset',

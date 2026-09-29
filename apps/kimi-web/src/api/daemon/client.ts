@@ -7,6 +7,8 @@ import { traceKeyEvent } from '../../debug/trace';
 import type {
   AppConfig,
   AppGoal,
+  AppResearchSnapshot,
+  AppResearchNote,
   AppMessage,
   AppMessageRole,
   AppModel,
@@ -34,8 +36,6 @@ import type {
   PromptSubmission,
   PromptSubmitResult,
   QuestionResponse,
-  ResearchCommand,
-  ResearchStatusSnapshot,
 } from '../types';
 import { createAgentProjector } from './agentEventProjector';
 import { DaemonHttpClient } from './http';
@@ -50,7 +50,6 @@ import {
   toAppProvider,
   toAppProviderUsageResult,
   toAppQuestionRequest,
-  toAppResearchSnapshot,
   toAppSession,
   toAppTask,
   toWireApprovalResponse,
@@ -81,8 +80,6 @@ import type {
   WireProvider,
   WireProviderRefreshResult,
   WireProviderUsageResponse,
-  WireResearchCommandResponse,
-  WireResearchStatusSnapshot,
   WireSession,
   WireSessionAbortResult,
   WireSessionWarning,
@@ -485,29 +482,27 @@ export class DaemonKimiWebApi implements KimiWebApi {
     return toAppGoal(data);
   }
 
-  async getSessionResearch(sessionId: string): Promise<ResearchStatusSnapshot> {
-    const data = await this.http.get<WireResearchStatusSnapshot>(
-      `/sessions/${encodeURIComponent(sessionId)}/research`,
-    );
-    return toAppResearchSnapshot(data);
-  }
-
-  async commandSessionResearch(
-    sessionId: string,
-    command: ResearchCommand,
-  ): Promise<ResearchStatusSnapshot> {
-    const data = await this.http.post<WireResearchCommandResponse>(
-      `/sessions/${encodeURIComponent(sessionId)}/research/command`,
-      { command },
-    );
-    return toAppResearchSnapshot(data.snapshot);
-  }
-
   async getSessionWarnings(sessionId: string): Promise<WireSessionWarning[]> {
     const data = await this.http.get<WireSessionWarningsResponse>(
       `/sessions/${encodeURIComponent(sessionId)}/warnings`,
     );
     return data.warnings ?? [];
+  }
+
+  // Research snapshots use camelCase on the wire, like goal snapshots.
+  async getSessionResearch(sessionId: string): Promise<AppResearchSnapshot> {
+    return this.http.get<AppResearchSnapshot>(`/sessions/${encodeURIComponent(sessionId)}/research`);
+  }
+
+  async getSessionResearchNote(sessionId: string): Promise<AppResearchNote | null> {
+    return this.http.get<AppResearchNote | null>(`/sessions/${encodeURIComponent(sessionId)}/research/note`);
+  }
+
+  async updateSessionResearch(
+    sessionId: string,
+    input: { path: string } | { enabled: boolean },
+  ): Promise<AppResearchSnapshot> {
+    return this.http.post<AppResearchSnapshot>(`/sessions/${encodeURIComponent(sessionId)}/research`, input);
   }
 
   async archiveSession(sessionId: string): Promise<{ archived: true }> {

@@ -152,6 +152,7 @@ export function defineKlientConformance(
     it('session skills.list returns the workspace skills as summaries', async () => {
       const workDir = await mkdtemp(join(tmpdir(), 'klient-conf-skills-'));
       try {
+        await mkdir(join(workDir, '.git'));
         await mkdir(join(workDir, '.kimi-code', 'skills', 'conf-skill'), { recursive: true });
         await writeFile(
           join(workDir, '.kimi-code', 'skills', 'conf-skill', 'SKILL.md'),
@@ -167,6 +168,28 @@ export function defineKlientConformance(
           });
         } finally {
           await target.klient.session(created.id).close();
+        }
+      } finally {
+        await rm(workDir, { recursive: true, force: true });
+      }
+    });
+
+    it('research navigation when a branch is selected survives session restoration', async () => {
+      const workDir = await mkdtemp(join(tmpdir(), 'klient-conf-research-'));
+      try {
+        await mkdir(join(workDir, 'branch'));
+        await writeFile(join(workDir, 'research.md'), '# Green functions and topology\n\nWhich invariant survives interactions?\n');
+        await writeFile(join(workDir, 'branch/research.md'), '# Noninteracting control\n\nCompare the Green function invariant with the band result.\n');
+        const created = await target.klient.global.sessions.create({ workDir });
+        const session = target.klient.session(created.id);
+        try {
+          expect(await session.research.snapshot()).toMatchObject({ enabled: true, current: { title: 'Green functions and topology' } });
+          expect(await session.research.select('branch/research.md')).toMatchObject({ current: { title: 'Noninteracting control' }, parent: { title: 'Green functions and topology' } });
+          await session.close();
+          await session.restore();
+          expect(await session.research.snapshot()).toMatchObject({ current: { title: 'Noninteracting control' } });
+        } finally {
+          await session.close();
         }
       } finally {
         await rm(workDir, { recursive: true, force: true });

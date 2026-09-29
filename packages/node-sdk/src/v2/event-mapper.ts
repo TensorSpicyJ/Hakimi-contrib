@@ -23,9 +23,7 @@ import type { DomainEvent } from '@moonshot-ai/agent-core-v2';
  *   (kap-server folds it into the `agent.status.updated` phase slice at the WS
  *   edge), `context.spliced`, `task.notified`, `plan.revision`, and the
  *   `permission.approval.*` pair (v1 surfaces approvals through the
- *   `requestApproval` callback, never as events), plus
- *   `research.revision_advanced` (an in-process post-apply signal; clients see
- *   only the resulting full `research.updated` snapshot).
+ *   `requestApproval` callback, never as events).
  * - `prompt.*`: the v2 prompt service publishes them on the agent bus, but in
  *   v1 they are synthesized by the daemon services layer onto the global
  *   `IEventService` — the in-process SDK client never sees them.
@@ -35,7 +33,6 @@ const DROPPED_DOMAIN_EVENT_TYPES: ReadonlySet<string> = new Set([
   'context.spliced',
   'task.notified',
   'plan.revision',
-  'research.revision_advanced',
   'permission.approval.requested',
   'permission.approval.resolved',
   'prompt.submitted',

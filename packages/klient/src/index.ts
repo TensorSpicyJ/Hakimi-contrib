@@ -71,8 +71,6 @@ export type {
   AgentFacade,
   AgentGoalFacade,
   AgentTaskInfo,
-  ClearLineWorkstreamBindingInput,
-  ConfirmLineWorkstreamBindingInput,
   McpServerEntry,
   PlanData,
   PromptLaunchResult,

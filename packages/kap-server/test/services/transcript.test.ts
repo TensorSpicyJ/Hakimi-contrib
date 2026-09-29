@@ -1175,8 +1175,8 @@ describe('AgentTranscriptProjector', () => {
       budget: { tokenBudget: 50000 },
       continuation: {
         state: 'held' as const,
-        owner: 'research',
-        reason: 'A research checkpoint is pending commit.',
+        owner: 'test-participant',
+        reason: 'A continuation participant is holding the goal.',
       },
     };
 
@@ -1387,14 +1387,16 @@ describe('AgentTranscriptProjector', () => {
   });
 
   it('projects plan.revision as a marker and refines the active plan badge', () => {
-    const projector = new AgentTranscriptProjector('main');
+    const projector = new AgentTranscriptProjector('main', {
+      resolvePlanRevisionKey: (key) => `sessions/w/s/agents/main/${key}`,
+    });
     const tx = new AgentTranscript('main');
 
     const revision = {
       type: 'plan.revision',
       id: 'plan-1',
       version: 1,
-      path: 'agents/main/plan/plan-1/v1.md',
+      key: 'plan/plan-1/v1.md',
       sha256: 'deadbeef',
       bytes: 128,
     };
@@ -1407,14 +1409,14 @@ describe('AgentTranscriptProjector', () => {
     tx.apply(projector.map(ev({ type: 'agent.status.updated', planMode: true })));
     expect(tx.getMeta().modes).toEqual({ plan: {} });
     tx.apply(
-      projector.map(ev({ ...revision, version: 2, path: 'agents/main/plan/plan-1/v2.md' })),
+      projector.map(ev({ ...revision, version: 2, key: 'plan/plan-1/v2.md' })),
     );
     expect(tx.getMeta().modes).toEqual({
-      plan: { reviewPath: 'agents/main/plan/plan-1/v2.md', version: 2 },
+      plan: { reviewPath: 'sessions/w/s/agents/main/plan/plan-1/v2.md', version: 2 },
     });
 
     // Both revisions stay in the timeline (live marker namespace), payload =
-    // the reference fields.
+    // the reference fields plus the resolved display path.
     const markers = tx
       .getItems()
       .filter((item) => item.kind === 'marker' && item.marker === 'plan.revision');
@@ -1426,7 +1428,7 @@ describe('AgentTranscriptProjector', () => {
       payload: {
         id: 'plan-1',
         version: 2,
-        path: 'agents/main/plan/plan-1/v2.md',
+        path: 'sessions/w/s/agents/main/plan/plan-1/v2.md',
         sha256: 'deadbeef',
         bytes: 128,
       },

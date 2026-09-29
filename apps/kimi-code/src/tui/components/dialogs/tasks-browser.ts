@@ -32,9 +32,11 @@ import { sanitizeShellOutput } from '#/tui/utils/shell-output';
 const ELLIPSIS = '…';
 
 export type TasksFilter = 'all' | 'active';
+export type TasksView = 'background' | 'agents';
 
 export interface TasksBrowserProps {
   readonly tasks: readonly BackgroundTaskInfo[];
+  readonly view?: TasksView;
   readonly filter: TasksFilter;
   readonly selectedTaskId: string | undefined;
   readonly tailOutput: string | undefined;
@@ -127,17 +129,17 @@ function fitExactly(line: string, width: number): string {
   return padToWidth(s, width);
 }
 
-function visibleTasks(
+export function visibleTasks(
   tasks: readonly BackgroundTaskInfo[],
   filter: TasksFilter,
+  view: TasksView = 'background',
 ): BackgroundTaskInfo[] {
   // The /tasks panel is for background task management. Foreground tasks
   // (detached === false) are shown in the main transcript instead, and only
   // appear here after being detached via Ctrl+B. `detached !== false` keeps
   // reconcile ghosts whose `detached` field may be undefined.
-  const backgroundOnly = tasks.filter((t) => t.detached !== false);
-  if (filter === 'all') return [...backgroundOnly];
-  return backgroundOnly.filter((t) => !isTerminal(t.status));
+  const candidates = tasks.filter((t) => view === 'agents' ? t.kind === 'agent' : t.detached !== false);
+  return filter === 'all' ? candidates : candidates.filter((t) => !isTerminal(t.status));
 }
 
 function compareTasks(a: BackgroundTaskInfo, b: BackgroundTaskInfo): number {
@@ -190,13 +192,13 @@ export class TasksBrowserApp extends Container implements Focusable {
     super();
     this.props = props;
     this.terminal = terminal;
-    this.sortedVisible = visibleTasks(props.tasks, props.filter).toSorted(compareTasks);
+    this.sortedVisible = visibleTasks(props.tasks, props.filter, props.view).toSorted(compareTasks);
     this.syncSelectionFromProps();
   }
 
   setProps(next: TasksBrowserProps): void {
     this.props = next;
-    this.sortedVisible = visibleTasks(next.tasks, next.filter).toSorted(compareTasks);
+    this.sortedVisible = visibleTasks(next.tasks, next.filter, next.view).toSorted(compareTasks);
     this.syncSelectionFromProps();
     if (this.pendingStopTaskId !== undefined) {
       const task = next.tasks.find((t) => t.taskId === this.pendingStopTaskId);
@@ -252,7 +254,7 @@ export class TasksBrowserApp extends Container implements Focusable {
       return;
     }
 
-    if (matchesKey(data, Key.escape) || k === 'q' || k === 'Q') {
+    if ((this.props.view === 'agents' && matchesKey(data, Key.left)) || matchesKey(data, Key.escape) || k === 'q' || k === 'Q') {
       this.props.onCancel();
       return;
     }
@@ -334,7 +336,7 @@ export class TasksBrowserApp extends Container implements Focusable {
   // ── header / footer ──────────────────────────────────────────────────
 
   private renderHeader(width: number): string {
-    const title = currentTheme.boldFg('primary', ' TASK BROWSER ');
+    const title = currentTheme.boldFg('primary', this.props.view === 'agents' ? ' AGENT DIRECTORY ' : ' TASK BROWSER ');
     const filterText = currentTheme.fg(
       'textMuted',
       ` filter=${this.props.filter === 'all' ? 'ALL' : 'ACTIVE'} `,
@@ -342,7 +344,7 @@ export class TasksBrowserApp extends Container implements Focusable {
     // Count only the tasks actually listed (background tasks after the
     // foreground-task filter), so a foreground-only session doesn't read
     // "1 running / 1 total" above an empty list.
-    const visible = visibleTasks(this.props.tasks, this.props.filter);
+    const visible = visibleTasks(this.props.tasks, this.props.filter, this.props.view);
     const counts = countByStatus(visible);
     const countSegments: string[] = [];
     if (counts.running > 0)
@@ -377,7 +379,7 @@ export class TasksBrowserApp extends Container implements Focusable {
       `${key('S')} ${dim('stop')}`,
       `${key('R')} ${dim('refresh')}`,
       `${key('Tab')} ${dim('filter')}`,
-      `${key('Q/Esc')} ${dim('cancel')} `,
+      `${key(this.props.view === 'agents' ? '←/Q/Esc' : 'Q/Esc')} ${dim('cancel')} `,
     ];
     const left = parts.join('  ');
     const flash = this.props.flashMessage;
@@ -439,14 +441,16 @@ export class TasksBrowserApp extends Container implements Focusable {
   // ── left: task list frame ────────────────────────────────────────────
 
   private renderListFrame(width: number, height: number): string[] {
-    const title = `Tasks [${this.props.filter}]`;
+    const title = `${this.props.view === 'agents' ? 'Agents' : 'Tasks'} [${this.props.filter}]`;
     const innerHeight = Math.max(0, height - 2);
 
     if (this.sortedVisible.length === 0) {
       const empty =
         this.props.filter === 'active'
           ? 'No active tasks. Tab = show all.'
-          : 'No background tasks in this session.';
+          : this.props.view === 'agents'
+            ? 'No delegated agents in this session.'
+            : 'No background tasks in this session.';
       const lines: string[] = [currentTheme.fg('textMuted', empty)];
       while (lines.length < innerHeight) lines.push('');
       return this.renderFrame(title, lines, width, height);

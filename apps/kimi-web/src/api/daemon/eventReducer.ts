@@ -22,7 +22,6 @@ import type {
   AppSession,
   AppTask,
   CompactionMarkerMetadata,
-  ResearchStatusSnapshot,
 } from '../types';
 import { COMPACTION_MARKER_METADATA_KEY } from '../types';
 import { i18n } from '../../i18n';
@@ -68,13 +67,6 @@ export interface KimiClientState {
    *  including delete/clear ones — so an async recovery read can detect that a
    *  live event won the race even when the goal entry stayed absent. */
   goalVersionBySession: Record<string, number>;
-  researchBySession: Record<string, ResearchStatusSnapshot>;
-  /** Monotonic live-event generation used to keep a cold GET from replacing a
-   *  newer `research.updated` snapshot. HTTP command responses do not bump it. */
-  researchVersionBySession: Record<string, number>;
-  /** Shared GET/mutation generation. Only the latest Research request for a
-   *  session may commit, regardless of which response arrives first. */
-  researchRequestGenerationBySession: Record<string, number>;
   lastSeqBySession: Record<string, number>;
   /** MAIN-agent turn in flight, per session — set from the main agent's
    *  turn.started/turn.ended boundary events and seeded from the snapshot's
@@ -97,9 +89,6 @@ export function createInitialState(): KimiClientState {
     tasksBySession: {},
     goalBySession: {},
     goalVersionBySession: {},
-    researchBySession: {},
-    researchVersionBySession: {},
-    researchRequestGenerationBySession: {},
     lastSeqBySession: {},
     turnActiveBySession: {},
     compactionBySession: {},
@@ -128,9 +117,6 @@ function cloneState(s: KimiClientState): KimiClientState {
     tasksBySession: { ...s.tasksBySession },
     goalBySession: { ...s.goalBySession },
     goalVersionBySession: { ...s.goalVersionBySession },
-    researchBySession: { ...s.researchBySession },
-    researchVersionBySession: { ...s.researchVersionBySession },
-    researchRequestGenerationBySession: { ...s.researchRequestGenerationBySession },
     lastSeqBySession: { ...s.lastSeqBySession },
     turnActiveBySession: { ...s.turnActiveBySession },
     compactionBySession: { ...s.compactionBySession },
@@ -365,9 +351,6 @@ export function reduceAppEvent(
       delete next.tasksBySession[id];
       delete next.goalBySession[id];
       delete next.goalVersionBySession[id];
-      delete next.researchBySession[id];
-      delete next.researchVersionBySession[id];
-      delete next.researchRequestGenerationBySession[id];
       delete next.approvalsBySession[id];
       delete next.questionsBySession[id];
       delete next.lastSeqBySession[id];
@@ -742,14 +725,6 @@ export function reduceAppEvent(
       } else {
         next.goalBySession[sid] = event.goal;
       }
-      break;
-    }
-
-    case 'researchUpdated': {
-      const sid = event.sessionId;
-      next.researchBySession[sid] = event.snapshot;
-      next.researchVersionBySession[sid] =
-        (next.researchVersionBySession[sid] ?? 0) + 1;
       break;
     }
 

@@ -330,11 +330,10 @@ describe('KimiHarness config API', () => {
   it('returns experimental feature metadata without graduated capabilities', async () => {
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '0');
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_OPENAI_CODEX_OAUTH', '0');
-    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_AITP_RESEARCH_MODE', '0');
     const homeDir = await makeTempDir();
     await writeFile(
       join(homeDir, 'config.toml'),
-      '[experimental]\nopenai-codex-oauth = false\naitp_research_mode = true\n',
+      '[experimental]\nopenai-codex-oauth = false\n',
       'utf8',
     );
     const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
@@ -369,11 +368,10 @@ describe('KimiHarness config API', () => {
   it.each(['0', '1'])('keeps graduated env and config inputs inert (%s)', async (value) => {
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '0');
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_OPENAI_CODEX_OAUTH', value);
-    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_AITP_RESEARCH_MODE', value);
     const homeDir = await makeTempDir();
     await writeFile(
       join(homeDir, 'config.toml'),
-      `[experimental]\nopenai-codex-oauth = ${value === '1'}\naitp_research_mode = ${value !== '1'}\n`,
+      `[experimental]\nopenai-codex-oauth = ${value === '1'}\n`,
       'utf8',
     );
     const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
@@ -382,7 +380,6 @@ describe('KimiHarness config API', () => {
       const features = await harness.getExperimentalFeatures();
       const ids = features.map((feature) => feature.id);
       expect(ids).not.toContain('openai-codex-oauth');
-      expect(ids).not.toContain('aitp_research_mode');
       expect(features.every((feature) => !feature.enabled)).toBe(true);
     } finally {
       await harness.close();
@@ -392,11 +389,10 @@ describe('KimiHarness config API', () => {
   it('keeps the master switch effective for remaining experimental flags', async () => {
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '1');
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_OPENAI_CODEX_OAUTH', '0');
-    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_AITP_RESEARCH_MODE', '0');
     const homeDir = await makeTempDir();
     await writeFile(
       join(homeDir, 'config.toml'),
-      '[experimental]\nopenai-codex-oauth = false\naitp_research_mode = false\n',
+      '[experimental]\nopenai-codex-oauth = false\n',
       'utf8',
     );
     const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
@@ -405,7 +401,6 @@ describe('KimiHarness config API', () => {
       const features = await harness.getExperimentalFeatures();
       const ids = features.map((feature) => feature.id);
       expect(ids).not.toContain('openai-codex-oauth');
-      expect(ids).not.toContain('aitp_research_mode');
       expect(features.length).toBeGreaterThan(0);
       expect(features.every((feature) => feature.enabled)).toBe(true);
     } finally {

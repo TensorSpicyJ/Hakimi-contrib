@@ -5,7 +5,34 @@
 
 import { describe, expect, it } from 'vitest';
 import { classifyFrame, createAgentProjector, subagentProgressText } from '../src/api/daemon/agentEventProjector';
-import { toAppGoal } from '../src/api/daemon/mappers';
+import { toAppGoal, toAppMessageContent, toWirePromptSubmission } from '../src/api/daemon/mappers';
+
+describe('media attachment-name mappers', () => {
+  it('maps image and video names across the daemon boundary', () => {
+    expect(toAppMessageContent({
+      type: 'image',
+      name: 'photo.png',
+      source: { kind: 'url', url: 'https://example.com/photo.png' },
+    })).toEqual({
+      type: 'image',
+      name: 'photo.png',
+      source: { kind: 'url', url: 'https://example.com/photo.png', id: undefined },
+    });
+    expect(toWirePromptSubmission({
+      content: [{
+        type: 'video',
+        name: 'clip.mp4',
+        source: { kind: 'file', fileId: 'file_1' },
+      }],
+    })).toMatchObject({
+      content: [{
+        type: 'video',
+        name: 'clip.mp4',
+        source: { kind: 'file', file_id: 'file_1' },
+      }],
+    });
+  });
+});
 
 describe('toAppGoal continuation projection', () => {
   const snapshot = {
@@ -23,13 +50,13 @@ describe('toAppGoal continuation projection', () => {
       ...snapshot,
       continuation: {
         state: 'held',
-        owner: 'research',
-        reason: 'A research checkpoint is pending commit.',
+        owner: 'backgroundTask',
+        reason: 'A background task is still running.',
       },
     })?.continuation).toEqual({
       state: 'held',
-      owner: 'research',
-      reason: 'A research checkpoint is pending commit.',
+      owner: 'backgroundTask',
+      reason: 'A background task is still running.',
     });
   });
 
@@ -241,8 +268,8 @@ describe('goal.updated', () => {
           waitingFor: { taskIds: ['task_1', 'task_2'], policy: 'any' },
           continuation: {
             state: 'held',
-            owner: 'aitpResearch',
-            reason: 'A research checkpoint is pending commit.',
+            owner: 'backgroundTask',
+            reason: 'A background task is still running.',
           },
         },
       },
@@ -257,8 +284,8 @@ describe('goal.updated', () => {
         waitingFor: { taskIds: ['task_1', 'task_2'], policy: 'any' },
         continuation: {
           state: 'held',
-          owner: 'aitpResearch',
-          reason: 'A research checkpoint is pending commit.',
+          owner: 'backgroundTask',
+          reason: 'A background task is still running.',
         },
       }),
     });
@@ -680,48 +707,5 @@ describe('background subagent task registration', () => {
         task: expect.objectContaining({ id: 'task-1', kind: 'bash', command: 'npm test' }),
       },
     ]);
-  });
-});
-
-describe('research.updated projection', () => {
-  const snapshot = {
-    mode: 'ready',
-    loopStatus: 'active',
-    planningPolicy: 'collaborative',
-    lineWorkstreamBindings: [],
-    phase: 'idle',
-    questions: [],
-    lines: [],
-    openQuestionCount: 0,
-    activeQuestionCount: 0,
-    blockedQuestionCount: 0,
-    alerts: [],
-    aitpHealth: { phase: 'ready' },
-    program: {
-      topicId: 'topic-example',
-      title: 'Example research program',
-      goalText: 'Establish the bounded research result.',
-      goalSource: 'aitp-enter',
-      establishedAt: 1_700_000_000_000,
-    },
-    revision: 3,
-  } satisfies import('../src/api/types').ResearchStatusSnapshot;
-
-  it('projects the raw agent event to a typed Research update', () => {
-    const projector = createAgentProjector();
-    const events = projector.project('research.updated', { snapshot }, 's1');
-    expect(events).toEqual([
-      { type: 'researchUpdated', sessionId: 's1', snapshot },
-    ]);
-  });
-
-  it('keeps raw and protocol-prefixed frames on their distinct routes', () => {
-    expect(classifyFrame('research.updated', { snapshot })).toEqual({
-      route: 'agent',
-      agentType: 'research.updated',
-    });
-    expect(classifyFrame('event.research.updated', { snapshot })).toEqual({
-      route: 'protocol',
-    });
   });
 });

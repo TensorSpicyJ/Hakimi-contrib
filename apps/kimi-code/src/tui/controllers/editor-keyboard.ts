@@ -82,6 +82,13 @@ export class EditorKeyboardController {
       host.handleUserInput(text);
     };
 
+    editor.onEmptyLeft = () => {
+      if (!host.engineV2) return false;
+      const busy = host.state.appState.streamingPhase !== 'idle' || host.state.appState.isCompacting;
+      host.handleUserInput(busy ? '/research agents' : '/research');
+      return true;
+    };
+
     editor.onChange = (text: string) => {
       if (this.pendingExit) this.clearPendingExit();
       host.updateEditorBorderHighlight(text);
@@ -274,7 +281,6 @@ export class EditorKeyboardController {
     };
 
     editor.onToggleTodoExpand = (): boolean => {
-      if (host.state.researchBoard.isVisible()) return false;
       if (!host.state.todoPanel.hasOverflow()) return false;
       // Disarm a pending double-press exit confirmation so expanding the
       // todo list in between two Ctrl-C presses does not accidentally exit.

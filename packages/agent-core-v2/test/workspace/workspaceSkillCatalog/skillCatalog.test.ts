@@ -171,6 +171,41 @@ function fsWatchStub(
   };
 }
 
+interface RecordedWatchCall {
+  readonly path: string;
+  readonly options: HostFsWatchOptions | undefined;
+}
+
+interface RecordingWatchHandle extends IHostFsWatchHandle {
+  disposed: boolean;
+}
+
+function recordingFsWatchStub(calls: RecordedWatchCall[]): {
+  readonly service: IHostFsWatchService;
+  readonly handles: RecordingWatchHandle[];
+} {
+  const handles: RecordingWatchHandle[] = [];
+  return {
+    handles,
+    service: {
+      _serviceBrand: undefined,
+      watch: (path, options): IHostFsWatchHandle => {
+        calls.push({ path, options });
+        const handle: RecordingWatchHandle = {
+          ready: Promise.resolve(),
+          onDidChange: Event.None as Event<HostFsChange>,
+          disposed: false,
+          dispose: () => {
+            handle.disposed = true;
+          },
+        };
+        handles.push(handle);
+        return handle;
+      },
+    },
+  };
+}
+
 function makeHost(
   store: ISkillDiscovery,
   ws: IWorkspaceContext,
@@ -842,10 +877,10 @@ describe('WorkspaceSkillCatalogService', () => {
       _serviceBrand: undefined,
       watch: () => {
         const handle = new TestWatchHandle(
-          handles.length === 0 ? Promise.resolve() : replacementReady.promise,
+          handles.length < 2 ? Promise.resolve() : replacementReady.promise,
         );
         handles.push(handle);
-        if (handles.length === 2) replacementStarted.resolve(undefined);
+        if (handles.length === 3) replacementStarted.resolve(undefined);
         return handle;
       },
     };
@@ -882,19 +917,19 @@ describe('WorkspaceSkillCatalogService', () => {
     try {
       const loading = workspace.accessor.get(IWorkspaceRootSkillSource).load();
       await replacementStarted.promise;
-      const initialHandle = handles[0];
-      const replacementHandle = handles[1];
-      if (initialHandle === undefined || replacementHandle === undefined) {
-        throw new Error('expected initial and replacement watch handles');
+      const initialHandles = handles.slice(0, 2);
+      const replacementHandles = handles.slice(2);
+      if (initialHandles.length !== 2 || replacementHandles.length !== 2) {
+        throw new Error('expected candidate watches for the initial and replacement plans');
       }
 
-      expect(initialHandle.disposed).toBe(false);
+      expect(initialHandles.every((handle) => !handle.disposed)).toBe(true);
 
       replacementReady.resolve(undefined);
       const contribution = await loading;
 
-      expect(initialHandle.disposed).toBe(true);
-      expect(replacementHandle.disposed).toBe(false);
+      expect(initialHandles.every((handle) => handle.disposed)).toBe(true);
+      expect(replacementHandles.every((handle) => !handle.disposed)).toBe(true);
       expect(scans).toBe(2);
       expect(contribution.skills.map((skill) => skill.description)).toEqual(['fresh']);
     } finally {
@@ -961,19 +996,15 @@ describe('WorkspaceSkillCatalogService', () => {
     await writeFile(runtimeFile, 'x', 'utf8');
     const watchedSkillDir = await realpath(skillDir);
     const watchedRuntimeFile = await realpath(runtimeFile);
-    let ignored: ((path: string) => boolean) | undefined;
+    const watchedCandidate = await realpath(join(workDir, '.agents', 'skills'));
+    const calls: RecordedWatchCall[] = [];
     const host = createScopedTestHost([
       stubPair(IBootstrapService, bootstrapStub),
       stubPair(IConfigService, configStub()),
       stubPair(IPluginService, pluginStub()),
       stubPair(ILogService, stubLog()),
       stubPair(ISkillDiscovery, new FileSkillDiscovery(stubLog())),
-      stubPair(
-        IHostFsWatchService,
-        fsWatchStub((options) => {
-          ignored = options?.ignored;
-        }),
-      ),
+      stubPair(IHostFsWatchService, recordingFsWatchStub(calls).service),
     ]);
     const workspace = host.child('program', 'w1', [
       stubPair(IWorkspaceContext, workspaceContextStub(workDir)),
@@ -983,8 +1014,12 @@ describe('WorkspaceSkillCatalogService', () => {
       const catalog = workspace.accessor.get(IWorkspaceSkillCatalog);
       await catalog.load();
 
-      expect(ignored?.(join(watchedSkillDir, 'SKILL.md'))).toBe(false);
-      expect(ignored?.(watchedRuntimeFile)).toBe(true);
+      const workspaceWatch = calls
+        .filter((call) => call.path === watchedCandidate)
+        .at(-1);
+      expect(calls.filter((call) => call.path === workDir).every((call) => call.options?.recursive === false)).toBe(true);
+      expect(workspaceWatch?.options?.ignored?.(join(watchedSkillDir, 'SKILL.md'))).toBe(false);
+      expect(workspaceWatch?.options?.ignored?.(watchedRuntimeFile)).toBe(true);
     } finally {
       host.dispose();
       await rm(workDir, { recursive: true, force: true });
@@ -1090,4 +1125,5 @@ describe('WorkspaceSkillCatalogService', () => {
       await rm(workDir, { recursive: true, force: true });
     }
   }, 15000);
+
 });

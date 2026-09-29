@@ -29,7 +29,6 @@ function createHarness(options: { streamingPhase?: string; isCompacting?: boolea
   const cancelCompaction = vi.fn(async () => {});
   const btwCancelRunning = vi.fn(() => false);
   const btwCloseOrCancel = vi.fn(() => false);
-  const researchBoardVisible = vi.fn(() => false);
   const toggleTodoPanelExpansion = vi.fn();
   const session = { cancel: vi.fn(async () => {}), cancelCompaction };
 
@@ -43,7 +42,6 @@ function createHarness(options: { streamingPhase?: string; isCompacting?: boolea
       },
       footer: { setTransientHint: vi.fn() },
       ui: { requestRender: vi.fn() },
-      researchBoard: { isVisible: researchBoardVisible },
       todoPanel: { hasOverflow: vi.fn(() => true) },
     },
     session,
@@ -92,6 +90,13 @@ function pressNonEscape(editor: Harness['editor']): void {
 }
 
 describe('EditorKeyboardController double-Esc undo', () => {
+  it('empty-left opens agent tasks during streaming without submitting a research selection', () => {
+    const { host, editor } = createHarness({ streamingPhase: 'streaming' });
+    const handleUserInput = vi.fn();
+    Object.assign(host, { engineV2: true, handleUserInput });
+    (editor['onEmptyLeft'] as () => boolean)();
+    expect(handleUserInput).toHaveBeenCalledWith('/research agents');
+  });
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -153,19 +158,8 @@ describe('EditorKeyboardController double-Esc undo', () => {
   });
 });
 
-describe('EditorKeyboardController Ctrl-T research board priority', () => {
-  it('does not toggle the hidden TodoPanel while Research Board is visible', () => {
-    const { editor, host } = createHarness();
-    const isVisible = host.state.researchBoard.isVisible as ReturnType<typeof vi.fn>;
-    isVisible.mockReturnValue(true);
-    const toggle = host.toggleTodoPanelExpansion as ReturnType<typeof vi.fn>;
-    const handler = editor['onToggleTodoExpand'] as unknown as () => boolean;
-
-    expect(handler()).toBe(false);
-    expect(toggle).not.toHaveBeenCalled();
-  });
-
-  it('keeps Ctrl-T Todo expansion in ordinary mode', () => {
+describe('EditorKeyboardController Ctrl-T Todo expansion', () => {
+  it('toggles the TodoPanel when it has overflow', () => {
     const { editor, host } = createHarness();
     const toggle = host.toggleTodoPanelExpansion as ReturnType<typeof vi.fn>;
     const handler = editor['onToggleTodoExpand'] as unknown as () => boolean;

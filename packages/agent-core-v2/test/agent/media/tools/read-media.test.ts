@@ -8,6 +8,7 @@
  */
 
 import * as posixPath from 'node:path/posix';
+import { Readable } from 'node:stream';
 
 import type { ModelCapability } from '#/kosong/contract/capability';
 import type { ContentPart } from '#/kosong/contract/message';
@@ -19,6 +20,12 @@ import { Emitter } from '#/_base/event';
 import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import type { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import type { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
+import type { IHostProcessService } from '#/os/interface/hostProcess';
+import type { ISessionMediaStore } from '#/agent/media/sessionMediaStore';
+import { SessionMediaStoreService } from '#/agent/media/sessionMediaStoreService';
+import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
+import type { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
+import type { ISessionContext } from '#/session/sessionContext/sessionContext';
 import type { Runtime } from '#/runtime/runtime';
 import type { ITelemetryService, TelemetryProperties } from '#/app/telemetry/telemetry';
 import {
@@ -48,6 +55,7 @@ import type { ModelRequester } from '#/kosong/model/modelRequester';
 import type { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import type { WorkspaceConfig } from '#/tool/path-access';
 import { sniffImageDimensions } from '#/agent/media/file-type';
+import '#/kosong/provider/providers/kimi/kimi.contrib';
 
 const WORKSPACE: WorkspaceConfig = { workspaceDir: '/workspace', additionalDirs: [] };
 
@@ -143,11 +151,28 @@ interface FakeFile {
 }
 
 function createTestFs(files: Record<string, FakeFile>): IHostFileSystem {
-  const lookup = (path: string): FakeFile | undefined => files[path];
-  return {
+  const stored = new Map(Object.entries(files));
+  const lookup = (path: string): FakeFile | undefined => stored.get(path);
+  let nextTemporaryDirectory = 1;
+  const fs = {
+    _serviceBrand: undefined,
     readBytes: vi.fn(async (path: string, n?: number) => {
       const data = lookup(path)?.data ?? Buffer.alloc(0);
       return n === undefined ? data : data.subarray(0, n);
+    }),
+    writeBytes: vi.fn(async (path: string, data: Uint8Array) => {
+      stored.set(path, { data: Buffer.from(data) });
+    }),
+    createTempDirectory: vi.fn(async (prefix: string) => {
+      const path = `/tmp/${prefix}${String(nextTemporaryDirectory++)}`;
+      return {
+        path,
+        dispose: vi.fn(async () => {
+          for (const key of stored.keys()) {
+            if (key === path || key.startsWith(`${path}/`)) stored.delete(key);
+          }
+        }),
+      };
     }),
     stat: vi.fn(async (path: string) => {
       const file = lookup(path);
@@ -157,13 +182,14 @@ function createTestFs(files: Record<string, FakeFile>): IHostFileSystem {
         size: file?.size ?? file?.data.length ?? 0,
       };
     }),
-  } as unknown as IHostFileSystem;
+  };
+  return fs as unknown as IHostFileSystem;
 }
 
-function createTestEnv(): IHostEnvironment {
+function createTestEnv(osKind: IHostEnvironment['osKind'] = 'Linux'): IHostEnvironment {
   return {
     _serviceBrand: undefined,
-    osKind: 'Linux',
+    osKind,
     osArch: 'x86_64',
     osVersion: 'test',
     shellName: 'bash',
@@ -174,7 +200,11 @@ function createTestEnv(): IHostEnvironment {
   };
 }
 
-function runtimeFor(fs: IHostFileSystem, env: IHostEnvironment = createTestEnv()): IAgentRuntimeService {
+function runtimeFor(
+  fs: IHostFileSystem,
+  env: IHostEnvironment = createTestEnv(),
+  process?: IHostProcessService,
+): IAgentRuntimeService {
   const runtime = {
     identity: { workspaceId: 'workspace', runtimeId: 'local', generation: 'test' },
     capabilities: new Set(['fs'] as const),
@@ -182,6 +212,7 @@ function runtimeFor(fs: IHostFileSystem, env: IHostEnvironment = createTestEnv()
     path: posixPath,
     workspace: { mapRoots: (roots: { workDir: string; additionalDirs?: readonly string[] }) => roots },
     fs,
+    process,
     status: 'ready',
     onDidChangeStatus: () => ({ dispose: () => {} }),
     dispose: () => {},
@@ -205,6 +236,8 @@ function makeTool(
   videoUploader?: VideoUploader,
   telemetry?: ITelemetryService,
   inlineVideoSupported?: boolean,
+  attachmentStore?: ISessionMediaStore,
+  providerType?: string,
 ): ReadMediaFileTool {
   return new ReadMediaFileTool(
     runtimeFor(createTestFs(files)),
@@ -213,14 +246,39 @@ function makeTool(
     videoUploader,
     telemetry,
     inlineVideoSupported,
+    attachmentStore,
+    providerType,
   );
+}
+
+function sessionMediaStore(): ISessionMediaStore {
+  const context = {
+    _serviceBrand: undefined,
+    sessionId: 'session',
+    workspaceId: 'workspace',
+    sessionDir: '/session',
+    metaScope: 'session/meta',
+    cwd: '/workspace',
+    scope: (child?: string) => child === undefined ? 'session' : `session/${child}`,
+  } as unknown as ISessionContext;
+  const values = new Map<string, unknown>();
+  const documents = {
+    _serviceBrand: undefined,
+    get: async <T>(_scope: string, key: string) => values.get(key) as T | undefined,
+    set: async (_scope: string, key: string, value: unknown) => { values.set(key, value); },
+    delete: async (_scope: string, key: string) => { values.delete(key); },
+    list: async () => [],
+    watch: () => ({ dispose: () => {} }),
+    acquire: () => ({ dispose: () => {} }),
+  } as unknown as IAtomicDocumentStore;
+  return new SessionMediaStoreService(context, new InMemoryStorageService(), documents);
 }
 
 async function execute(
   tool: ReadMediaFileTool,
   args: ReadMediaFileInput,
 ): Promise<ExecutableToolResult> {
-  const execution = tool.resolveExecution(args);
+  const execution = await tool.resolveExecution(args);
   if (!('execute' in execution)) {
     return execution;
   }
@@ -786,6 +844,41 @@ describe('ReadMediaFileTool', () => {
     });
   });
 
+  it('reads a Kimi-supported BMP without opening that format for other providers', async () => {
+    const bmp = Buffer.alloc(54);
+    bmp.write('BM', 0, 'latin1');
+    const result = await execute(
+      makeTool({ '/workspace/picture.bmp': { data: bmp } }, capabilities(), undefined, undefined, undefined, undefined, 'kimi'),
+      { path: '/workspace/picture.bmp' },
+    );
+
+    expect(result.isError).toBe(false);
+    const parts = outputParts(result);
+    expect(parts[1]).toMatchObject({ type: 'image_url' });
+    expect((parts[1] as { imageUrl: { url: string } }).imageUrl.url).toMatch(/^data:image\/bmp;base64,/);
+  });
+
+  it('reads a session image attachment through its kimi-file reference', async () => {
+    const store = sessionMediaStore();
+    const bytes = pngBuffer();
+    await store.materialize({
+      fileId: 'f_picture',
+      size: bytes.length,
+      name: 'picture.png',
+      mimeType: 'image/png',
+      stream: () => Readable.from([bytes]),
+    });
+    const result = await execute(
+      makeTool({}, capabilities(), undefined, undefined, undefined, store),
+      { path: 'kimi-file://f_picture' },
+    );
+
+    expect(result.isError).toBe(false);
+    const parts = outputParts(result);
+    expect(parts[0]).toEqual({ type: 'text', text: '<image path="kimi-file://f_picture">' });
+    expect(JSON.stringify(result)).not.toContain('/session/media');
+  });
+
   it('rejects empty files', async () => {
     const result = await execute(
       makeTool({ '/workspace/sample.png': { data: pngBuffer(), size: 0 } }),
@@ -852,6 +945,18 @@ describe('registerMediaTools', () => {
       capabilities: capabilities({ image_in: true, video_in: true }),
     });
     expect(registry.resolve('ReadMediaFile')).toBeUndefined();
+  });
+
+  it('registers attachment reads when runtime filesystem availability is absent', () => {
+    const registry = new AgentToolRegistryService();
+    const availableRuntime = runtimeFor(fs, env);
+    registerMediaTools(registry, {
+      runtime: { ...availableRuntime, isAvailable: () => false },
+      workspace: WORKSPACE,
+      capabilities: capabilities({ image_in: true, video_in: true }),
+      attachmentStore: sessionMediaStore(),
+    });
+    expect(registry.resolve('ReadMediaFile')).toBeInstanceOf(ReadMediaFileTool);
   });
 });
 
@@ -1079,6 +1184,44 @@ describe('createVideoUploader', () => {
     buf.write(brand, 16, 'latin1');
     return buf;
   }
+
+  it('transcodes HEIC with sips on macOS before delivery', async () => {
+    const jpeg = await new Jimp({ width: 8, height: 6, color: 0x3366ccff }).getBuffer('image/jpeg');
+    const commands: string[][] = [];
+    const fs = createTestFs({ '/workspace/photo.heic': { data: heicBytes() } });
+    const process = {
+      spawn: vi.fn(async (command: string, args: readonly string[]) => {
+        commands.push([command, ...args]);
+        await fs.writeBytes(args.at(-1)!, jpeg);
+        return {
+          _serviceBrand: undefined,
+          pid: 1,
+          exitCode: 0,
+          stdin: new WritableStream(),
+          stdout: Readable.from([]),
+          stderr: Readable.from([]),
+          wait: async () => 0,
+          kill: async () => {},
+          dispose: () => {},
+        };
+      }),
+    } as unknown as IHostProcessService;
+    const tool = new ReadMediaFileTool(
+      runtimeFor(fs, createTestEnv('macOS'), process),
+      WORKSPACE,
+      capabilities(),
+    );
+
+    const result = await execute(tool, { path: '/workspace/photo.heic' });
+
+    expect(result.isError).toBe(false);
+    expect(commands[0]).toEqual(expect.arrayContaining(['sips', '-s', 'format', 'jpeg']));
+    expect(vi.mocked(fs.createTempDirectory)).toHaveBeenCalledWith('kimi-heic-');
+    expect(vi.mocked(fs.writeBytes)).toHaveBeenCalledTimes(2);
+    const parts = outputParts(result);
+    expect((parts[1] as { imageUrl: { url: string } }).imageUrl.url).toMatch(/^data:image\/jpeg;base64,/);
+    expect(result.note).toContain('converted from image/heic to image/jpeg');
+  });
 
   it('refuses every format outside the provider-accepted set, not just HEIC', async () => {
     const result = await execute(makeTool({ '/workspace/photo.avif': { data: ftypBytes('avif') } }), {

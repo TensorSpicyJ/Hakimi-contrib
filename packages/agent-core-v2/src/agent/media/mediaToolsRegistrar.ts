@@ -37,6 +37,7 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
 import { type ModelRequester } from '#/kosong/model/modelRequester';
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
+import { ISessionMediaStore } from '#/agent/media/sessionMediaStore';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { IAgentProfileService } from '#/agent/profile/profile';
@@ -66,6 +67,7 @@ export class AgentMediaToolsRegistrar extends Service implements IAgentMediaTool
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IAgentStateService private readonly states: IAgentStateService,
     @ISessionSkillCatalog private readonly skillCatalog?: ISessionSkillCatalog,
+    @ISessionMediaStore private readonly attachmentStore?: ISessionMediaStore,
   ) {
     super();
     this.states.register(mediaRegisteredKeyKey);
@@ -86,7 +88,8 @@ export class AgentMediaToolsRegistrar extends Service implements IAgentMediaTool
   private refresh(): void {
     const capabilities = this.profile.getModelCapabilities();
     const modelAlias = this.profile.getModel();
-    if (!this.runtime.isAvailable(['fs'])) {
+    const hasRuntimeFs = this.runtime.isAvailable(['fs']);
+    if (!hasRuntimeFs && this.attachmentStore === undefined) {
       const key = [
         modelAlias,
         String(capabilities.image_in),
@@ -99,20 +102,22 @@ export class AgentMediaToolsRegistrar extends Service implements IAgentMediaTool
       this.registration = undefined;
       return;
     }
-    const inspected = this.runtime.inspect();
-    const identityKey = [
-      inspected.identity.workspaceId,
-      inspected.identity.runtimeId,
-      inspected.identity.generation,
-    ].join('|');
+    const inspected = hasRuntimeFs ? this.runtime.inspect() : undefined;
+    const identityKey = inspected === undefined
+      ? 'session-attachments'
+      : [
+          inspected.identity.workspaceId,
+          inspected.identity.runtimeId,
+          inspected.identity.generation,
+        ].join('|');
     const key = [
       modelAlias,
       String(capabilities.image_in),
       String(capabilities.video_in),
       identityKey,
-      inspected.status,
-      inspected.environment.pathClass,
-      String(inspected.capabilities.has('fs')),
+      inspected?.status,
+      inspected?.environment.pathClass,
+      String(hasRuntimeFs),
     ].join('|');
     if (key === this.registeredKey) return;
     this.registeredKey = key;
@@ -120,7 +125,7 @@ export class AgentMediaToolsRegistrar extends Service implements IAgentMediaTool
     const workspaceCtx = this.workspaceCtx;
     const skillCatalog = this.skillCatalog;
     const runtime = this.runtime;
-    const pathClass = inspected.environment.pathClass;
+    const pathClass = inspected?.environment.pathClass ?? 'posix';
     let requester: ModelRequester | undefined;
     let model: Model | undefined;
     if (modelAlias !== '') {
@@ -152,6 +157,8 @@ export class AgentMediaToolsRegistrar extends Service implements IAgentMediaTool
       }),
       inlineVideoSupported: model?.protocol !== 'openai' && model?.protocol !== 'openai_responses',
       telemetry: this.telemetry,
+      attachmentStore: this.attachmentStore,
+      providerType: model?.providerType ?? model?.protocol,
     });
   }
 }

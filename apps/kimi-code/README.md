@@ -2,7 +2,7 @@
 
 > Hakimi is a truth-seeking research agent built on the Kimi Code runtime.
 
-Hakimi keeps the terminal loop, tools, sessions, skills, MCP, subagents, permissions, and Kimi OAuth integration, while providing its own `hakimi` command, cat-ear spacecraft identity, `~/.hakimi` data home, release channel, provider defaults, and AITP-backed Research Mode. Its data-home resolution order is `HAKIMI_HOME` > `KIMI_CODE_HOME` > `~/.hakimi`.
+Hakimi keeps the terminal loop, tools, sessions, skills, MCP, subagents, permissions, and Kimi OAuth integration, while providing its own `hakimi` command, cat-ear spacecraft identity, `~/.hakimi` data home, release channel, and provider defaults. Its data-home resolution order is `HAKIMI_HOME` > `KIMI_CODE_HOME` > `~/.hakimi`.
 
 ## Install from this repository
 
@@ -45,22 +45,11 @@ Use `/login` in the TUI to authenticate with Kimi Code OAuth, a Kimi Platform AP
 
 Use `hakimi -p "<instruction>"` for a non-interactive run and `hakimi -c` to resume the latest session.
 
-## Research Mode
+## AITP Skills
 
-Research Mode and the `EnterAITPMode` capability are discoverable by default. New sessions start `inactive`, while hydration preserves the persisted mode. Inactive hydration and GET/snapshot reads do not probe AITP or perform AITP I/O; a persisted active session remains active after cold restore, re-probes AITP, and reruns the read-only `enter` → `check` maintenance cycle. The Research Board plus other Research/AITP tools remain hidden until explicit entry. After `/research on` or `EnterAITPMode`, the adapter probes AITP and, after a ready probe, performs the read-only `enter` → `check` cycle. Entry requires Python 3.11 or later, the `aitp-research-protocol` plugin, and an initialized AITP workspace:
+Hakimi's default Research mode bundles AITP skills and reads scientific memory from the topic's `research.md` and linked files. Use `/research` or the Web topic panel to browse branches and inspect the current question.
 
-```sh
-cd /path/to/initialized-aitp-workspace
-hakimi
-```
-
-```text
-/research on
-/research status
-/research manage
-```
-
-The normal bounded-action path is `BeginResearchAction` → perform the scientific work → `ConcludeResearchAction`, which records the physical work, result, tests or derivation, limitations, mainline impact, and next step in one Research transition. It does not submit or poll scheduler jobs, write AITP, or change a question's assessment automatically. Before each admitted Research answer, the shared coordinator reconciles only deterministic local Line/Action/phase/period/cursor structure; stale checkpoint proposals remain blocked and are labelled historical rather than silently committed or discarded. The expanded Board also separates AITP read readiness from adapter-contract-0.2 scoped checkpoint-write capability. The Research Loop can review typed child evidence packets without implicit state writes and record explicit, action-bound HPC observations. For sustained theoretical-physics work, the optional bundled `theory-physics` plugin is the upper-layer entry: it admits the request when Research Mode is warranted, aligns Line / Question / Focus / Goal, and delegates durable deltas to the external `using-aitp` skill or reusable-method candidates to `distilling-methods` on demand. One-off physics answers need not enter Research Mode. The plugin adds literature-routing, derivation-checking, numerical/HPC evidence, and science-first reporting guidance without adding another runtime or database. See the [English Research Mode guide](../../docs/en/guides/research-mode.md) or [中文研究模式指南](../../docs/zh/guides/research-mode.md) for prerequisites, the Research Board, steering commands, persistence barriers, and degraded behavior.
+The existing Goal and agent tools share that topic context. AITP governs the scientific workflow without a duplicate ledger or background memory writer. See [Research mode](../../docs/en/guides/research-mode.md) for configuration and scope.
 
 ## User manual
 

@@ -28,8 +28,8 @@ import type {
 } from '../types';
 import { i18n } from '../../i18n';
 import { toolLabel, toolSummary } from '../../lib/toolMeta';
-import { toAppMessageContent, toAppResearchSnapshot } from './mappers';
-import type { WireMessageContent, WireResearchStatusSnapshot } from './wire';
+import { toAppMessageContent } from './mappers';
+import type { WireMessageContent } from './wire';
 
 // Subagent turns share the parent session id: their turn / step / delta / tool
 // frames stream over the SAME session channel, each tagged with the subagent's
@@ -1415,16 +1415,6 @@ export function createAgentProjector(): AgentProjector {
         break;
       }
 
-      case 'research.updated': {
-        if (p?.snapshot === undefined) break;
-        out.push({
-          type: 'researchUpdated',
-          sessionId,
-          snapshot: toAppResearchSnapshot(p.snapshot as WireResearchStatusSnapshot),
-        });
-        break;
-      }
-
       // -----------------------------------------------------------------------
       case 'cron.fired': {
         // A scheduled reminder fired into the session. agent-core persists the
@@ -1535,7 +1525,6 @@ const KNOWN_AGENT_CORE_TYPES = new Set([
   'compaction.completed',
   'compaction.cancelled',
   'goal.updated',
-  'research.updated',
   'error',
   'warning',
   'subagent.spawned',
@@ -1565,7 +1554,6 @@ const PROTOCOL_EVENT_NAMES = new Set([
   'session.status_changed',
   'session.usage_updated',
   'session.history_compacted',
-  'research.updated',
   // Message lifecycle (projected)
   'message.created',
   'message.updated',

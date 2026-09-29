@@ -1,6 +1,7 @@
 export { KimiHarness } from '#/kimi-harness';
 export type { KimiHarnessRuntimeOptions } from '#/kimi-harness';
 export { Session } from '#/session';
+export type { ResearchSnapshot, ResearchTopic } from '@moonshot-ai/agent-core-v2/features/research/research';
 export { KimiAuthFacade } from '#/auth';
 export { createKimiHarness, SDKRpcClient, type SDKRpcClientOptions } from '#/sdk-rpc-client';
 export {

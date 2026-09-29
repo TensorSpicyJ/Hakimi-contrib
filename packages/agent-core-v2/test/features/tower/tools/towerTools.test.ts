@@ -12,16 +12,18 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentTaskService } from '#/agent/task/task';
 import { TOWER_TOOL_CONTRIBUTIONS } from '#/features/tower/towerFeature';
 import { IAgentTowerService, TOWER_TOOL_NAMES } from '#/features/tower/tower';
 import { ITowerRateLimitService } from '#/features/tower/towerRateLimit';
 import { TowerStore } from '#/features/tower/protocol/index';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import type { ExecutableTool } from '#/tool/toolContract';
 
@@ -76,6 +78,8 @@ let towerActive: boolean;
 let currentAgentId: string;
 let currentSessionId: string;
 let addedTools: string[];
+let activeAgentTasks: Array<{ readonly kind: string; readonly agentId: string }>;
+let notifyInbox: ReturnType<typeof vi.fn>;
 
 beforeEach(async () => {
   repo = await mkdtemp(join(tmpdir(), 'tower-tools-test-'));
@@ -88,6 +92,8 @@ beforeEach(async () => {
   currentAgentId = 'main';
   currentSessionId = 'session-test';
   addedTools = [];
+  activeAgentTasks = [];
+  notifyInbox = vi.fn();
 
   disposables = new DisposableStore();
   ix = createServices(disposables, {
@@ -111,6 +117,15 @@ beforeEach(async () => {
         },
         scope: (subKey?: string) => subKey ?? '',
       });
+      reg.definePartialInstance(IAgentLifecycleService, {
+        get: (agentId: string) =>
+          agentId === 'main'
+            ? ({ accessor: { get: (id: unknown) => id === IAgentTowerService ? { notifyInbox } : undefined } } as never)
+            : undefined,
+      });
+      reg.definePartialInstance(IAgentTaskService, {
+        list: () => activeAgentTasks as never,
+      });
       reg.defineInstance(IAgentTowerService, {
         _serviceBrand: undefined,
         get isActive() {
@@ -122,6 +137,7 @@ beforeEach(async () => {
         exit: () => {
           towerActive = false;
         },
+        notifyInbox: () => {},
       });
       reg.definePartialInstance(IAgentProfileService, {
         addActiveTool: (name: string) => {
@@ -288,6 +304,22 @@ describe('TowerSendTool + TowerInboxTool', () => {
     for (const subject of ['for w1', 'for w2', 'broadcast', 'report']) {
       expect(towerInbox.output).toContain(`subject: ${subject}`);
     }
+  });
+
+  it('wakes the main tower for a worker message and only flags an inactive target', async () => {
+    currentAgentId = 'agent-w1';
+    await run(ix.get(ITowerSendTool), { to: 'tower', subject: 'report', body: 'done' });
+    expect(notifyInbox).toHaveBeenCalledWith({ from: 'w1', to: 'tower', subject: 'report' });
+
+    currentAgentId = 'main';
+    activeAgentTasks = [{ kind: 'agent', agentId: 'agent-w1' }];
+    const active = await run(ix.get(ITowerSendTool), { to: 'w1', subject: 'next', body: 'continue' });
+    expect(active.output).not.toContain('no running task');
+
+    activeAgentTasks = [];
+    const idle = await run(ix.get(ITowerSendTool), { to: 'w1', subject: 'next', body: 'continue' });
+    expect(idle.output).toContain('no running task in this session');
+    expect(idle.output).toContain('run_in_background=true');
   });
 
   it('maps a TowerProtocolError (unknown recipient) to an isError result', async () => {

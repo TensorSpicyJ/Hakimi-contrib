@@ -11,15 +11,8 @@
 import type { z } from 'zod';
 
 import type {
-  ActivityLastTurnState,
-  ActivityRetryState,
-  ActivityTurnState,
-  ActivityViewLifecycle,
-  AgentActivityState,
-  ApprovalRef,
-  BackgroundRef,
-  ToolCallRef,
-  TurnPhase,
+  ActivityLastTurnState, ActivityRetryState, ActivityTurnState, ActivityViewLifecycle,
+  AgentActivityState, ApprovalRef, BackgroundRef, ToolCallRef, TurnPhase,
 } from '@moonshot-ai/agent-core-v2/agent/activityView/activityView';
 import type { AgentContextData } from '@moonshot-ai/agent-core-v2/agent/contextMemory/types';
 import type { IAgentCommandService } from '@moonshot-ai/agent-core-v2/agent/command/agentCommand';
@@ -36,277 +29,37 @@ import type { UsageStatus } from '@moonshot-ai/agent-core-v2/agent/usage/usage';
 import type { SkillSummary } from '@moonshot-ai/agent-core-v2/app/skillCatalog/types';
 import type { McpServerEntry } from '@moonshot-ai/agent-core-v2/mcpCore/connection-manager';
 import type { FullCompactionInput } from '@moonshot-ai/agent-core-v2/agent/fullCompaction/fullCompaction';
-import type {
-  GoalReasonInput,
-  IAgentGoalService,
-  ResumeGoalInput,
-} from '@moonshot-ai/agent-core-v2/agent/goal/goal';
-import type {
-  CreateGoalInput,
-  GoalActor,
-  GoalBudgetLimits,
-  GoalBudgetReport,
-  GoalSnapshot,
-  GoalStatus,
-  GoalToolResult,
-} from '@moonshot-ai/agent-core-v2/agent/goal/types';
+import type { GoalReasonInput, IAgentGoalService, ResumeGoalInput } from '@moonshot-ai/agent-core-v2/agent/goal/goal';
+import type { CreateGoalInput, GoalActor, GoalBudgetLimits, GoalBudgetReport, GoalSnapshot, GoalStatus, GoalToolResult } from '@moonshot-ai/agent-core-v2/agent/goal/types';
 import type { ISessionScopeHandle } from '@moonshot-ai/agent-core-v2/_base/di/scope';
-import type {
-  CreateChildSessionOptions,
-  CreateSessionOptions,
-  ForkSessionOptions,
-  ResumeSessionOptions,
-} from '@moonshot-ai/agent-core-v2/workspace/sessionLifecycle/sessionLifecycle';
-import type {
-  ApprovalRequest,
-  ApprovalResponse,
-} from '@moonshot-ai/agent-core-v2/session/approval/approval';
-import type {
-  Interaction,
-  InteractionResolution,
-} from '@moonshot-ai/agent-core-v2/session/interaction/interaction';
-import type {
-  QuestionAnswers,
-  QuestionItem,
-  QuestionOption,
-  QuestionRequest,
-  QuestionResponse,
-  QuestionResult,
-} from '@moonshot-ai/agent-core-v2/session/question/question';
-import type {
-  AgentMeta,
-  SessionMeta,
-  SessionMetadataChangedEvent,
-  SessionMetaPatch,
-} from '@moonshot-ai/agent-core-v2/session/sessionMetadata/sessionMetadata';
+import type { CreateChildSessionOptions, CreateSessionOptions, ForkSessionOptions, ResumeSessionOptions } from '@moonshot-ai/agent-core-v2/workspace/sessionLifecycle/sessionLifecycle';
+import type { ApprovalRequest, ApprovalResponse } from '@moonshot-ai/agent-core-v2/session/approval/approval';
+import type { Interaction, InteractionResolution } from '@moonshot-ai/agent-core-v2/session/interaction/interaction';
+import type { QuestionAnswers, QuestionItem, QuestionOption, QuestionRequest, QuestionResponse, QuestionResult } from '@moonshot-ai/agent-core-v2/session/question/question';
+import type { AgentMeta, SessionMeta, SessionMetadataChangedEvent, SessionMetaPatch } from '@moonshot-ai/agent-core-v2/session/sessionMetadata/sessionMetadata';
 import type { ISessionTitleService } from '@moonshot-ai/agent-core-v2/session/sessionTitle/sessionTitle';
-import type {
-  AuthStatus,
-  IOAuthService,
-} from '@moonshot-ai/agent-core-v2/app/auth/auth';
+import type { AuthStatus, IOAuthService } from '@moonshot-ai/agent-core-v2/app/auth/auth';
 import type { IBootstrapService } from '@moonshot-ai/agent-core-v2/app/bootstrap/bootstrap';
-import type {
-  ConfigDiagnostic,
-  ConfigInspectValue,
-  ConfigTarget,
-} from '@moonshot-ai/agent-core-v2/app/config/config';
-import type {
-  CapabilityInstallProgress,
-  CapabilityStatus,
-  CapabilityStep,
-} from '@moonshot-ai/agent-core-v2/app/capability/types';
+import type { ConfigDiagnostic, ConfigInspectValue, ConfigTarget } from '@moonshot-ai/agent-core-v2/app/config/config';
+import type { CapabilityInstallProgress, CapabilityStatus, CapabilityStep } from '@moonshot-ai/agent-core-v2/app/capability/types';
 import type { ExperimentalFeatureState } from '@moonshot-ai/agent-core-v2/app/flag/flag';
-import type {
-  FsBrowseResponse,
-  FsHomeResponse,
-} from '@moonshot-ai/agent-core-v2/app/hostFolderBrowser/hostFolderBrowser';
+import type { FsBrowseResponse, FsHomeResponse } from '@moonshot-ai/agent-core-v2/app/hostFolderBrowser/hostFolderBrowser';
 import type { ModelRecord } from '@moonshot-ai/agent-core-v2/kosong/model/model';
 import type { IModelCatalog } from '@moonshot-ai/agent-core-v2/kosong/model/catalog';
 import type { IProviderDiscoveryService } from '@moonshot-ai/agent-core-v2/app/kosongConfig/discovery';
-import type {
-  GetPluginInfoInput,
-  InstallPluginInput,
-  RemovePluginInput,
-  SetPluginEnabledInput,
-  SetPluginMcpServerEnabledInput,
-} from '@moonshot-ai/agent-core-v2/app/plugin/plugin';
-import type {
-  PluginCommandDef,
-  PluginDiagnostic,
-  PluginGithubMetadata,
-  PluginInfo,
-  PluginManifest,
-  PluginMcpServerInfo,
-  PluginSummary,
-  PluginUpdateStatus,
-  ReloadSummary,
-} from '@moonshot-ai/agent-core-v2/app/plugin/types';
+import type { GetPluginInfoInput, InstallPluginInput, RemovePluginInput, SetPluginEnabledInput, SetPluginMcpServerEnabledInput } from '@moonshot-ai/agent-core-v2/app/plugin/plugin';
+import type { PluginCommandDef, PluginDiagnostic, PluginGithubMetadata, PluginInfo, PluginManifest, PluginMcpServerInfo, PluginSummary, PluginUpdateStatus, ReloadSummary } from '@moonshot-ai/agent-core-v2/app/plugin/types';
 import type { ProviderConfig } from '@moonshot-ai/agent-core-v2/kosong/provider/provider';
-import type {
-  SessionListQuery,
-  SessionSummary,
-} from '@moonshot-ai/agent-core-v2/app/sessionIndex/sessionIndex';
-import type {
-  Workspace,
-  WorkspaceUpdate,
-} from '@moonshot-ai/agent-core-v2/app/workspace/workspace';
-// Test-only: `@moonshot-ai/protocol` is a devDependency; importing its types
-// here (never in `src/`) strengthens parity for the agent event stream.
-import type {
-  AssistantDeltaEvent,
-  CompactionBlockedEvent,
-  CompactionCancelledEvent,
-  CompactionCompletedEvent,
-  CompactionStartedEvent,
-  GoalChange,
-  GoalChangeStats,
-  GoalMutation,
-  GoalUpdatedEvent,
-  PromptAbortedEvent,
-  PromptCompletedEvent,
-  TaskInfo,
-  ThinkingDeltaEvent,
-  ToolCallDeltaEvent,
-  ToolCallStartedEvent,
-  ToolProgressEvent,
-  ToolResultEvent,
-  TurnEndedEvent,
-  TurnStartedEvent,
-  WarningEvent,
-  ResearchUpdatedEvent,
-  AitpModeUpdatedEvent,
-} from '@moonshot-ai/protocol';
+import type { SessionListQuery, SessionSummary } from '@moonshot-ai/agent-core-v2/app/sessionIndex/sessionIndex';
+import type { Workspace, WorkspaceUpdate } from '@moonshot-ai/agent-core-v2/app/workspace/workspace';
+import type { AssistantDeltaEvent, CompactionBlockedEvent, CompactionCancelledEvent, CompactionCompletedEvent, CompactionStartedEvent, GoalChange, GoalChangeStats, GoalMutation, GoalUpdatedEvent, PromptAbortedEvent, PromptCompletedEvent, TaskInfo, ThinkingDeltaEvent, ToolCallDeltaEvent, ToolCallStartedEvent, ToolProgressEvent, ToolResultEvent, TurnEndedEvent, TurnStartedEvent, WarningEvent } from '@moonshot-ai/protocol';
 
-import {
-  activityLastTurnStateSchema,
-  activityRetryStateSchema,
-  activityTurnStateSchema,
-  activityViewLifecycleSchema,
-  agentActivityStateSchema,
-  approvalRefSchema,
-  backgroundRefSchema,
-  toolCallRefSchema,
-  turnEndReasonSchema,
-  turnPhaseSchema,
-} from '../src/contract/agent/activity.js';
-import {
-  agentCommandInfoSchema,
-  agentContextDataSchema,
-  agentTaskInfoSchema,
-  activateSkillPayloadSchema,
-  cancelPayloadSchema,
-  cancelPlanPayloadSchema,
-  cancelShellCommandPayloadSchema,
-  emptyPayloadSchema,
-  getTaskOutputPayloadSchema,
-  getTasksPayloadSchema,
-  planDataSchema,
-  promptLaunchResultSchema,
-  promptPartSchema,
-  promptPayloadSchema,
-  promptSkillActivationSchema,
-  promptWithSkillsPayloadSchema,
-  runCommandPayloadSchema,
-  runShellCommandPayloadSchema,
-  runtimeBindingSchema,
-  setModelPayloadSchema,
-  setModelResultSchema,
-  setPermissionPayloadSchema,
-  shellCommandResultSchema,
-  steerPayloadSchema,
-  stopTaskPayloadSchema,
-  tokenUsageSchema,
-  usageStatusSchema,
-} from '../src/contract/agent/schemas.js';
-import {
-  assistantDeltaEventSchema,
-  compactionBlockedEventSchema,
-  compactionCancelledEventSchema,
-  compactionCompletedEventSchema,
-  compactionStartedEventSchema,
-  goalChangeSchema,
-  goalChangeStatsSchema,
-  goalMutationSchema,
-  goalUpdatedEventSchema,
-  promptAbortedEventSchema,
-  promptCompletedEventSchema,
-  thinkingDeltaEventSchema,
-  toolCallDeltaEventSchema,
-  toolCallStartedEventSchema,
-  toolProgressEventSchema,
-  toolResultEventSchema,
-  turnEndedEventSchema,
-  turnStartedEventSchema,
-  warningEventSchema,
-  researchUpdatedEventSchema,
-  aitpModeUpdatedEventSchema,
-} from '../src/contract/agent/events.js';
-import {
-  approvalRequestSchema,
-  approvalResponseSchema,
-} from '../src/contract/session/approval.js';
-import {
-  createGoalInputSchema,
-  fullCompactionInputSchema,
-  goalActorSchema,
-  goalBudgetLimitsSchema,
-  goalBudgetReportSchema,
-  goalReasonInputSchema,
-  goalSnapshotSchema,
-  goalStatusSchema,
-  goalToolResultSchema,
-  mcpServerEntrySchema,
-  resumeGoalInputSchema,
-  setGoalBudgetLimitsInputSchema,
-} from '../src/contract/agent/services.js';
-import type {
-  ResearchStatusSnapshot as EngineResearchSnapshot,
-  ResearchRunState as EngineResearchRunState,
-  ResearchQuestion as EngineResearchQuestion,
-  ResearchLine as EngineResearchLine,
-  ResearchLineWorkstreamBinding as EngineResearchLineWorkstreamBinding,
-  ResearchFocus as EngineResearchFocus,
-  ResearchAlert as EngineResearchAlert,
-  ResearchCheckpoint as EngineResearchCheckpoint,
-  ResearchCommittedCursor as EngineResearchCursor,
-  AitpAdapterHealth as EngineAitpHealth,
-  AitpMaintenanceReceipt as EngineAitpMaintenanceReceipt,
-  HumanSteeringCommand as EngineHumanSteeringCommand,
-  ResearchLineCreationInput as EngineResearchLineCreationInput,
-  ResearchActionSpec as EngineResearchActionSpec,
-  ResearchProgressReport as EngineResearchProgressReport,
-  ResearchStateChange as EngineResearchStateChange,
-  ResearchHumanGate as EngineResearchHumanGate,
-  ResearchPlan as EngineResearchPlan,
-  ResearchPlanV2 as EngineResearchPlanV2,
-} from '@moonshot-ai/agent-core-v2/features/aitpResearch/types';
-import type {
-  ResearchEvidencePacket as EngineResearchEvidencePacket,
-} from '@moonshot-ai/agent-core-v2/features/aitpResearch/research/evidencePacket';
-import type {
-  IAgentResearchService,
-  ConcludeResearchActionInput as EngineConcludeResearchActionInput,
-  ClearLineWorkstreamBindingInput as EngineClearLineWorkstreamBindingInput,
-  ConfirmLineWorkstreamBindingInput as EngineConfirmLineWorkstreamBindingInput,
-  PlanActionInput as EnginePlanActionInput,
-  PrepareResearchPlanInput as EnginePrepareResearchPlanInput,
-  PrepareResearchPlanV2Input as EnginePrepareResearchPlanV2Input,
-  TransitionResearchPlanV2Input as EngineTransitionResearchPlanV2Input,
-  ResolveHumanDecisionInput as EngineResolveHumanDecisionInput,
-  UpdateLineInput as EngineUpdateLineInput,
-} from '@moonshot-ai/agent-core-v2/features/aitpResearch/research/agentResearch';
-import { agentResearchContract } from '../src/contract/agent/research.js';
-import {
-  researchStatusSnapshotSchema,
-  researchRunStateSchema,
-  researchEvidencePacketSchema,
-  researchQuestionSchema,
-  researchLineSchema,
-  researchLineWorkstreamBindingSchema,
-  researchFocusSchema,
-  researchAlertSchema,
-  researchCheckpointSchema,
-  researchCommittedCursorSchema,
-  aitpAdapterHealthSchema,
-  aitpMaintenanceReceiptSchema,
-  humanSteeringCommandSchema,
-  researchLineCreationInputSchema,
-  researchLineUpdateInputSchema,
-  researchActionSpecSchema,
-  researchProgressReportSchema,
-  researchStateChangeSchema,
-  researchHumanGateSchema,
-  researchAlertFingerprintSchema,
-  resolveHumanDecisionInputSchema,
-  planActionInputSchema,
-  concludeActionInputSchema,
-  researchActionConclusionSchema,
-  researchPlanSchema,
-  prepareResearchPlanInputSchema,
-  researchPlanV2Schema,
-  prepareResearchPlanV2InputSchema,
-  transitionResearchPlanV2InputSchema,
-} from '../src/contract/agent/researchSchemas.js';
+import { activityLastTurnStateSchema, activityRetryStateSchema, activityTurnStateSchema, activityViewLifecycleSchema, agentActivityStateSchema, approvalRefSchema, backgroundRefSchema, toolCallRefSchema, turnEndReasonSchema, turnPhaseSchema } from '../src/contract/agent/activity.js';
+import { agentCommandInfoSchema, agentContextDataSchema, agentTaskInfoSchema, activateSkillPayloadSchema, cancelPayloadSchema, cancelPlanPayloadSchema, cancelShellCommandPayloadSchema, emptyPayloadSchema, getTaskOutputPayloadSchema, getTasksPayloadSchema, planDataSchema, promptLaunchResultSchema, promptPartSchema, promptPayloadSchema, promptSkillActivationSchema, promptWithSkillsPayloadSchema, runCommandPayloadSchema, runShellCommandPayloadSchema, runtimeBindingSchema, setModelPayloadSchema, setModelResultSchema, setPermissionPayloadSchema, shellCommandResultSchema, steerPayloadSchema, stopTaskPayloadSchema, tokenUsageSchema, usageStatusSchema } from '../src/contract/agent/schemas.js';
+import { assistantDeltaEventSchema, compactionBlockedEventSchema, compactionCancelledEventSchema, compactionCompletedEventSchema, compactionStartedEventSchema, goalChangeSchema, goalChangeStatsSchema, goalMutationSchema, goalUpdatedEventSchema, promptAbortedEventSchema, promptCompletedEventSchema, thinkingDeltaEventSchema, toolCallDeltaEventSchema, toolCallStartedEventSchema, toolProgressEventSchema, toolResultEventSchema, turnEndedEventSchema, turnStartedEventSchema, warningEventSchema } from '../src/contract/agent/events.js';
+import { approvalRequestSchema, approvalResponseSchema } from '../src/contract/session/approval.js';
+import { createGoalInputSchema, fullCompactionInputSchema, goalActorSchema, goalBudgetLimitsSchema, goalBudgetReportSchema, goalReasonInputSchema, goalSnapshotSchema, goalStatusSchema, goalToolResultSchema, mcpServerEntrySchema, resumeGoalInputSchema, setGoalBudgetLimitsInputSchema } from '../src/contract/agent/services.js';
+
 import {
   createChildSessionOptionsSchema,
   createSessionOptionsSchema,
@@ -333,6 +86,8 @@ import {
   questionResultSchema,
 } from '../src/contract/session/question.js';
 import { skillSummarySchema } from '../src/contract/session/skills.js';
+import { researchSnapshotSchema } from '../src/contract/session/research.js';
+import type { ResearchSnapshot } from '@moonshot-ai/agent-core-v2/features/research/research';
 import { sessionTitleContract } from '../src/contract/session/title.js';
 
 import {
@@ -429,6 +184,7 @@ type ConfigTargetValues = `${ConfigTarget}`;
 
 // sessions.ts
 const _sessionSummary: AssertWire<typeof sessionSummarySchema, SessionSummary> = true;
+const _researchSnapshot: AssertWire<typeof researchSnapshotSchema, ResearchSnapshot> = true;
 const _sessionListQuery: AssertWire<typeof sessionListQuerySchema, SessionListQuery> = true;
 
 // workspaces.ts
@@ -722,153 +478,6 @@ const _mcpServerEntry: AssertWire<typeof mcpServerEntrySchema, McpServerEntry> =
 const _fullCompactionInput: AssertWire<typeof fullCompactionInputSchema, FullCompactionInput> =
   true;
 
-// agent/researchSchemas.ts — AITP Research Mode wire shapes, mirrored from
-// `agent-core-v2/src/features/aitpResearch/types.ts` and
-// `agent-core-v2/src/features/aitpResearch/research/agentResearch.ts`.
-
-// One-directional: the engine types use `readonly` arrays where the wire
-// schemas infer mutable arrays, so only the engine → wire direction holds
-// for the snapshot and question types.
-const _researchSnapshot: AssertEngineToWire<
-  typeof researchStatusSnapshotSchema,
-  EngineResearchSnapshot
-> = true;
-const _researchRun: AssertWire<typeof researchRunStateSchema, EngineResearchRunState> = true;
-const _researchEvidencePacket: AssertWire<
-  typeof researchEvidencePacketSchema,
-  EngineResearchEvidencePacket
-> = true;
-const _researchQuestion: AssertEngineToWire<typeof researchQuestionSchema, EngineResearchQuestion> =
-  true;
-const _researchLine: AssertEngineToWire<typeof researchLineSchema, EngineResearchLine> = true;
-const _researchLineWorkstreamBinding: AssertWire<
-  typeof researchLineWorkstreamBindingSchema,
-  EngineResearchLineWorkstreamBinding
-> = true;
-const _researchFocus: AssertWire<typeof researchFocusSchema, EngineResearchFocus> = true;
-const _researchAlert: AssertWire<typeof researchAlertSchema, EngineResearchAlert> = true;
-const _researchCheckpoint: AssertWire<typeof researchCheckpointSchema, EngineResearchCheckpoint> =
-  true;
-const _researchCursor: AssertWire<typeof researchCommittedCursorSchema, EngineResearchCursor> =
-  true;
-const _aitpHealth: AssertWire<typeof aitpAdapterHealthSchema, EngineAitpHealth> = true;
-const _aitpMaintenanceReceipt: AssertEngineToWire<
-  typeof aitpMaintenanceReceiptSchema,
-  EngineAitpMaintenanceReceipt
-> = true;
-const _humanSteeringCommand: AssertWire<
-  typeof humanSteeringCommandSchema,
-  EngineHumanSteeringCommand
-> = true;
-const _researchLineCreation: AssertWire<
-  typeof researchLineCreationInputSchema,
-  EngineResearchLineCreationInput
-> = true;
-const _researchLineUpdate: AssertWire<
-  typeof researchLineUpdateInputSchema,
-  EngineUpdateLineInput
-> = true;
-type ProposeCheckpointContractInput = z.infer<
-  typeof agentResearchContract.proposeCheckpoint.input
->[0];
-const _proposeCheckpointInput: AssertExactly<
-  ProposeCheckpointContractInput,
-  Parameters<IAgentResearchService['proposeCheckpoint']>[0]
-> = true;
-const _proposeCheckpointFacadeInput: AssertExactly<
-  ProposeCheckpointContractInput,
-  Parameters<AgentFacade['research']['proposeCheckpoint']>[0]
-> = true;
-type ConfirmLineWorkstreamContractInput = z.infer<
-  typeof agentResearchContract.confirmLineWorkstreamBinding.input
->[0];
-type ConfirmLineWorkstreamUserInput = Omit<
-  EngineConfirmLineWorkstreamBindingInput,
-  'confirmedBy'
-> & { readonly confirmedBy: 'user' };
-const _confirmLineWorkstreamContractInput: AssertExactly<
-  ConfirmLineWorkstreamContractInput,
-  MutableDeep<ConfirmLineWorkstreamUserInput>
-> = true;
-const _confirmLineWorkstreamFacadeInput: AssertExactly<
-  Parameters<AgentFacade['research']['confirmLineWorkstreamBinding']>[0],
-  Omit<EngineConfirmLineWorkstreamBindingInput, 'confirmedBy'>
-> = true;
-type ClearLineWorkstreamContractInput = z.infer<
-  typeof agentResearchContract.clearLineWorkstreamBinding.input
->[0];
-const _clearLineWorkstreamContractInput: AssertExactly<
-  ClearLineWorkstreamContractInput,
-  MutableDeep<EngineClearLineWorkstreamBindingInput>
-> = true;
-const _clearLineWorkstreamFacadeInput: AssertExactly<
-  Parameters<AgentFacade['research']['clearLineWorkstreamBinding']>[0],
-  EngineClearLineWorkstreamBindingInput
-> = true;
-const _researchAlertFingerprint: AssertWire<
-  typeof researchAlertFingerprintSchema,
-  Parameters<IAgentResearchService['acknowledgeAlert']>[0]
-> = true;
-const _resolveHumanDecisionInput: AssertWire<
-  typeof resolveHumanDecisionInputSchema,
-  EngineResolveHumanDecisionInput
-> = true;
-
-// Research Loop scientific state layer — one-directional (engine uses
-// `readonly` arrays, wire infers mutable arrays).
-const _researchActionSpec: AssertEngineToWire<
-  typeof researchActionSpecSchema,
-  EngineResearchActionSpec
-> = true;
-const _planActionInput: AssertEngineToWire<
-  typeof planActionInputSchema,
-  EnginePlanActionInput
-> = true;
-const _concludeActionInput: AssertWire<
-  typeof concludeActionInputSchema,
-  EngineConcludeResearchActionInput
-> = true;
-const _researchActionConclusion: AssertEngineToWire<
-  typeof researchActionConclusionSchema,
-  ReturnType<IAgentResearchService['concludeAction']>
-> = true;
-const _researchPlan: AssertEngineToWire<
-  typeof researchPlanSchema,
-  EngineResearchPlan
-> = true;
-const _prepareResearchPlanInput: AssertEngineToWire<
-  typeof prepareResearchPlanInputSchema,
-  EnginePrepareResearchPlanInput
-> = true;
-const _researchPlanV2: AssertEngineToWire<
-  typeof researchPlanV2Schema,
-  EngineResearchPlanV2
-> = true;
-const _prepareResearchPlanV2Input: AssertEngineToWire<
-  typeof prepareResearchPlanV2InputSchema,
-  EnginePrepareResearchPlanV2Input
-> = true;
-const _transitionResearchPlanV2Input: AssertEngineToWire<
-  typeof transitionResearchPlanV2InputSchema,
-  EngineTransitionResearchPlanV2Input
-> = true;
-const _researchProgressReport: AssertEngineToWire<
-  typeof researchProgressReportSchema,
-  EngineResearchProgressReport
-> = true;
-const _researchStateChange: AssertWire<
-  typeof researchStateChangeSchema,
-  EngineResearchStateChange
-> = true;
-const _researchHumanGate: AssertWire<
-  typeof researchHumanGateSchema,
-  EngineResearchHumanGate
-> = true;
-const _resolvedHumanGate: AssertWire<
-  typeof researchHumanGateSchema,
-  ReturnType<IAgentResearchService['resolveHumanDecision']>
-> = true;
-
 // agent/services.ts (goal) — parity against the engine's `agent/goal` types.
 const _goalStatus: AssertWire<typeof goalStatusSchema, GoalStatus> = true;
 const _goalActor: AssertWire<typeof goalActorSchema, GoalActor> = true;
@@ -921,14 +530,6 @@ const _compactionCompletedEvent: AssertWire<
   CompactionCompletedEvent
 > = true;
 const _warningEvent: AssertWire<typeof warningEventSchema, WarningEvent> = true;
-const _researchUpdatedEvent: AssertWire<
-  typeof researchUpdatedEventSchema,
-  ResearchUpdatedEvent
-> = true;
-const _aitpModeUpdatedEvent: AssertWire<
-  typeof aitpModeUpdatedEventSchema,
-  AitpModeUpdatedEvent
-> = true;
 const _goalChangeStats: AssertWire<typeof goalChangeStatsSchema, GoalChangeStats> = true;
 const _goalChange: AssertWire<typeof goalChangeSchema, GoalChange> = true;
 const _goalMutation: AssertWire<typeof goalMutationSchema, GoalMutation> = true;

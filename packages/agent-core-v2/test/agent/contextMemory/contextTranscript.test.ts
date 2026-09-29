@@ -107,7 +107,7 @@ describe('reduceContextTranscript', () => {
       compaction('SUM', 3, 1),
       appendMessage(userMessage('u4')),
     ]);
-    expect(result.foldedLength).toBe(3);
+    expect(result.foldedLength).toBe(4);
   });
 
   it('accounts for the elision marker when the record kept a head segment', () => {
@@ -117,7 +117,7 @@ describe('reduceContextTranscript', () => {
       ...assistantStep('s1', 'a1'),
       compaction('SUM', 3, 2, 1),
     ]);
-    expect(result.foldedLength).toBe(4);
+    expect(result.foldedLength).toBe(5);
   });
 
   it('carries the originating wire record time per entry', () => {
@@ -157,7 +157,7 @@ describe('reduceContextTranscript', () => {
     ]);
     expect(texts(result)).toEqual(['message A', 'reply A', 'summary text']);
     expect(result.entries.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
-    expect(result.foldedLength).toBe(2);
+    expect(result.foldedLength).toBe(3);
   });
 
   it('undo without compaction keeps the earlier exchange intact', () => {

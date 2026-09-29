@@ -23,7 +23,7 @@ import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMo
 import type { PermissionMode } from '#/agent/permissionPolicy/types';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentTaskService } from '#/agent/task/task';
-import { TowerStore } from '#/features/tower/protocol/index';
+import { TowerProtocolError, TowerStore } from '#/features/tower/protocol/index';
 import { IAgentTowerService } from '#/features/tower/tower';
 import { ITowerRateLimitService } from '#/features/tower/towerRateLimit';
 import { SubagentTask } from '#/agent/tools/agent/subagent-task';
@@ -406,6 +406,29 @@ describe('TowerSpawnTool', () => {
     });
   });
 
+  it('maps a worktree protocol refusal without launching or owning the mission', async () => {
+    const addWorktree = vi.spyOn(TowerStore.prototype, 'addWorktree').mockRejectedValueOnce(
+      new TowerProtocolError('branch is not owned'),
+    );
+    const result = await execute(WORKER_ARGS);
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('branch is not owned');
+    expect(createAgent).not.toHaveBeenCalled();
+    expect(registerTask).not.toHaveBeenCalled();
+    expect((await store.load()).missions.find((mission) => mission.id === 'M1')?.owner).toBeUndefined();
+    addWorktree.mockRestore();
+  });
+
+  it('refuses reserved or whitespace-padded names before provisioning a worktree', async () => {
+    const addWorktree = vi.spyOn(TowerStore.prototype, 'addWorktree');
+    for (const name of ['tower', 'all', ' agent-build ']) {
+      const result = await execute({ ...WORKER_ARGS, name });
+      expect(result.isError).toBe(true);
+      expect(createAgent).not.toHaveBeenCalled();
+    }
+    expect(addWorktree).not.toHaveBeenCalled();
+  });
+
   it('registers a reviewer without a worktree', async () => {
     const result = await execute({
       name: 'reviewer-a',
@@ -421,6 +444,7 @@ describe('TowerSpawnTool', () => {
       agentId: 'agent-7',
       kind: 'reviewer',
       reviewTarget: 'feat/build-gemm',
+      reviewMissionId: 'M1',
     });
     expect(entry?.worktree).toBeUndefined();
   });
@@ -441,6 +465,7 @@ describe('TowerSpawnTool', () => {
     expect(result.isError).toBe(true);
     expect(result.output).toContain('already registered');
     expect(result.output).toContain('Agent(resume="agent-old"');
+    expect(result.output).toContain('run_in_background=true');
     expect(createAgent).not.toHaveBeenCalled();
   });
 });

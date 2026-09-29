@@ -2,7 +2,7 @@
  * `SessionEventBroadcaster` — seq stamping, volatile vs durable, fan-out, replay.
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -498,31 +498,6 @@ describe('SessionEventBroadcaster', () => {
       ['turn.ended', 'subscription'],
       ['event.session.work_changed', 'immediate'],
     ]);
-  });
-
-  it('drops the internal Research revision signal before sequencing or journaling', async () => {
-    const lc = new FakeLifecycle();
-    const main = lc.addAgent('main');
-    sessions.set('s1', lc);
-    const { target, envelopes } = collectingTarget();
-    await bc.subscribe('s1', target);
-
-    main.bus.emit(agentEvent('research.revision_advanced', { notifyGoal: true }));
-    main.bus.emit(agentEvent('research.updated', {
-      snapshot: { mode: 'ready', revision: 7 },
-    }));
-    const cursor = await bc.getCursor('s1');
-
-    expect(envelopes).toHaveLength(1);
-    expect(envelopes[0]).toMatchObject({
-      type: 'research.updated',
-      seq: 1,
-      payload: {
-        type: 'research.updated',
-        snapshot: { mode: 'ready', revision: 7 },
-      },
-    });
-    expect(cursor.seq).toBe(1);
   });
 
   it('fans out volatile events with the current watermark + offset, not journaled', async () => {
@@ -1255,6 +1230,21 @@ describe('SessionEventBroadcaster', () => {
       // change signal stays durable so a reconnecting client can replay it.
       expect(globalView.envelopes[0]!.volatile).toBeUndefined();
       expect(globalView.envelopes[1]!.volatile).toBe(true);
+
+      // A durable global event dispatched after close must not extend the
+      // journal: the dispatch is queued on the state's queue and runs after
+      // `close()` already disposed that state's journal.
+      const journalPath = join(dir, '__global__.jsonl');
+      await vi.waitFor(async () => {
+        expect(await readFile(journalPath, 'utf8').catch(() => '')).toContain(
+          'event.plugin.changed',
+        );
+      });
+      const before = await readFile(journalPath, 'utf8');
+      eventBus.emit({ type: 'event.plugin.changed', payload: {} });
+      await bc.close();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(await readFile(journalPath, 'utf8')).toBe(before);
     });
 
     it('drops malformed event.capability.changed payloads', async () => {
@@ -1830,6 +1820,47 @@ describe('SessionEventBroadcaster', () => {
     expect((envelopes[3]!.payload as { resolved_at?: string }).resolved_at).toBeTypeOf('string');
   });
 
+  it.each([
+    { kind: 'approval' as const, resolvedType: 'event.approval.resolved' },
+    { kind: 'question' as const, resolvedType: 'event.question.answered' },
+  ])('delivers $kind interactions from an excluded agent through live and replay subscriptions', async ({ kind, resolvedType }) => {
+    const lc = new FakeLifecycle();
+    lc.addAgent('main');
+    lc.addAgent('agent-0');
+    sessions.set('s1', lc);
+    const { target, envelopes } = collectingTarget();
+    await bc.subscribe('s1', target, new Set(['main']));
+
+    lc.interactions.enqueue({
+      id: 'interaction-sub',
+      kind,
+      payload: kind === 'approval'
+        ? { toolCallId: 'call-sub', toolName: 'Bash', action: 'run', display: { kind: 'command', command: 'ls' } }
+        : { toolCallId: 'call-sub', questions: [{ question: 'Pick one', options: [{ label: 'A' }, { label: 'B' }] }] },
+      origin: { agentId: 'agent-0' },
+    });
+    await bc.getCursor('s1');
+
+    const requestedType = `event.${kind}.requested`;
+    expect(envelopes.find((e) => e.type === requestedType)?.payload).toMatchObject({
+      agentId: 'agent-0',
+      agent_id: 'agent-0',
+    });
+
+    lc.interactions.respond('interaction-sub', kind === 'approval'
+      ? { decision: 'approved' }
+      : { answers: { q_0: 'opt_0_0' } });
+    await bc.getCursor('s1');
+    expect(envelopes.find((e) => e.type === resolvedType)?.payload).toMatchObject({
+      agentId: 'agent-0',
+    });
+
+    const replay = await bc.getBufferedSince('s1', { seq: 1 }, new Set(['main']));
+    expect(replay.resyncRequired).toBe(false);
+    expect(replay.events.map((event) => event.envelope.type)).toContain(requestedType);
+    expect(replay.events.map((event) => event.envelope.type)).toContain(resolvedType);
+  });
+
   it('fans event.session.work_changed out to every connection, bypassing agent filters', async () => {
     // `event.session.*` is a global event class: a work_changed journaled on
     // s1 reaches subscribers of other sessions, and subscribers whose agent
@@ -2087,6 +2118,14 @@ describe('SessionEventBroadcaster', () => {
           delta: (envelope.payload as { delta: string }).delta,
         })),
     ).toEqual([{ offset: 0, delta: 'abc' }]);
+
+    // A global event racing close must not create the global journal: the
+    // state creation is still in flight when `close()` flips the flag, so
+    // `createGlobalState` has to bail out after opening the journal.
+    eventBus.emit({ type: 'event.plugin.changed', payload: {} });
+    await bc.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await readdir(dir)).not.toContain('__global__.jsonl');
   });
 
   // -------------------------------------------------------------------------

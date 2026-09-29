@@ -28,7 +28,6 @@ import type {
   QuestionItem,
   QuestionOption,
   QuestionResponse,
-  ResearchStatusSnapshot,
 } from '../types';
 
 import type {
@@ -48,7 +47,6 @@ import type {
   WireQuestionOption,
   WireQuestionRequest,
   WireQuestionResponse,
-  WireResearchStatusSnapshot,
   WireSession,
   WireSessionUsage,
   WireWorkspace,
@@ -163,11 +161,13 @@ export function toAppMessageContent(wire: WireMessageContent): AppMessageContent
       return {
         type: 'image',
         source: toAppImageSource(wire.source),
+        name: wire.name,
       };
     case 'video':
       return {
         type: 'video',
         source: toAppImageSource(wire.source),
+        name: wire.name,
       };
     case 'file':
       return {
@@ -236,7 +236,7 @@ function toWireMessageContent(app: AppMessageContent): WireMessageContent {
       } else {
         wireSrc = { kind: 'url', url: src.url, id: src.id };
       }
-      return { type: app.type, source: wireSrc };
+      return { type: app.type, name: app.name, source: wireSrc };
     }
     case 'file':
       return {
@@ -521,44 +521,6 @@ export function toAppGoal(snapshot: unknown): AppGoal | null {
   };
 }
 
-function cloneResearchValue<T>(value: T): T {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneResearchValue(item)) as T;
-  }
-  if (value !== null && typeof value === 'object') {
-    const clone: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value)) {
-      clone[key] = cloneResearchValue(child);
-    }
-    return clone as T;
-  }
-  return value;
-}
-
-export function toAppResearchSnapshot(
-  snapshot: WireResearchStatusSnapshot,
-): ResearchStatusSnapshot {
-  // Research REST and WS payloads are already camelCase. Deep-clone the complete
-  // JSON-safe protocol object so nested receipts/progress never share mutable
-  // wire references, while the bidirectional assignments keep the local wire and
-  // app mirrors structurally aligned at compile time.
-  const appSnapshot: ResearchStatusSnapshot = cloneResearchValue(snapshot);
-  const wireSnapshot: WireResearchStatusSnapshot = appSnapshot;
-  return wireSnapshot;
-}
-
-/**
- * Map a WireEvent to an AppEvent.
- *
- * Decision: reducer consumes AppEvent.
- * - Visible events are fully mapped to their camelCase AppEvent variant.
- * - No-op-but-known streaming/tool events (tool.*, assistant.tool_use_*,
- *   assistant.completed) are folded to { type: 'unknown', raw } so the reducer
- *   can advance lastSeqBySession without emitting warnings.
- *   We use a dedicated sentinel raw: { _noop: true } so Task 7 reducer can
- *   distinguish real unknowns (push warning) from no-op knowns (silent advance).
- * - Truly unknown events are also { type: 'unknown', raw } but raw._noop is absent.
- */
 export function toAppEvent(wire: WireEvent): AppEvent {
   // TypeScript cannot narrow the WireEvent union through specific `case` arms
   // because the catch-all `WireEventUnknown` member has `type: string` (broad)
@@ -647,13 +609,6 @@ export function toAppEvent(wire: WireEvent): AppEvent {
         goal: goal?.status === 'complete' ? null : goal,
       };
     }
-
-    case 'event.research.updated':
-      return {
-        type: 'researchUpdated',
-        sessionId: w.session_id,
-        snapshot: toAppResearchSnapshot(w.payload.snapshot),
-      };
 
     // ----- Message lifecycle -----
     case 'event.message.created':

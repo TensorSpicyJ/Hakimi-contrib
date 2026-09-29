@@ -8,6 +8,7 @@ import {
 
 import { type ApprovalHandler, type Event, type QuestionHandler } from '#/events';
 import type { SDKRpcClientBase } from '#/rpc';
+import type { ResearchSnapshot } from '@moonshot-ai/agent-core-v2/features/research/research';
 import type {
   AddAdditionalDirOptions,
   AddAdditionalDirResult,
@@ -30,9 +31,6 @@ import type {
   PromptSkillActivation,
   ReloadSessionOptions,
   ReloadSummary,
-  ResearchCommand,
-  ResearchCommandResponse,
-  ResearchStatusSnapshot,
   ResumeGoalInput,
   ResumedSessionState,
   ResumedSessionSummary,
@@ -79,6 +77,22 @@ export function capabilityRpc(rpc: SDKRpcClientBase): CapabilityRpcSurface {
     throw new TypeError('The capability surface is unavailable on this engine (requires v2).');
   }
   return candidate as CapabilityRpcSurface;
+}
+
+interface ResearchRpcSurface {
+  getResearch(input: { sessionId: string }): Promise<ResearchSnapshot>;
+  selectResearch(input: { sessionId: string; path: string }): Promise<ResearchSnapshot>;
+  setResearchEnabled(input: { sessionId: string; enabled: boolean }): Promise<ResearchSnapshot>;
+}
+
+function researchRpc(rpc: SDKRpcClientBase): ResearchRpcSurface {
+  const candidate = rpc as Partial<ResearchRpcSurface>;
+  if (typeof candidate.getResearch !== 'function' ||
+      typeof candidate.selectResearch !== 'function' ||
+      typeof candidate.setResearchEnabled !== 'function') {
+    throw new TypeError('Research mode requires the v2 engine.');
+  }
+  return candidate as ResearchRpcSurface;
 }
 
 export class Session {
@@ -522,6 +536,21 @@ export class Session {
   }
 
   // --- Goal lifecycle ---------------------------------------------------
+  async getResearch(): Promise<ResearchSnapshot> {
+    this.ensureOpen();
+    return researchRpc(this.rpc).getResearch({ sessionId: this.id });
+  }
+
+  async selectResearch(path: string): Promise<ResearchSnapshot> {
+    this.ensureOpen();
+    return researchRpc(this.rpc).selectResearch({ sessionId: this.id, path });
+  }
+
+  async setResearchEnabled(enabled: boolean): Promise<ResearchSnapshot> {
+    this.ensureOpen();
+    return researchRpc(this.rpc).setResearchEnabled({ sessionId: this.id, enabled });
+  }
+
   // Deterministic user/host control surface. There is intentionally no
   // `updateGoal`: the goal's terminal status is decided by the model via the
   // in-conversation UpdateGoal tool (or the goal driver on budget/error), not
@@ -550,28 +579,6 @@ export class Session {
   async cancelGoal(): Promise<GoalSnapshot> {
     this.ensureOpen();
     return this.rpc.cancelGoal({ sessionId: this.id });
-  }
-
-  // --- AITP Research Mode ---------------------------------------------------
-  // The research surface exists only on the v2 engine; a v1-backed session
-  // rejects with `not_implemented` from the base RPC client.
-
-  /** Read the current research-mode snapshot for this session's main agent. */
-  async getResearch(): Promise<ResearchStatusSnapshot> {
-    this.ensureOpen();
-    return this.rpc.getResearch({ sessionId: this.id });
-  }
-
-  /**
-   * Submit one research steering command (mode on/off, pause/resume, question
-   * create/edit, focus, line switch, reopen/defer/block/close, Goal alignment,
-   * human decision resolve, typed evidence review, run observation, alert
-   * acknowledgement, checkpoint propose/commit). Resolves with the post-command
-   * snapshot.
-   */
-  async commandResearch(command: ResearchCommand): Promise<ResearchCommandResponse> {
-    this.ensureOpen();
-    return this.rpc.commandResearch({ sessionId: this.id, command });
   }
 
   /**

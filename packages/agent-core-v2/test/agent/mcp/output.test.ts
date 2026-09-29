@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 
 import type { ITelemetryService, TelemetryProperties } from '#/app/telemetry/telemetry';
+import type { ISessionMediaStore } from '#/agent/media/sessionMediaStore';
 import { convertMCPContentBlock, mcpResultToExecutableOutput } from '#/agent/mcp/output';
 import { createMcpTool } from '#/agent/mcp/tools/mcp';
 import type { MCPClient, MCPContentBlock, MCPToolResult } from '#/mcpCore/types';
@@ -541,6 +542,40 @@ describe('mcpResultToExecutableOutput', () => {
     expect(properties?.['final_width']).toBeLessThanOrEqual(3000);
     expect(properties?.['final_height']).toBeLessThanOrEqual(3000);
     expect(properties?.['duration_ms']).toEqual(expect.any(Number));
+  });
+
+  test('exposes only a kimi-file reference when preserving an MCP attachment', async () => {
+    const materializedPath = '/var/lib/kimi/session-media/f_mcp_attachment.pdf';
+    let returnedPath: string | undefined;
+    const attachmentStore: ISessionMediaStore = {
+      _serviceBrand: undefined,
+      pathFor: () => materializedPath,
+      resolveDisplayPath: async () => materializedPath,
+      read: async () => undefined,
+      open: async () => undefined,
+      materialize: async () => {
+        returnedPath = materializedPath;
+        return materializedPath;
+      },
+    };
+
+    const out = await mcpResultToExecutableOutput(
+      result([{
+        type: 'resource',
+        resource: {
+          uri: 'file:///attachment.pdf',
+          mimeType: 'application/pdf',
+          blob: Buffer.from('attachment').toString('base64'),
+        },
+      }]),
+      'mcp__s__attachment',
+      { attachmentStore },
+    );
+
+    expect(returnedPath).toBe(materializedPath);
+    expect(out.output).toContain('kimi-file://f_mcp_');
+    expect(out.output).toContain('MIME: "application/pdf"; size: 10 bytes.');
+    expect(out.output).not.toContain(materializedPath);
   });
 
   test('persists originals into the provided session originals dir', async () => {

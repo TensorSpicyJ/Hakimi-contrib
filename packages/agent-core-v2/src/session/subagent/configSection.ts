@@ -13,7 +13,9 @@
  *   Agent, `preset.swarm > preset.<profile> > agents.swarm > agents.<profile> >
  *   caller` for AgentSwarm, and the dedicated `tower_worker` /
  *   `tower_reviewer` route followed by caller for Tower. Fresh spawns and
- *   resumes both use that resolver.
+ *   resumes both use that resolver. Profile-declared fallback routes fill
+ *   missing fields after explicit routes, in declared order (preset then
+ *   agents for each name), before falling back to the caller.
  *
  * - `[secondary_model]` — a deprecated compatibility section. Its schema and
  *   explicit reads/writes remain available for v1/API round-trips, but it is
@@ -84,6 +86,7 @@ export interface SubagentRouteRequest {
   readonly route: SubagentRouteKind;
   readonly profileName?: string;
   readonly modelPreference?: AgentModelPreference;
+  readonly modelRouteFallbacks?: readonly string[];
   readonly caller: { readonly modelAlias: string; readonly thinkingLevel: string };
 }
 
@@ -383,10 +386,11 @@ export function describeSubagentModelOverride(
   subagent: SubagentConfig | undefined,
   profileName: string,
   route: SubagentRouteKind = 'agent',
+  modelRouteFallbacks: readonly string[] = [],
 ): SubagentModelConfig | undefined {
   if (subagent === undefined) return undefined;
   const active = activeSubagentPreset(subagent);
-  const entries = routeEntries(subagent, active, route, profileName);
+  const entries = routeEntries(subagent, active, route, profileName, modelRouteFallbacks);
   const model = firstConfiguredEntry(entries, 'model')?.value;
   const thinkingEffort = firstConfiguredEntry(entries, 'thinkingEffort')?.value;
   if (model === undefined && thinkingEffort === undefined) return undefined;
@@ -471,7 +475,7 @@ export function resolveSubagentBinding(
   const subagent = readSubagentConfig(config);
   const active = activeSubagentPreset(subagent);
   requireActivePreset(subagent, active);
-  const entries = routeEntries(subagent, active, request.route, request.profileName);
+  const entries = routeEntries(subagent, active, request.route, request.profileName, request.modelRouteFallbacks);
   const modelCandidate = firstConfiguredEntry(entries, 'model');
   const thinkingCandidate = firstConfiguredEntry(entries, 'thinkingEffort');
 
@@ -529,21 +533,30 @@ function routeEntries(
   active: string | undefined,
   route: SubagentRouteKind,
   profileName: string | undefined,
+  modelRouteFallbacks: readonly string[] = [],
 ): readonly RouteEntry[] {
   const profile = profileName ?? '';
   const preset = requireActivePreset(subagent, active);
   const agents = subagent?.agents;
+  const fallbackEntries: RouteEntry[] = modelRouteFallbacks.flatMap((name) => active === undefined
+    ? [{ entry: ownRouteEntry(agents, name), source: 'agents', routeName: `agents.${name}` }]
+    : [
+        { entry: ownRouteEntry(preset, name), source: 'preset', routeName: `presets.${active}.${name}` },
+        { entry: ownRouteEntry(agents, name), source: 'agents', routeName: `agents.${name}` },
+      ]);
   if (route === 'swarm') {
     return active === undefined
       ? [
           { entry: ownRouteEntry(agents, SUBAGENT_PRESET_SWARM_PROFILE), source: 'agents', routeName: 'agents.swarm' },
           { entry: ownRouteEntry(agents, profile), source: 'agents', routeName: `agents.${profile}` },
+          ...fallbackEntries,
         ]
       : [
           { entry: ownRouteEntry(preset, SUBAGENT_PRESET_SWARM_PROFILE), source: 'preset', routeName: `presets.${active}.swarm` },
           { entry: ownRouteEntry(preset, profile), source: 'preset', routeName: `presets.${active}.${profile}` },
           { entry: ownRouteEntry(agents, SUBAGENT_PRESET_SWARM_PROFILE), source: 'agents', routeName: 'agents.swarm' },
           { entry: ownRouteEntry(agents, profile), source: 'agents', routeName: `agents.${profile}` },
+          ...fallbackEntries,
         ];
   }
   if (
@@ -560,10 +573,14 @@ function routeEntries(
         ];
   }
   return active === undefined
-    ? [{ entry: ownRouteEntry(agents, profile), source: 'agents', routeName: `agents.${profile}` }]
+    ? [
+        { entry: ownRouteEntry(agents, profile), source: 'agents', routeName: `agents.${profile}` },
+        ...fallbackEntries,
+      ]
     : [
         { entry: ownRouteEntry(preset, profile), source: 'preset', routeName: `presets.${active}.${profile}` },
         { entry: ownRouteEntry(agents, profile), source: 'agents', routeName: `agents.${profile}` },
+        ...fallbackEntries,
       ];
 }
 

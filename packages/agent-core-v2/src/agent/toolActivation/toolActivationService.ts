@@ -20,9 +20,8 @@
  * runtime re-bind or `setActiveTools` are activated without a restart.
  * Already-registered names are skipped. Besides withdrawn records, a full
  * pass also deactivates records whose `when` predicate has flipped from
- * `true` to `false` since the last pass — so feature-gated tools (e.g.
- * AITP Research Mode's active-only tool surface) are withdrawn when the
- * mode exits. Restricting visibility of statically-allowed tools remains the
+ * `true` to `false` since the last pass. Restricting visibility of
+ * statically-allowed tools remains the
  * request-time tool policy's job.
  *
  * Resolving contributions lazily inside `activate()` / the change

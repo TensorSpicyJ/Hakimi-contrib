@@ -51,6 +51,8 @@ export interface IAgentLifecycleService {
 
   readonly onDidCreate: Event<IAgentScopeHandle>;
   readonly onDidDispose: Event<string>;
+  /** Fires before an agent's scope is torn down, while its services are still live. */
+  readonly onWillClose?: Event<IAgentScopeHandle>;
 
   create(opts?: CreateAgentOptions): Promise<IAgentScopeHandle>;
 

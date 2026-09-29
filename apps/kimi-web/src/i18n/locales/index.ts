@@ -1,3 +1,5 @@
+import en_researchContext from './en/researchContext';
+import zh_researchContext from './zh/researchContext';
 import en_common from './en/common';
 import en_app from './en/app';
 import en_sidebar from './en/sidebar';
@@ -23,7 +25,6 @@ import en_tools from './en/tools';
 import en_layout from './en/layout';
 import en_mobile from './en/mobile';
 import en_theme from './en/theme';
-import en_research from './en/research';
 
 import zh_common from './zh/common';
 import zh_app from './zh/app';
@@ -50,7 +51,6 @@ import zh_tools from './zh/tools';
 import zh_layout from './zh/layout';
 import zh_mobile from './zh/mobile';
 import zh_theme from './zh/theme';
-import zh_research from './zh/research';
 import en_onboarding from './en/onboarding';
 import zh_onboarding from './zh/onboarding';
 import en_settings from './en/settings';
@@ -66,6 +66,7 @@ import zh_artifactPreview from './zh/artifactPreview';
 
 export const messages = {
   en: {
+    researchContext: en_researchContext,
     common: en_common,
     app: en_app,
     sidebar: en_sidebar,
@@ -91,7 +92,6 @@ export const messages = {
     layout: en_layout,
     mobile: en_mobile,
     theme: en_theme,
-    research: en_research,
     onboarding: en_onboarding,
     settings: en_settings,
     header: en_header,
@@ -100,6 +100,7 @@ export const messages = {
     artifactPreview: en_artifactPreview,
   },
   zh: {
+    researchContext: zh_researchContext,
     common: zh_common,
     app: zh_app,
     sidebar: zh_sidebar,
@@ -125,7 +126,6 @@ export const messages = {
     layout: zh_layout,
     mobile: zh_mobile,
     theme: zh_theme,
-    research: zh_research,
     onboarding: zh_onboarding,
     settings: zh_settings,
     header: zh_header,

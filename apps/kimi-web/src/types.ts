@@ -11,6 +11,7 @@ export interface FileData {
   isBinary: boolean;
   size: number;
   lineCount?: number;
+  truncated?: boolean;
 }
 
 /** A file entry shown in the composer's @-mention menu. */

@@ -66,12 +66,11 @@
  *    validation stays lenient (warning + pass-through).
  *
  * Vendor-level facts — the endpoint fallback chain, full host-header
- * forwarding, and OAuth-catalog model discovery — are shared constants
- * declared identically on both registrations, so id-level queries read
- * either one. Kimi declares no vendor-level capability: model capabilities
- * come from the catalog, not from client-side tables (Kimi model ids never
- * match the protocol bases' builtin catalogs, so the detected layer answers
- * UNKNOWN on its own).
+ * forwarding, OAuth-catalog model discovery, and image capabilities — are
+ * shared constants declared identically on every registration, so id-level
+ * queries read any of them. Model capabilities still come from the catalog,
+ * not from client-side tables (Kimi model ids never match the protocol bases'
+ * builtin catalogs, so the detected layer answers UNKNOWN on its own).
  *
  * Deliberately absent (do not reintroduce): a 64-char tool-call-id policy
  * (the base default is identical), an extra-body deep-merge morph, and a
@@ -88,7 +87,10 @@ import type {
 } from '#/kosong/protocol/protocolTrait';
 
 import { type OpenAIToolParam, toolToOpenAI } from '../../bases/openai/openai-common';
-import { registerProviderDefinition } from '../../providerDefinition';
+import {
+  registerProviderDefinition,
+  type ProviderImageCapabilities,
+} from '../../providerDefinition';
 import { classifyKimiQuotaError } from './kimi-errors';
 import { KimiFiles } from './kimi-files';
 import { normalizeKimiToolSchema } from './kimi-schema';
@@ -309,6 +311,17 @@ const kimiEndpoint: ProtocolEndpoint = {
   defaultBaseUrl: KIMI_DEFAULT_BASE_URL,
 };
 
+const kimiImageCapabilities: ProviderImageCapabilities = {
+  acceptedMimes: ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/heic', 'image/heif'],
+  inlineByteBudget: 5 * 1024 * 1024,
+};
+
+export const kimiResponsesTrait: ProtocolTrait = {
+  endpoint: () => kimiEndpoint,
+
+  convertError: (error) => classifyKimiQuotaError(error),
+};
+
 registerProviderDefinition({
   id: 'kimi',
   baseProtocol: 'openai',
@@ -316,6 +329,7 @@ registerProviderDefinition({
   endpoint: kimiEndpoint,
   hostHeaders: 'full',
   modelSource: 'oauth-catalog',
+  imageCapabilities: kimiImageCapabilities,
 });
 
 registerProviderDefinition({
@@ -325,4 +339,15 @@ registerProviderDefinition({
   endpoint: kimiEndpoint,
   hostHeaders: 'full',
   modelSource: 'oauth-catalog',
+  imageCapabilities: kimiImageCapabilities,
+});
+
+registerProviderDefinition({
+  id: 'kimi',
+  baseProtocol: 'openai_responses',
+  traits: [kimiResponsesTrait],
+  endpoint: kimiEndpoint,
+  hostHeaders: 'full',
+  modelSource: 'oauth-catalog',
+  imageCapabilities: kimiImageCapabilities,
 });

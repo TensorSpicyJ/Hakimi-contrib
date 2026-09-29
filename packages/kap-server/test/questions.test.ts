@@ -43,6 +43,7 @@ interface QuestionItemWire {
 interface QuestionWire {
   question_id: string;
   session_id: string;
+  agent_id?: string;
   turn_id?: number;
   tool_call_id?: string;
   questions: QuestionItemWire[];
@@ -153,6 +154,7 @@ describe('server-v2 /api/v1/sessions/{sid}/questions', () => {
     const item = body.data.items[0]!;
     expect(item.question_id).toBe('q-1');
     expect(item.session_id).toBe(sid);
+    expect(item.agent_id).toBe('main');
     expect(item.tool_call_id).toBe('tc-q-1');
     expect(item.questions).toEqual([
       {

@@ -73,6 +73,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
   private readonly handles = new Map<string, IAgentScopeHandle>();
   private readonly onDidCreateEmitter = this._register(new Emitter<IAgentScopeHandle>());
   private readonly onDidDisposeEmitter = this._register(new Emitter<string>());
+  private readonly onWillCloseEmitter = this._register(new Emitter<IAgentScopeHandle>());
   private readonly interactionBusDisposables = new Map<string, IDisposable>();
   private readonly creating = new Map<string, Promise<IAgentScopeHandle>>();
 
@@ -81,6 +82,9 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
   }
   get onDidDispose() {
     return this.onDidDisposeEmitter.event;
+  }
+  get onWillClose() {
+    return this.onWillCloseEmitter.event;
   }
 
   constructor(
@@ -279,7 +283,8 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     const handle = this.handles.get(agentId);
     if (handle === undefined) return;
     this.handles.delete(agentId);
-    await handle.accessor.get(IAgentTaskService).stopAllOnExit('Session closed');
+    this.onWillCloseEmitter.fire(handle);
+    await handle.accessor.get(IAgentTaskService).suppressAllTerminalNotifications();
     const loop = handle.accessor.get(IAgentLoopService);
     const compaction = handle.accessor.get(IAgentFullCompactionService).compacting;
     const compactionSettled = compaction?.promise.catch(() => undefined) ?? Promise.resolve();
@@ -292,6 +297,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
       compaction.abortController.abort(reason);
     }
     await Promise.all([loop.settled(), compactionSettled]);
+    await handle.accessor.get(IAgentTaskService).stopAllOnExit('Session closed');
     handle.dispose();
     this.onDidDisposeEmitter.fire(agentId);
   }

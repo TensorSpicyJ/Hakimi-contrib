@@ -580,6 +580,17 @@ describe('AgentTaskService', () => {
     ]);
   });
 
+  it('retains completed foreground agents in all-task listings while excluding foreground processes', async () => {
+    const { manager } = createAgentTaskService();
+    const agentId = manager.registerTask(agentTask(Promise.resolve({ result: 'bounded derivation' }), 'foreground theory'), { detached: false });
+    const processId = manager.registerTask(new ProcessTask(immediateProcess(0), 'echo done', 'foreground process'), { detached: false });
+    await Promise.all([manager.wait(agentId), manager.wait(processId)]);
+    expect(manager.list(true)).toEqual([]);
+    expect(manager.list(false)).toEqual([
+      expect.objectContaining({ taskId: agentId, kind: 'agent', detached: false, status: 'completed' }),
+    ]);
+  });
+
   it('honours the list limit parameter', () => {
     const { manager } = createAgentTaskService();
     const first = registerProcess(manager, pendingProcess().proc, 'sleep 1', 'one');

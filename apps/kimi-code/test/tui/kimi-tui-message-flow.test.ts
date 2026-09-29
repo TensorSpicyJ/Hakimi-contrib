@@ -13,7 +13,6 @@ import type {
   ApprovalResponse,
   Event,
   GoalSnapshot,
-  ResearchStatusSnapshot,
   Session,
   SkillSummary,
 } from '@bhjia-phys/hakimi-sdk';
@@ -4252,32 +4251,6 @@ command = "vim"
     expect(expanded).toContain('Keep the src/tui compaction notes.');
   });
 
-  it('syncs Ctrl+O expansion state to the visible Research Board', async () => {
-    const { driver } = await makeDriver();
-    const snapshot: ResearchStatusSnapshot = {
-          mode: 'ready',
-          loopStatus: 'active',
-          planningPolicy: 'collaborative',
-      questions: [],
-      lines: [],
-      openQuestionCount: 0,
-      activeQuestionCount: 0,
-      blockedQuestionCount: 0,
-      alerts: [],
-      lineWorkstreamBindings: [],
-      aitpHealth: { phase: 'ready' },
-      phase: 'action_executing',
-      revision: 1,
-    };
-    driver.state.researchBoard.setSnapshot(snapshot);
-    expect(driver.state.researchBoard.isExpanded()).toBe(false);
-
-    driver.state.editor.onToggleToolExpand?.();
-    expect(driver.state.researchBoard.isExpanded()).toBe(true);
-    driver.state.editor.onToggleToolExpand?.();
-    expect(driver.state.researchBoard.isExpanded()).toBe(false);
-  });
-
   it('honors existing tool output expansion when a compaction block is created', async () => {
     const { driver } = await makeDriver();
     const sendQueued = vi.fn();
@@ -5555,7 +5528,7 @@ command = "vim"
       } as Event,
       sendQueued,
     );
-    expect(driver.state.ui.requestRender).toHaveBeenCalled();
+    expect(driver.state.ui.requestRender).not.toHaveBeenCalled();
 
     driver.sessionEventHandler.handleEvent(
       {
@@ -5617,7 +5590,7 @@ command = "vim"
       } as Event,
       sendQueued,
     );
-    expect(driver.state.ui.requestRender).toHaveBeenCalled();
+    expect(driver.state.ui.requestRender).not.toHaveBeenCalled();
 
     transcript = stripSgr(renderTranscript(driver));
     expect(transcript).toContain('Agent Swarm');

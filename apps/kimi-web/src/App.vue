@@ -15,7 +15,6 @@ import DiffView from './components/chat/DiffView.vue';
 import ModelPicker from './components/settings/ModelPicker.vue';
 import ProviderManager from './components/settings/ProviderManager.vue';
 import LoginDialog from './components/dialogs/LoginDialog.vue';
-import ResearchManagerDialog from './components/dialogs/ResearchManagerDialog.vue';
 import SettingsDialog from './components/settings/SettingsDialog.vue';
 import AddWorkspaceDialog from './components/dialogs/AddWorkspaceDialog.vue';
 import ConfirmDialogHost from './components/dialogs/ConfirmDialogHost.vue';
@@ -29,13 +28,12 @@ import GlobalLoading from './components/GlobalLoading.vue';
 import DebugPanel from './debug/DebugPanel.vue';
 import { isTraceEnabled } from './debug/trace';
 import { useKimiWebClient } from './composables/useKimiWebClient';
+import { useResearchContext } from './composables/useResearchContext';
 import { useConfirmDialog } from './composables/useConfirmDialog';
 import type { PromptAttachment } from './composables/useKimiWebClient';
 import {
   createComposerCommandSubmission,
-  restoreComposerCommandSubmission,
   type ComposerCommandEvent,
-  type ComposerCommandSubmission,
 } from './composables/useComposerDraft';
 import type { TurnAttachment } from './types';
 import { useAuthGate } from './composables/useAuthGate';
@@ -50,32 +48,10 @@ import ServerAuthDialog from './components/ServerAuthDialog.vue';
 import { initServerAuth, onAuthRequired } from './api/daemon/serverAuth';
 import type {
   AppConfig,
-  ResearchGoalAlignmentRelation,
   SubagentModelConfig,
   ThinkingLevel,
 } from './api/types';
-import {
-  researchManagerMutationAllowed,
-  researchManagerSessionIsCurrent,
-  type ResearchManagerCommandAck,
-  type ResearchManagerCommandRequest,
-} from './lib/researchManagerCommand';
 import { commitLevel, effectiveThinkingLevel, segmentsFor } from './lib/modelThinking';
-import {
-  isResearchIdleOnlyBusy,
-  parseResearchSlashCommand,
-  planModeToggleResearchDecision,
-  researchCommandFromSlash,
-  researchCommandResolutionError,
-  researchEnterSlashOutcome,
-  researchSlashAllowedWhileBusy,
-  researchSlashInputToRestore,
-  researchSlashNeedsSnapshot,
-  researchSlashSessionIsCurrent,
-  runResearchModeEnter,
-  submitResearchSlashCommand,
-  type ResearchSlashExecutionOutcome,
-} from './lib/researchCommand';
 import { parseSlash, stripSkillPrefix } from './lib/slashCommands';
 import Button from './components/ui/Button.vue';
 import IconButton from './components/ui/IconButton.vue';
@@ -135,6 +111,18 @@ const activeWorkspaceSessionCount = computed<number>(
 
 // running: true when activity is not idle
 const running = computed(() => client.activity.value !== 'idle');
+const research = useResearchContext({
+  sessionId: client.activeSessionId,
+  ready: computed(() => !client.loading.value),
+  running,
+  connected: computed(() => client.connection.value === 'connected'),
+});
+
+function returnToMainAgent(): void {
+  closeAgentPanel();
+  void nextTick(() => conversationPaneRef.value?.focusComposer());
+}
+
 
 // Auth readiness gates the main app. Once the first load finishes and auth is
 // still missing, show a full-page login entry instead of an in-app banner.
@@ -274,12 +262,17 @@ const {
   previewError,
   previewDownloadUrl,
   previewExternalActions,
+  previewIsResearchNote,
+  openResearchNote,
   openFilePreview,
   openMediaPreview,
   closeFilePreview,
   openPreviewInEditor,
   revealPreviewFile,
 } = useFilePreview({ client, detailTarget });
+watch(() => research.snapshot.value?.current?.path, () => {
+  if (previewIsResearchNote.value) closeFilePreview();
+});
 
 // True while the right-side slot is actually occupied, so the sidebar reserves
 // room for it and the conversation can never be squeezed. Keyed off detailTarget
@@ -360,38 +353,6 @@ const showLogin = ref(false);
 const showAddWorkspace = ref(false);
 const showStatusPanel = ref(false);
 const showSettings = ref(false);
-const showResearchManager = ref(false);
-const researchExpandSignal = ref(0);
-const researchStartInFlight = new Set<string>();
-const managerSessionId = ref<string | null>(null);
-const researchManagerCommandAck = ref<ResearchManagerCommandAck | null>(null);
-const researchIdleOnlyBusy = computed(() =>
-  isResearchIdleOnlyBusy(
-    client.working.value,
-    client.compaction.value !== null,
-  ),
-);
-
-function closeResearchManager(): void {
-  showResearchManager.value = false;
-  researchManagerCommandAck.value = null;
-  managerSessionId.value = null;
-}
-
-watch(client.activeSessionId, closeResearchManager, { flush: 'sync' });
-watch(showResearchManager, (isOpen) => {
-  if (!isOpen) {
-    researchManagerCommandAck.value = null;
-    managerSessionId.value = null;
-  }
-}, { flush: 'sync' });
-watch(
-  () => [client.researchEnabled.value, researchIdleOnlyBusy.value] as const,
-  ([enabled, busy]) => {
-    if (!enabled || busy) closeResearchManager();
-  },
-);
-
 type SubmitPayload = {
   text: string;
   attachments: PromptAttachment[];
@@ -415,7 +376,6 @@ const anyOverlayOpen = computed<boolean>(
     showAddWorkspace.value ||
     showStatusPanel.value ||
     showSettings.value ||
-    showResearchManager.value ||
     showOnboarding.value ||
     showMobileSwitcher.value ||
     showMobileSettings.value,
@@ -586,338 +546,8 @@ async function handleEditMessage(payload: {
   conversationPaneRef.value?.loadComposerForEdit(payload.text, payload.attachments);
 }
 
-function reportResearchIssue(key: string): void {
-  client.reportResearchIssue(t(`research.commandError.${key}`));
-}
-
-function enterResearchMode(sessionId: string | undefined, lineSlug?: string) {
-  return runResearchModeEnter({
-    sessionId,
-    lineSlug,
-    pending: researchStartInFlight,
-    getState: () => ({
-      researchEnabled: client.researchEnabled.value,
-      activeSessionId: client.activeSessionId.value,
-      busy: researchIdleOnlyBusy.value,
-      planMode: client.planMode.value,
-    }),
-    refreshResearch: (id) => client.refreshResearchById(id),
-    commandResearch: (id, command) => client.commandResearchById(id, command),
-  });
-}
-
-function reportResearchEnterResult(
-  result: Awaited<ReturnType<typeof enterResearchMode>>,
-): void {
-  if (result.kind === 'rejected' && result.clientReported !== true) {
-    reportResearchIssue(result.reason);
-  }
-}
-
 function handleTogglePlanMode(): void {
-  const sessionId = client.activeSessionId.value;
-  if (
-    planModeToggleResearchDecision(
-      client.planMode.value,
-      client.research.value?.mode,
-      sessionId !== undefined && researchStartInFlight.has(sessionId),
-    ) === 'plan_conflict'
-  ) {
-    reportResearchIssue('plan_conflict');
-    return;
-  }
   client.togglePlanMode();
-}
-
-async function handleResearchCommand(request: ResearchManagerCommandRequest): Promise<void> {
-  const sessionId = managerSessionId.value;
-  if (
-    !showResearchManager.value
-    || !researchManagerSessionIsCurrent(
-      sessionId,
-      managerSessionId.value,
-      client.activeSessionId.value,
-    )
-  ) {
-    return;
-  }
-  if (request.command.kind === 'enter_mode') {
-    const result = await enterResearchMode(sessionId, request.command.lineSlug);
-    reportResearchEnterResult(result);
-    if (
-      !showResearchManager.value
-      || !researchManagerSessionIsCurrent(
-        sessionId,
-        managerSessionId.value,
-        client.activeSessionId.value,
-      )
-    ) {
-      return;
-    }
-    researchManagerCommandAck.value = {
-      ...request,
-      succeeded: result.kind === 'entered' || result.kind === 'already-active',
-    };
-    return;
-  }
-  if (!researchManagerMutationAllowed(researchIdleOnlyBusy.value)) {
-    reportResearchIssue('busy');
-    researchManagerCommandAck.value = { ...request, succeeded: false };
-    return;
-  }
-  const snapshot = await client.commandResearchById(sessionId, request.command);
-  if (
-    !showResearchManager.value
-    || !researchManagerSessionIsCurrent(
-      sessionId,
-      managerSessionId.value,
-      client.activeSessionId.value,
-    )
-  ) {
-    return;
-  }
-  researchManagerCommandAck.value = { ...request, succeeded: snapshot !== null };
-}
-
-async function openResearchManager(): Promise<boolean> {
-  if (researchIdleOnlyBusy.value) {
-    reportResearchIssue('busy');
-    return false;
-  }
-  if (!client.researchEnabled.value) {
-    reportResearchIssue('disabled');
-    return false;
-  }
-  const sessionId = client.activeSessionId.value;
-  if (sessionId === undefined) {
-    reportResearchIssue('snapshot_unavailable');
-    return false;
-  }
-  managerSessionId.value = sessionId;
-  researchManagerCommandAck.value = null;
-  if (!researchManagerSessionIsCurrent(
-    sessionId,
-    managerSessionId.value,
-    client.activeSessionId.value,
-  )) {
-    return false;
-  }
-  const snapshot = await client.refreshResearchById(sessionId);
-  if (!researchManagerSessionIsCurrent(
-    sessionId,
-    managerSessionId.value,
-    client.activeSessionId.value,
-  )) {
-    return false;
-  }
-  if (researchIdleOnlyBusy.value) {
-    reportResearchIssue('busy');
-    closeResearchManager();
-    return false;
-  }
-  if (!client.researchEnabled.value) {
-    reportResearchIssue('disabled');
-    closeResearchManager();
-    return false;
-  }
-  if (snapshot === null) {
-    reportResearchIssue('snapshot_unavailable');
-    closeResearchManager();
-    return false;
-  }
-  showResearchManager.value = true;
-  return true;
-}
-
-async function handleStartResearch(): Promise<void> {
-  const sessionId = client.activeSessionId.value;
-  const result = await enterResearchMode(sessionId);
-  reportResearchEnterResult(result);
-
-  if (
-    result.kind === 'entered'
-    && researchSlashSessionIsCurrent(sessionId, client.activeSessionId.value)
-  ) {
-    researchExpandSignal.value++;
-  } else if (
-    result.kind === 'already-active'
-    && researchSlashSessionIsCurrent(sessionId, client.activeSessionId.value)
-  ) {
-    await openResearchManager();
-  }
-}
-
-async function handleResearchSlash(
-  rawArgs: string,
-  submission: ComposerCommandSubmission,
-): Promise<ResearchSlashExecutionOutcome> {
-  const sessionId = submission.sessionId;
-  const parsed = parseResearchSlashCommand(rawArgs);
-  if (parsed.kind === 'error') {
-    reportResearchIssue(parsed.code);
-    return 'rejected';
-  }
-  if (parsed.kind === 'on') {
-    const result = await enterResearchMode(sessionId, parsed.lineSlug);
-    reportResearchEnterResult(result);
-    if (
-      result.kind === 'already-active'
-      && researchSlashSessionIsCurrent(sessionId, client.activeSessionId.value)
-    ) {
-      await openResearchManager();
-    }
-    return researchEnterSlashOutcome(result);
-  }
-
-  // Capture and validate the submitted session before any async work. A hand-
-  // typed command in the no-session draft is rejected rather than redirected to
-  // whichever session happens to become active later.
-  if (sessionId === undefined) {
-    reportResearchIssue('snapshot_unavailable');
-    return 'rejected';
-  }
-  if (!researchSlashSessionIsCurrent(sessionId, client.activeSessionId.value)) {
-    return 'rejected';
-  }
-
-  // The menu is hidden on a legacy backend, but a hand-typed command still
-  // arrives here so it cannot leak into the model as an ordinary prompt.
-  if (!client.researchEnabled.value) {
-    reportResearchIssue('disabled');
-    return 'rejected';
-  }
-
-  if (researchIdleOnlyBusy.value && !researchSlashAllowedWhileBusy(parsed)) {
-    reportResearchIssue('busy');
-    return 'rejected';
-  }
-
-  if (parsed.kind === 'manage') {
-    return (await openResearchManager()) ? 'handled' : 'rejected';
-  }
-
-  if (parsed.kind === 'status') {
-    const snapshot = await client.refreshResearchById(sessionId);
-    if (!researchSlashSessionIsCurrent(sessionId, client.activeSessionId.value)) {
-      return 'rejected';
-    }
-    if (!client.researchEnabled.value) {
-      reportResearchIssue('disabled');
-      return 'rejected';
-    }
-    if (researchIdleOnlyBusy.value && !researchSlashAllowedWhileBusy(parsed)) {
-      reportResearchIssue('busy');
-      return 'rejected';
-    }
-    if (snapshot === null) {
-      reportResearchIssue('snapshot_unavailable');
-      return 'rejected';
-    }
-    researchExpandSignal.value++;
-    return 'handled';
-  }
-
-  // Revisioned commands resolve against a fresh authoritative snapshot for the
-  // submitted session, not a potentially stale board for the current session.
-  const needsSnapshot = researchSlashNeedsSnapshot(parsed);
-  const snapshot = needsSnapshot
-    ? await client.refreshResearchById(sessionId)
-    : null;
-  if (
-    needsSnapshot &&
-    !researchSlashSessionIsCurrent(sessionId, client.activeSessionId.value)
-  ) {
-    return 'rejected';
-  }
-  if (!client.researchEnabled.value) {
-    reportResearchIssue('disabled');
-    return 'rejected';
-  }
-  if (researchIdleOnlyBusy.value && !researchSlashAllowedWhileBusy(parsed)) {
-    reportResearchIssue('busy');
-    return 'rejected';
-  }
-
-  const resolutionError = researchCommandResolutionError(parsed, snapshot);
-  if (resolutionError !== null) {
-    reportResearchIssue(resolutionError);
-    return 'rejected';
-  }
-  const command = researchCommandFromSlash(parsed, snapshot);
-  if (command === null) {
-    reportResearchIssue('unresolved');
-    return 'rejected';
-  }
-  return submitResearchSlashCommand(
-    sessionId,
-    () => client.activeSessionId.value,
-    () => client.commandResearchById(sessionId, command),
-  );
-}
-
-async function handleResearchAlignment(
-  relation?: ResearchGoalAlignmentRelation,
-): Promise<void> {
-  const sessionId = client.activeSessionId.value;
-  if (sessionId === undefined) {
-    reportResearchIssue('snapshot_unavailable');
-    return;
-  }
-  if (!client.researchEnabled.value) {
-    reportResearchIssue('disabled');
-    return;
-  }
-  if (researchIdleOnlyBusy.value) {
-    reportResearchIssue('busy');
-    return;
-  }
-
-  const snapshot = await client.refreshResearchById(sessionId);
-  if (!researchSlashSessionIsCurrent(sessionId, client.activeSessionId.value)) return;
-  if (!client.researchEnabled.value) {
-    reportResearchIssue('disabled');
-    return;
-  }
-  if (researchIdleOnlyBusy.value) {
-    reportResearchIssue('busy');
-    return;
-  }
-  if (snapshot === null) {
-    reportResearchIssue('snapshot_unavailable');
-    return;
-  }
-
-  const parsed = relation === undefined
-    ? { kind: 'clear_alignment' as const }
-    : { kind: 'align' as const, relation };
-  const resolutionError = researchCommandResolutionError(parsed, snapshot);
-  if (resolutionError !== null) {
-    reportResearchIssue(resolutionError);
-    return;
-  }
-  const command = researchCommandFromSlash(parsed, snapshot);
-  if (command === null) {
-    reportResearchIssue('unresolved');
-    return;
-  }
-  await submitResearchSlashCommand(
-    sessionId,
-    () => client.activeSessionId.value,
-    () => client.commandResearchById(sessionId, command),
-  );
-}
-
-function restoreResearchSlashInput(
-  submission: ComposerCommandSubmission,
-  outcome: ResearchSlashExecutionOutcome,
-): void {
-  const input = researchSlashInputToRestore(submission.input, outcome);
-  if (input === null) return;
-  restoreComposerCommandSubmission(
-    submission,
-    client.activeSessionId.value,
-    (value) => conversationPaneRef.value?.loadComposerForEdit(value) ?? false,
-  );
 }
 
 // Handler for slash commands emitted by Composer (via ConversationPane).
@@ -932,12 +562,6 @@ function handleCommand(event: ComposerCommandEvent): void {
   const commandName = parsedCommand?.cmd ?? cmd;
   const arg = parsedCommand?.arg.trim() ?? '';
 
-  if (commandName === '/research') {
-    void handleResearchSlash(arg, submission).then((outcome) => {
-      restoreResearchSlashInput(submission, outcome);
-    });
-    return;
-  }
   // `/compact <text>` carries an optional free-text instruction steering what
   // the summary should focus on (TUI parity).
   if (commandName === '/compact') {
@@ -1218,9 +842,10 @@ function openPr(url: string): void {
       :tasks="client.tasks.value"
       :todos="client.todos.value"
       :goal="client.goal.value"
-      :research="client.research.value"
-      :research-enabled="client.researchEnabled.value"
-      :research-expand-signal="researchExpandSignal"
+      :research="research.snapshot.value"
+      :research-loading="research.loading.value"
+      :research-changing="research.changing.value"
+      :research-error="research.error.value"
       :activation-badges="client.activationBadges.value"
       :status="client.status.value"
       :thinking="client.thinking.value"
@@ -1278,10 +903,10 @@ function openPr(url: string): void {
       @toggle-goal="client.toggleGoalMode()"
       @create-goal="client.createGoal($event)"
       @control-goal="client.controlGoal($event)"
-      @start-research="handleStartResearch"
-      @manage-research="openResearchManager"
-      @align-research="(relation) => handleResearchAlignment(relation)"
-      @clear-research-alignment="() => handleResearchAlignment()"
+      @select-research-topic="research.selectTopic($event)"
+      @set-research-enabled="research.setEnabled($event)"
+      @refresh-research="research.refresh()"
+      @open-research-note="openResearchNote($event)"
       @refresh-git-status="client.activeSessionId.value && client.loadGitStatus(client.activeSessionId.value)"
       @rename-session="(id, title) => client.renameSession(id, title)"
       @fork-session="(id) => client.forkSession(id)"
@@ -1360,7 +985,9 @@ function openPr(url: string): void {
       <AgentDetailPanel
         v-else-if="detailTarget === 'agent' && agentPanelMember"
         :member="agentPanelMember"
-        @close="closeAgentPanel"
+        :topic-title="research.snapshot.value?.current?.title"
+        :workspace-root="client.status.value.cwd"
+        @close="returnToMainAgent"
       />
       <SideChatPanel
         v-else-if="detailTarget === 'btw' && btwVisible"
@@ -1490,14 +1117,6 @@ function openPr(url: string): void {
       @close="showStatusPanel = false"
     />
 
-    <ResearchManagerDialog
-      v-if="client.researchEnabled.value && managerSessionId !== null"
-      :key="managerSessionId"
-      v-model:open="showResearchManager"
-      :snapshot="client.research.value"
-      :command-ack="researchManagerCommandAck"
-      @command="handleResearchCommand"
-    />
 
     <!-- Add Workspace overlay (daemon folder browser + paste-path fallback) -->
     <AddWorkspaceDialog

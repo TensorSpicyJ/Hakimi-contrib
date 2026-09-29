@@ -6,6 +6,8 @@
  */
 
 import { execFile } from 'node:child_process';
+import { realpath } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 
 const GIT_TIMEOUT_MS = 60_000;
 
@@ -69,17 +71,33 @@ export async function branchExists(cwd: string, branch: string): Promise<boolean
   );
 }
 
-export async function worktreeAdd(
+export async function worktreeAdd(cwd: string, path: string, branch: string): Promise<void> {
+  await git(cwd, ['worktree', 'add', path, branch]);
+}
+
+export async function worktreeAddNewBranch(
   cwd: string,
   path: string,
   branch: string,
   base: string,
 ): Promise<void> {
-  if (await branchExists(cwd, branch)) {
-    await git(cwd, ['worktree', 'add', path, branch]);
-    return;
-  }
   await git(cwd, ['worktree', 'add', path, '-b', branch, base]);
+}
+
+export async function isRegisteredWorktree(repoRoot: string, path: string): Promise<boolean> {
+  const gitDir = await tryGit(path, ['rev-parse', '--git-dir']);
+  const commonDir = await tryGit(repoRoot, ['rev-parse', '--git-common-dir']);
+  if (gitDir === null || commonDir === null) return false;
+  try {
+    const resolvedRoot = await realpath(repoRoot);
+    const resolvedPath = await realpath(path);
+    const adminRoot = join(await realpath(resolve(resolvedRoot, commonDir.trim())), 'worktrees');
+    const adminPath = resolve(resolvedPath, gitDir.trim());
+    const inside = relative(adminRoot, adminPath);
+    return inside.length > 0 && !inside.startsWith('..') && !isAbsolute(inside);
+  } catch {
+    return false;
+  }
 }
 
 /**

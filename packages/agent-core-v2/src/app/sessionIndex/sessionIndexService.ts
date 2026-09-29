@@ -18,12 +18,13 @@
  * with `degraded` whenever it cannot serve and the authoritative path takes
  * over (the reason and the cumulative count are published via `status()` and
  * logged — never a silent permanent fallback). `prepare()` opens the store,
- * restores the published generation, runs the initial projection when none
- * exists, and starts background reconciliation; read paths kick it
- * single-flight when the composition root never called it. A lost manifest
- * (query-store corruption rebuild) triggers an automatic reprojection — the
- * model is never healed by per-request backfill. Degraded reads retry
- * `prepare()` after a short backoff.
+ * restores the published generation when the session directories have not
+ * changed since it was projected, runs the initial projection when none
+ * exists (or the persisted one is stale), and starts background
+ * reconciliation; read paths kick it single-flight when the composition root
+ * never called it. A lost manifest (query-store corruption rebuild) triggers
+ * an automatic reprojection — the model is never healed by per-request
+ * backfill. Degraded reads retry `prepare()` after a short backoff.
  *
  * The first list request coincides with the initial projection: the read is
  * served by the authoritative fallback AND kicks `prepare()`. To keep that
@@ -92,6 +93,7 @@ import {
   listSessionIds,
   listWorkspaceIds,
   readSessionSummary,
+  scanSessionsMaxMtime,
   summaryMatchesChildOf,
 } from './sessionIndexSource';
 
@@ -182,7 +184,7 @@ export class FileSessionIndex extends Disposable implements ISessionIndex {
     this.state = 'preparing';
     try {
       const manifest = await this.queryStore.getCheckpoint(SESSION_INDEX_MANIFEST);
-      if (manifest === undefined) {
+      if (manifest === undefined || !(await this.manifestFresh(manifest))) {
         const projection = this.ensureProjection();
         if (deadlineMs === undefined) {
           await projection;
@@ -207,6 +209,19 @@ export class FileSessionIndex extends Disposable implements ISessionIndex {
       this.markDegraded('prepare failed', error);
     }
     return this.status();
+  }
+
+  private async manifestFresh(manifest: Checkpoint): Promise<boolean> {
+    const published = manifest.sourceMaxMtimeMs;
+    if (published === undefined) return false;
+    try {
+      return (await scanSessionsMaxMtime(this.storage, this.sessionsScope)) <= published;
+    } catch (error) {
+      this.log.warn('session index freshness check failed; re-projecting', {
+        error: String(error),
+      });
+      return false;
+    }
   }
 
   private ensureProjection(): Promise<void> {

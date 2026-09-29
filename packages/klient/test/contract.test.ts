@@ -1,14 +1,13 @@
 /**
  * Scenario: runtime validation at Klient wire-contract boundaries.
  *
- * Exercises the session-creation, plugin-manifest, and Research checkpoint
- * schemas directly with no external collaborators. Run with
+ * Exercises the session-creation and plugin-manifest schemas directly with
+ * no external collaborators. Run with
  * `pnpm --filter @moonshot-ai/klient exec vitest run test/contract.test.ts`.
  */
 
 import { describe, expect, it } from 'vitest';
 
-import { agentResearchContract } from '../src/contract/agent/research.js';
 import { pluginManifestSchema } from '../src/contract/global/plugins.js';
 import { createSessionOptionsSchema } from '../src/contract/session/lifecycle.js';
 
@@ -64,15 +63,5 @@ describe('MCP timeout contract validation', () => {
       },
     });
     expect(parsed.success).toBe(false);
-  });
-});
-
-describe('Research checkpoint contract validation', () => {
-  it('rejects a checkpoint proposal without expectedRevision', () => {
-    expect(agentResearchContract.proposeCheckpoint.input.safeParse([{}]).success).toBe(false);
-  });
-
-  it('accepts zero as the checkpoint revision sentinel', () => {
-    expect(agentResearchContract.proposeCheckpoint.input.safeParse([{ expectedRevision: 0 }]).success).toBe(true);
   });
 });

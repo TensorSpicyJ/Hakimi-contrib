@@ -20,6 +20,7 @@ interface Envelope<T> {
 interface ApprovalWire {
   approval_id: string;
   session_id: string;
+  agent_id: string;
   turn_id?: number;
   tool_call_id: string;
   tool_name: string;
@@ -120,6 +121,7 @@ describe('server-v2 /api/v1/sessions/{sid}/approvals', () => {
     const item = body.data.items[0]!;
     expect(item.approval_id).toBe(aid);
     expect(item.session_id).toBe(sid);
+    expect(item.agent_id).toBe('main');
     expect(item.tool_call_id).toBe('tc-1');
     expect(item.tool_name).toBe('Bash');
     expect(item.action).toBe('run');

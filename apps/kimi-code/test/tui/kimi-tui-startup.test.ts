@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { log, type GoalSnapshot, type ResearchStatusSnapshot } from '@bhjia-phys/hakimi-sdk';
+import { log, type GoalSnapshot } from '@bhjia-phys/hakimi-sdk';
 import type { MigrationPlan } from '@moonshot-ai/migration-legacy';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -153,32 +153,6 @@ function goalSnapshot(overrides: Partial<GoalSnapshot> = {}): GoalSnapshot {
       overBudget: false,
     },
     ...overrides,
-  };
-}
-
-function researchSnapshot(mode: 'ready' | 'degraded'): ResearchStatusSnapshot {
-  return {
-    mode,
-    loopStatus: 'active',
-    planningPolicy: 'collaborative',
-    currentLineSlug: 'line-a',
-    questions: [],
-    lines: [{
-      slug: 'line-a',
-      title: 'Line A',
-      objective: 'Investigate A',
-      status: 'active',
-      createdAt: 1,
-      revision: 1,
-    }],
-    openQuestionCount: 0,
-    activeQuestionCount: 0,
-    blockedQuestionCount: 0,
-    alerts: [],
-    lineWorkstreamBindings: [],
-    aitpHealth: { phase: mode },
-    phase: 'action_executing',
-    revision: 1,
   };
 }
 
@@ -631,28 +605,6 @@ describe('KimiTUI startup', () => {
     expect(harness.createSession).not.toHaveBeenCalled();
     expect(driver.state.startupState).toBe('ready');
     expect(driver.state.appState.sessionId).toBe('ses-latest');
-  });
-
-  it('hydrates Research Board after resume subscription for ready and degraded snapshots', async () => {
-    for (const mode of ['ready', 'degraded'] as const) {
-      const getResearch = vi.fn(async () => researchSnapshot(mode));
-      const session = makeSession({
-        id: `ses-${mode}`,
-        getResearch,
-      });
-      const harness = makeHarness(session, {
-        listSessions: vi.fn(async () => [{ id: session.id }]),
-      });
-      const driver = makeDriver(harness, makeStartupInput({ continue: true }));
-
-      await expect(driver.init()).resolves.toBe(true);
-      await (
-        driver as unknown as { finishStartup(shouldReplayHistory: boolean): Promise<void> }
-      ).finishStartup(true);
-
-      expect(getResearch).toHaveBeenCalledOnce();
-      expect(driver.state.researchBoard.getSnapshot()?.mode).toBe(mode);
-    }
   });
 
   it('applies --auto permission when resuming a session via --continue', async () => {

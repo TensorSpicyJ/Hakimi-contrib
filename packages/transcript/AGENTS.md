@@ -8,7 +8,7 @@ The cold rebuild is a two-level fold over `wire.jsonl` as the single source of t
 
 ## Plan content
 
-Plan content is a recorded fact too: each ExitPlanMode review submission offloads the document to `agents/<agentId>/plan/<planId>/v<N>.md` and persists a reference-only `plan.revision` record (`{id, version, path, sha256, bytes}`), which projects — live and cold — to a `plan.revision` marker and the `modes.plan` badge (`{reviewPath, version}`).
+Plan content is a recorded fact too: each ExitPlanMode review submission offloads the document to `agents/<agentId>/plan/<planId>/v<N>.md` and persists a reference-only `plan.revision` record (`{id, version, key, sha256, bytes}`, `key` agent-relative so a forked session resolves it against its own scope), which projects — live and cold — to a `plan.revision` marker (payload keeps the resolved display `path`) and the `modes.plan` badge (`{reviewPath, version}`).
 
 ## Op-batch sequencing contract
 
@@ -16,4 +16,4 @@ Owned here (`transcriptSeqSchema` in `contract/schema.ts`): a per-(session, agen
 
 ## Wire-level detail
 
-Beyond the timeline, the model carries wire-equivalent detail: steps carry `usage` / `finishReason` / `timing` (LLM latencies) / `retry` / interrupt reason, turns carry `durationMs` / `error` / `usage`, tool frames carry the streamed `inputText` and the latest `progress`, tasks carry subagent `resultSummary` / `error` / `stateReason` / `usage`, `meta.agent` mirrors the agent status slices (model / usage / context / permission / phase), a global `prompts` entity (op `prompt.upsert`) tracks the prompt queue, and `hook.result` lands as a `'hook'` marker. These live-projected fields are NOT backfilled by the cold rebuild (known limitation).
+Beyond the timeline, the model carries wire-equivalent detail: steps carry `usage` / `finishReason` / `timing` (LLM latencies) / `retry` / interrupt reason, turns carry `durationMs` / `error` / `usage`, tool frames carry the streamed `inputText` and the latest `progress`, tasks carry subagent `resultSummary` / `error` / `stateReason` / `usage`, `meta.agent` mirrors the agent status slices (model / usage / context / permission / phase), a global `prompts` entity (op `prompt.upsert`) tracks the prompt queue, and `hook.result` lands as a `'hook'` marker. Step interrupt reason (`state: 'interrupted'` + `endReason` / `endMessage` / `endedAt`) IS backfilled by the cold rebuild from the durable `turn.step.interrupted` records, synthesizing the step when the context tree has none for that ordinal; the remaining live-projected fields (including `retry`, which is transient by design) are NOT backfilled (known limitation).

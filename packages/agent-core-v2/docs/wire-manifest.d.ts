@@ -21,150 +21,61 @@
 // owning model offloads inline media to blob storage), cross-reducers
 // (foreign models that also reduce this record on dispatch and replay).
 
-// Index (98 record types)
-//   aitp_mode.enter                         aitpMode                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   aitp_mode.exit                          aitpMode                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   aitp_mode.set_line                      aitpMode                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   aitp_mode.set_loop_status               aitpMode                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   aitp_mode.set_phase                     aitpMode                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   config.update                           profile                     persisted  src/agent/profile/profileOps.ts
-//   context.append_loop_event               contextMemory               persisted  src/agent/contextMemory/contextOps.ts
-//   context.append_message                  contextMemory               persisted  src/agent/contextMemory/contextOps.ts
-//   context.apply_compaction                contextMemory               persisted  src/agent/contextMemory/contextOps.ts
-//   context.clear                           contextMemory               persisted  src/agent/contextMemory/contextOps.ts
-//   context.undo                            contextMemory               persisted  src/agent/contextMemory/contextOps.ts
-//   cron.add                                cron                        transient  src/session/cron/cronOps.ts
-//   cron.cursor                             cron                        transient  src/session/cron/cronOps.ts
-//   cron.delete                             cron                        transient  src/session/cron/cronOps.ts
-//   forked                                  goal                        persisted  src/agent/goal/goalOps.ts
-//   full_compaction.begin                   fullCompaction              persisted  src/agent/fullCompaction/compactionOps.ts
-//   full_compaction.cancel                  fullCompaction              persisted  src/agent/fullCompaction/compactionOps.ts
-//   full_compaction.complete                fullCompaction              persisted  src/agent/fullCompaction/compactionOps.ts
-//   goal.clear                              goal                        persisted  src/agent/goal/goalOps.ts
-//   goal.create                             goal                        persisted  src/agent/goal/goalOps.ts
-//   goal.update                             goal                        persisted  src/agent/goal/goalOps.ts
-//   interaction.request                     interaction                 persisted  src/session/interaction/interactionOps.ts
-//   interaction.resolved                    interaction                 persisted  src/session/interaction/interactionOps.ts
-//   interruptionReminder.recorded           interruptionReminder        persisted  src/agent/interruptionReminder/interruptionReminderOps.ts
-//   llm.request                             llm.requestTrace            persisted  src/agent/llmRequester/llmRequestOps.ts
-//   llm.tools_snapshot                      llm.requestTrace            persisted  src/agent/llmRequester/llmRequestOps.ts
-//   mcp.tools_discovered                    mcp.discovery               persisted  src/agent/mcp/mcpDiscoveryOps.ts
-//   permission.record_approval_result       permissionRules             persisted  src/agent/permissionRules/permissionRulesOps.ts
-//   permission.rules.add                    permissionRules             transient  src/agent/permissionRules/permissionRulesOps.ts
-//   permission.set_mode                     permissionMode              persisted  src/agent/permissionMode/permissionModeOps.ts
-//   plan_mode.cancel                        plan                        persisted  src/features/plan/planOps.ts
-//   plan_mode.enter                         plan                        persisted  src/features/plan/planOps.ts
-//   plan_mode.exit                          plan                        persisted  src/features/plan/planOps.ts
-//   plan.resolution                         plan                        persisted  src/features/plan/planOps.ts
-//   plan.revision                           plan                        persisted  src/features/plan/planOps.ts
-//   plugin.session_start                    pluginSessionStartSnapshot  persisted  src/agent/plugin/agentPluginOps.ts
-//   profile.bind                            profile                     persisted  src/agent/profile/profileOps.ts
-//   research_plan.discard                   researchPlan                persisted  src/features/aitpResearch/researchPlanOps.ts
-//   research_plan.draft                     researchPlan                persisted  src/features/aitpResearch/researchPlanOps.ts
-//   research_plan.finalize                  researchPlan                persisted  src/features/aitpResearch/researchPlanOps.ts
-//   research.ack_alert                      research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.ack_checkpoint                 research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.advance_revision               researchRevision            persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.begin_action                   research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.bind_checkpoint_entry          research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.bind_checkpoint_receipt        research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.clear_alert                    research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.clear_goal_alignment           research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.commit_checkpoint              researchCursor              persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.complete_action                research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.confirm_goal_alignment         research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.create_line                    research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.create_question                research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.end_period                     research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.observe_run                    research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.plan_action                    research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.plan_v2.put                    research                    persisted  src/features/aitpResearch/researchPlanV2Ops.ts
-//   research.planning_policy.set            research                    persisted  src/features/aitpResearch/researchPlanningPolicyOps.ts
-//   research.propose_checkpoint             research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.record_distillation_attention  researchDistillation        persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.record_progress                research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.reopen_question                research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.request_human_decision         research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.resolve_human_decision         research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.set_focus                      research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.set_phase                      research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.set_program                    research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.start_action                   research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.start_period                   research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.steer                          research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.switch_line                    research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.update_line                    research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.update_period                  research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.update_question                research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.upsert_alert                   research                    persisted  src/features/aitpResearch/aitpResearchOps.ts
-//   research.workstream_binding.clear       research                    persisted  src/features/aitpResearch/researchWorkstreamBindingOps.ts
-//   research.workstream_binding.confirm     research                    persisted  src/features/aitpResearch/researchWorkstreamBindingOps.ts
-//   runtime.set_binding                     runtimeBinding              persisted  src/agent/runtimeBinding/runtimeBindingOps.ts
-//   skill.activate                          skill                       transient  src/agent/skill/skillOps.ts
-//   swarm_mode.enter                        swarm                       persisted  src/features/swarm/swarmOps.ts
-//   swarm_mode.exit                         swarm                       persisted  src/features/swarm/swarmOps.ts
-//   task.started                            task                        persisted  src/agent/task/taskOps.ts
-//   task.terminated                         task                        persisted  src/agent/task/taskOps.ts
-//   token_counting.measured                 tokenCounting               persisted  src/agent/tokenCounting/tokenCountingOps.ts
-//   token_counting.rebased                  tokenCounting               persisted  src/agent/tokenCounting/tokenCountingOps.ts
-//   token_counting.truncated                tokenCounting               persisted  src/agent/tokenCounting/tokenCountingOps.ts
-//   tools.register_user_tool                userTool                    persisted  src/agent/userTool/userToolOps.ts
-//   tools.reset_active_tools                profile.activeTools         persisted  src/agent/profile/profileOps.ts
-//   tools.set_active_tools                  profile.activeTools         persisted  src/agent/profile/profileOps.ts
-//   tools.unregister_user_tool              userTool                    persisted  src/agent/userTool/userToolOps.ts
-//   tools.update_store                      todo                        persisted  src/session/todo/todoOps.ts
-//   tower_mode.enter                        tower                       persisted  src/features/tower/towerOps.ts
-//   tower_mode.exit                         tower                       persisted  src/features/tower/towerOps.ts
-//   turn.cancel                             turn                        persisted  src/agent/loop/turnOps.ts
-//   turn.ended                              turn                        persisted  src/agent/loop/turnOps.ts
-//   turn.prompt                             turn                        persisted  src/agent/loop/turnOps.ts
-//   turn.steer                              turn                        persisted  src/agent/loop/turnOps.ts
-//   usage.record                            usage                       persisted  src/agent/usage/usageOps.ts
-
-/**
- * model: aitpMode · persisted · toEvent
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface AitpModeEnterPayload {
-  _name: 'aitp_mode.enter';
-  actor: 'user' | 'model';
-  lineSlug?: string;
-}
-
-/**
- * model: aitpMode · persisted · toEvent
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface AitpModeExitPayload {
-  _name: 'aitp_mode.exit';
-}
-
-/**
- * model: aitpMode · persisted · toEvent
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface AitpModeSetLinePayload {
-  _name: 'aitp_mode.set_line';
-  lineSlug: string;
-}
-
-/**
- * model: aitpMode · persisted · toEvent
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface AitpModeSetLoopStatusPayload {
-  _name: 'aitp_mode.set_loop_status';
-  loopStatus: 'active' | 'paused';
-}
-
-/**
- * model: aitpMode · persisted · toEvent
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface AitpModeSetPhasePayload {
-  _name: 'aitp_mode.set_phase';
-  phase: 'inactive' | 'probing' | 'ready' | 'degraded';
-}
+// Index (54 record types)
+//   config.update                      profile                     persisted  src/agent/profile/profileOps.ts
+//   context.append_loop_event          contextMemory               persisted  src/agent/contextMemory/contextOps.ts
+//   context.append_message             contextMemory               persisted  src/agent/contextMemory/contextOps.ts
+//   context.apply_compaction           contextMemory               persisted  src/agent/contextMemory/contextOps.ts
+//   context.clear                      contextMemory               persisted  src/agent/contextMemory/contextOps.ts
+//   context.undo                       contextMemory               persisted  src/agent/contextMemory/contextOps.ts
+//   cron.add                           cron                        transient  src/session/cron/cronOps.ts
+//   cron.cursor                        cron                        transient  src/session/cron/cronOps.ts
+//   cron.delete                        cron                        transient  src/session/cron/cronOps.ts
+//   forked                             goal                        persisted  src/agent/goal/goalOps.ts
+//   full_compaction.begin              fullCompaction              persisted  src/agent/fullCompaction/compactionOps.ts
+//   full_compaction.cancel             fullCompaction              persisted  src/agent/fullCompaction/compactionOps.ts
+//   full_compaction.complete           fullCompaction              persisted  src/agent/fullCompaction/compactionOps.ts
+//   goal.clear                         goal                        persisted  src/agent/goal/goalOps.ts
+//   goal.create                        goal                        persisted  src/agent/goal/goalOps.ts
+//   goal.update                        goal                        persisted  src/agent/goal/goalOps.ts
+//   interaction.request                interaction                 persisted  src/session/interaction/interactionOps.ts
+//   interaction.resolved               interaction                 persisted  src/session/interaction/interactionOps.ts
+//   interruptionReminder.recorded      interruptionReminder        persisted  src/agent/interruptionReminder/interruptionReminderOps.ts
+//   llm.request                        llm.requestTrace            persisted  src/agent/llmRequester/llmRequestOps.ts
+//   llm.tools_snapshot                 llm.requestTrace            persisted  src/agent/llmRequester/llmRequestOps.ts
+//   mcp.tools_discovered               mcp.discovery               persisted  src/agent/mcp/mcpDiscoveryOps.ts
+//   permission.record_approval_result  permissionRules             persisted  src/agent/permissionRules/permissionRulesOps.ts
+//   permission.rules.add               permissionRules             transient  src/agent/permissionRules/permissionRulesOps.ts
+//   permission.set_mode                permissionMode              persisted  src/agent/permissionMode/permissionModeOps.ts
+//   plan_mode.cancel                   plan                        persisted  src/features/plan/planOps.ts
+//   plan_mode.enter                    plan                        persisted  src/features/plan/planOps.ts
+//   plan_mode.exit                     plan                        persisted  src/features/plan/planOps.ts
+//   plan.resolution                    plan                        persisted  src/features/plan/planOps.ts
+//   plan.revision                      plan                        persisted  src/features/plan/planOps.ts
+//   plugin.session_start               pluginSessionStartSnapshot  persisted  src/agent/plugin/agentPluginOps.ts
+//   profile.bind                       profile                     persisted  src/agent/profile/profileOps.ts
+//   runtime.set_binding                runtimeBinding              persisted  src/agent/runtimeBinding/runtimeBindingOps.ts
+//   skill.activate                     skill                       transient  src/agent/skill/skillOps.ts
+//   swarm_mode.enter                   swarm                       persisted  src/features/swarm/swarmOps.ts
+//   swarm_mode.exit                    swarm                       persisted  src/features/swarm/swarmOps.ts
+//   task.started                       task                        persisted  src/agent/task/taskOps.ts
+//   task.terminated                    task                        persisted  src/agent/task/taskOps.ts
+//   token_counting.measured            tokenCounting               persisted  src/agent/tokenCounting/tokenCountingOps.ts
+//   token_counting.rebased             tokenCounting               persisted  src/agent/tokenCounting/tokenCountingOps.ts
+//   token_counting.truncated           tokenCounting               persisted  src/agent/tokenCounting/tokenCountingOps.ts
+//   tools.register_user_tool           userTool                    persisted  src/agent/userTool/userToolOps.ts
+//   tools.reset_active_tools           profile.activeTools         persisted  src/agent/profile/profileOps.ts
+//   tools.set_active_tools             profile.activeTools         persisted  src/agent/profile/profileOps.ts
+//   tools.unregister_user_tool         userTool                    persisted  src/agent/userTool/userToolOps.ts
+//   tools.update_store                 todo                        persisted  src/session/todo/todoOps.ts
+//   tower_mode.enter                   tower                       persisted  src/features/tower/towerOps.ts
+//   tower_mode.exit                    tower                       persisted  src/features/tower/towerOps.ts
+//   turn.cancel                        turn                        persisted  src/agent/loop/turnOps.ts
+//   turn.ended                         turn                        persisted  src/agent/loop/turnOps.ts
+//   turn.prompt                        turn                        persisted  src/agent/loop/turnOps.ts
+//   turn.steer                         turn                        persisted  src/agent/loop/turnOps.ts
+//   turn.step.interrupted              turn                        persisted  src/agent/loop/turnOps.ts
+//   usage.record                       usage                       persisted  src/agent/usage/usageOps.ts
 
 /**
  * model: profile · persisted
@@ -200,7 +111,7 @@ interface ContextAppendLoopEventPayload {
 }
 
 /**
- * model: contextMemory · persisted · blobs · cross-reducers: plan, goalForkNotice, task.notificationDelivery, todo, aitpMode, research, researchPlan
+ * model: contextMemory · persisted · blobs · cross-reducers: plan, goalForkNotice, task.notificationDelivery, todo
  * owner: src/agent/contextMemory/contextOps.ts
  */
 interface ContextAppendMessagePayload {
@@ -235,14 +146,14 @@ interface ContextAppendMessagePayload {
 }
 
 /**
- * model: contextMemory · persisted · blobs · cross-reducers: plan, task.notificationDelivery, todo, aitpMode, research, researchPlan
+ * model: contextMemory · persisted · blobs · cross-reducers: plan, task.notificationDelivery, todo
  * owner: src/agent/contextMemory/contextOps.ts
  * shared base: ...contextCompactionBaseShape
  */
 type ContextApplyCompactionPayload = { _name: 'context.apply_compaction'; } & ({ summary: string, compactedCount: number, contextSummary?: string } | { contextSummary: string, compactedCount: number, summary?: string } | { summary: ContextMessage, count: number, compactedCount?: number });
 
 /**
- * model: contextMemory · persisted · blobs · cross-reducers: plan, task.notificationDelivery, todo, aitpMode, research, researchPlan
+ * model: contextMemory · persisted · blobs · cross-reducers: plan, task.notificationDelivery, todo
  * owner: src/agent/contextMemory/contextOps.ts
  */
 interface ContextClearPayload {
@@ -250,7 +161,7 @@ interface ContextClearPayload {
 }
 
 /**
- * model: contextMemory · persisted · blobs · cross-reducers: plan, task.notificationDelivery, todo, aitpMode, research, researchPlan
+ * model: contextMemory · persisted · blobs · cross-reducers: plan, task.notificationDelivery, todo
  * owner: src/agent/contextMemory/contextOps.ts
  */
 interface ContextUndoPayload {
@@ -574,7 +485,7 @@ interface PlanRevisionPayload {
   _name: 'plan.revision';
   id: string;
   version: number;
-  path: string;
+  key: string;
   sha256: string;
   bytes: number;
 }
@@ -609,667 +520,6 @@ interface ProfileBindPayload {
   activeToolNames?: string[];
   disallowedTools: string[];
   subagents?: string[];
-}
-
-/**
- * model: researchPlan · persisted
- * owner: src/features/aitpResearch/researchPlanOps.ts
- * schema uses transforms; see the owner file
- */
-interface ResearchPlanDiscardPayload {
-  _name: 'research_plan.discard';
-}
-
-/**
- * model: researchPlan · persisted
- * owner: src/features/aitpResearch/researchPlanOps.ts
- * schema uses transforms; see the owner file
- */
-interface ResearchPlanDraftPayload {
-  _name: 'research_plan.draft';
-}
-
-/**
- * model: researchPlan · persisted
- * owner: src/features/aitpResearch/researchPlanOps.ts
- */
-interface ResearchPlanFinalizePayload {
-  _name: 'research_plan.finalize';
-  planId: string;
-  researchRevision: number;
-  programId?: string;
-  periodId?: string;
-  lineSlug?: string;
-  questionId?: string;
-  lineRevision?: number;
-  questionRevision?: number;
-  objective: string;
-  steps: string[];
-  expectedEvidence: string[];
-  stopCondition: string;
-  status: 'finalized';
-  resolution: {
-    planId: string;
-    planRevision: number;
-    outcome: 'approved';
-    selectedLabel?: string;
-  };
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchAckAlertPayload {
-  _name: 'research.ack_alert';
-  fingerprint: string;
-  acknowledgedAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchAckCheckpointPayload {
-  _name: 'research.ack_checkpoint';
-  checkpointId: string;
-  entryId?: string;
-}
-
-/**
- * model: researchRevision · persisted · toEvent
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchAdvanceRevisionPayload {
-  _name: 'research.advance_revision';
-  nextRevision: number;
-  notifyGoal: boolean;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchBeginActionPayload {
-  _name: 'research.begin_action';
-  actionId: string;
-  questionId?: string;
-  lineSlug?: string;
-  kind: 'experiment' | 'derivation' | 'literature_review' | 'data_analysis' | 'simulation' | 'other';
-  purpose: string;
-  expectedEvidence: string[];
-  stopCondition: string;
-  allowedToolKinds: string[];
-  retryOfEntryId?: string;
-  requiresHumanApproval: false;
-  researchPlanBinding?: {
-    planId: string;
-    planRevision: number;
-    milestoneId: string;
-  };
-  actionPlanBinding?: {
-    schema: 'hakimi/action-plan-binding-0.1';
-    kind: 'minimal' | 'reviewed_plan';
-    planId: string;
-    planRevision: number;
-  };
-  createdAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchBindCheckpointEntryPayload {
-  _name: 'research.bind_checkpoint_entry';
-  checkpointId: string;
-  entryId: string;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchBindCheckpointReceiptPayload {
-  _name: 'research.bind_checkpoint_receipt';
-  checkpointId: string;
-  receipt: {
-    prepare?: object | object;
-    save?: {
-      status: 'saved' | 'already_saved';
-      draftPath: string;
-      path: string;
-      source?: 'record_save' | 'prepare_existing';
-    };
-    preSaveCheck?: {
-      status: 'clean' | 'findings';
-      errors: number;
-      warnings: number;
-      findingFingerprints: string[];
-      errorFindingFingerprints: string[];
-      newErrorFindingFingerprints?: string[];
-      preExistingErrorFindingFingerprints?: string[];
-      checkedAt: number;
-    };
-    postSaveCheck?: {
-      status: 'clean' | 'findings';
-      errors: number;
-      warnings: number;
-      findingFingerprints: string[];
-      errorFindingFingerprints: string[];
-      newErrorFindingFingerprints?: string[];
-      preExistingErrorFindingFingerprints?: string[];
-      checkedAt: number;
-    };
-  };
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchClearAlertPayload {
-  _name: 'research.clear_alert';
-  fingerprint: string;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchClearGoalAlignmentPayload {
-  _name: 'research.clear_goal_alignment';
-  expectedRevision: number;
-  goalId: string;
-  topicId: string;
-  observedRevision: number;
-}
-
-/**
- * model: researchCursor · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchCommitCheckpointPayload {
-  _name: 'research.commit_checkpoint';
-  checkpointId: string;
-  entryId: string;
-  receipt?: {
-    prepare?: object | object;
-    save?: {
-      status: 'saved' | 'already_saved';
-      draftPath: string;
-      path: string;
-      source?: 'record_save' | 'prepare_existing';
-    };
-    preSaveCheck?: {
-      status: 'clean' | 'findings';
-      errors: number;
-      warnings: number;
-      findingFingerprints: string[];
-      errorFindingFingerprints: string[];
-      newErrorFindingFingerprints?: string[];
-      preExistingErrorFindingFingerprints?: string[];
-      checkedAt: number;
-    };
-    postSaveCheck?: {
-      status: 'clean' | 'findings';
-      errors: number;
-      warnings: number;
-      findingFingerprints: string[];
-      errorFindingFingerprints: string[];
-      newErrorFindingFingerprints?: string[];
-      preExistingErrorFindingFingerprints?: string[];
-      checkedAt: number;
-    };
-  };
-  committedAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchCompleteActionPayload {
-  _name: 'research.complete_action';
-  actionId: string;
-  status: 'completed' | 'abandoned';
-  completedAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchConfirmGoalAlignmentPayload {
-  _name: 'research.confirm_goal_alignment';
-  relation: 'same_program_goal' | 'goal_parent_of_program' | 'goal_milestone_in_program' | 'unrelated';
-  goalId: string;
-  topicId: string;
-  observedRevision: number;
-  confirmedAt: number;
-  expectedRevision: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchCreateLinePayload {
-  _name: 'research.create_line';
-  slug: string;
-  title: string;
-  objective?: string;
-  assessment?: string;
-  createdAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchCreateQuestionPayload {
-  _name: 'research.create_question';
-  id: string;
-  lineSlug: string;
-  wording: string;
-  assessment?: string;
-  priority: number;
-  neededEvidence: string[];
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchEndPeriodPayload {
-  _name: 'research.end_period';
-  endedAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchObserveRunPayload {
-  _name: 'research.observe_run';
-  actionId: string;
-  campaign: string;
-  jobId: string;
-  sourcePin?: string;
-  binaryPin?: string;
-  stage: 'queued' | 'running' | 'scf' | 'band' | 'analyzing' | 'completed' | 'failed' | 'unknown';
-  schedulerState: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown';
-  lastObservedAt: number;
-  nextCheckAt?: number;
-  terminalState?: 'completed' | 'failed' | 'cancelled';
-  artifactRefs: string[];
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchPlanActionPayload {
-  _name: 'research.plan_action';
-  actionId: string;
-  questionId?: string;
-  lineSlug?: string;
-  kind: 'experiment' | 'derivation' | 'literature_review' | 'data_analysis' | 'simulation' | 'other';
-  purpose: string;
-  expectedEvidence: string[];
-  stopCondition: string;
-  allowedToolKinds: string[];
-  retryOfEntryId?: string;
-  requiresHumanApproval: boolean;
-  researchPlanBinding?: {
-    planId: string;
-    planRevision: number;
-    milestoneId: string;
-  };
-  actionPlanBinding?: {
-    schema: 'hakimi/action-plan-binding-0.1';
-    kind: 'minimal' | 'reviewed_plan';
-    planId: string;
-    planRevision: number;
-  };
-  createdAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/researchPlanV2Ops.ts
- */
-interface ResearchPlanV2PutPayload {
-  _name: 'research.plan_v2.put';
-  schema: 'hakimi/research-plan-0.2';
-  planId: string;
-  revision: number;
-  goalId: string;
-  programId: string;
-  programObservedRevision: number;
-  goalRelation: 'same_program_goal' | 'goal_parent_of_program' | 'goal_milestone_in_program';
-  objective: string;
-  completionCriterion?: string;
-  milestones: {
-    milestoneId: string;
-    title: string;
-    objective: string;
-    completionCriterion: string;
-    evidenceRequirements: string[];
-  }[];
-  evidenceRequirements: string[];
-  decisionPoints: {
-    decisionId: string;
-    milestoneId: string;
-    prompt: string;
-    condition: string;
-  }[];
-  assumptions: string[];
-  currentMilestoneId: string;
-  stopConditions: string[];
-  replanConditions: string[];
-  status: 'draft' | 'active' | 'completed' | 'discarded';
-  createdAt: number;
-  updatedAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/researchPlanningPolicyOps.ts
- */
-type ResearchPlanningPolicySetPayload = { _name: 'research.planning_policy.set'; } & ('collaborative' | 'dreaming');
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchProposeCheckpointPayload {
-  _name: 'research.propose_checkpoint';
-  checkpointId: string;
-  committedEntryId?: string;
-  questionId?: string;
-  lineSlug?: string;
-  workstreamBinding?: {
-    confirmationId: string;
-    lineSlug: string;
-    workstream: string;
-    topicId: string;
-    observedRevision: number;
-    confirmedBy: 'user' | 'main_agent';
-    confirmedAt: number;
-  };
-  commitCandidate?: {
-    sourceActionId: string;
-    progressRecordedAt: number;
-    entryKind: 'observation' | 'result' | 'failure' | 'decision' | 'source' | 'code_change' | 'run' | 'closeout';
-    authority: 'human' | 'agent' | 'source' | 'tool';
-    provenance: 'agent_verification' | 'tool_verification' | 'source_assessment' | 'human_assertion' | 'human_decision';
-    rationale: string;
-  };
-  assessment?: string;
-  nextAction?: string;
-  idempotencyKey: string;
-  createdAt: number;
-}
-
-/**
- * model: researchDistillation · persisted · toEvent
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-type ResearchRecordDistillationAttentionPayload = { _name: 'research.record_distillation_attention'; } & (object | object);
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchRecordProgressPayload {
-  _name: 'research.record_progress';
-  headline: string;
-  question?: string;
-  motivation: string;
-  workPerformed: string;
-  result: string;
-  mainlineImpact: string;
-  uncertainties: string[];
-  nextAction?: string;
-  phaseChange?: {
-    from: 'idle' | 'orienting' | 'gap_analysis' | 'action_planned' | 'action_executing' | 'evaluating' | 'state_updated' | 'checkpoint_pending' | 'awaiting_human';
-    to: 'idle' | 'orienting' | 'gap_analysis' | 'action_planned' | 'action_executing' | 'evaluating' | 'state_updated' | 'checkpoint_pending' | 'awaiting_human';
-  };
-  humanDecision?: string;
-  detail?: {
-    assumptions?: string[];
-    derivation?: string;
-    tests?: string[];
-    observations?: string[];
-    sources?: string[];
-    limitations?: string[];
-    detailHint?: string;
-    artifactRefs?: string[];
-  };
-  recordedAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchReopenQuestionPayload {
-  _name: 'research.reopen_question';
-  questionId: string;
-  expectedRevision: number;
-  reason?: string;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchRequestHumanDecisionPayload {
-  _name: 'research.request_human_decision';
-  gateId: string;
-  kind: 'approval' | 'review' | 'decision';
-  actionId?: string;
-  questionId?: string;
-  prompt: string;
-  createdAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchResolveHumanDecisionPayload {
-  _name: 'research.resolve_human_decision';
-  gateId: string;
-  resolution: string;
-  nextPhase: 'idle' | 'orienting' | 'gap_analysis' | 'action_planned' | 'action_executing' | 'evaluating' | 'state_updated' | 'checkpoint_pending' | 'awaiting_human';
-  changedAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchSetFocusPayload {
-  _name: 'research.set_focus';
-  questionId: string;
-  boundedAction?: string;
-  expectedRevision: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchSetPhasePayload {
-  _name: 'research.set_phase';
-  phase: 'idle' | 'orienting' | 'gap_analysis' | 'action_planned' | 'action_executing' | 'evaluating' | 'state_updated' | 'checkpoint_pending' | 'awaiting_human';
-  reason?: string;
-  changedAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-type ResearchSetProgramPayload = { _name: 'research.set_program'; } & (object | object);
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchStartActionPayload {
-  _name: 'research.start_action';
-  actionId: string;
-  startedAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchStartPeriodPayload {
-  _name: 'research.start_period';
-  id: string;
-  lineSlug: string;
-  startedAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchSteerPayload {
-  _name: 'research.steer';
-  kind: 'set_focus' | 'update_question' | 'switch_line' | 'pause_loop' | 'resume_loop' | 'reopen_question' | 'defer_question' | 'block_question' | 'close_question';
-  questionId?: string;
-  lineSlug?: string;
-  expectedRevision: number;
-  boundedAction?: string;
-  wording?: string;
-  assessment?: string;
-  priority?: number;
-  workflow?: 'open' | 'active' | 'deferred' | 'blocked' | 'closed' | 'cancelled';
-  epistemic?: 'unknown' | 'candidate' | 'supported' | 'contradicted' | 'inconclusive';
-  neededEvidence?: string[];
-  nextBoundedAction?: string;
-  reason?: string;
-  actor: 'human' | 'model';
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchSwitchLinePayload {
-  _name: 'research.switch_line';
-  lineSlug: string;
-  expectedRevision: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchUpdateLinePayload {
-  _name: 'research.update_line';
-  slug: string;
-  expectedRevision: number;
-  title?: string;
-  objective?: string;
-  status?: 'active' | 'paused' | 'completed' | 'blocked';
-  assessment?: string;
-  reason?: string;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchUpdatePeriodPayload {
-  _name: 'research.update_period';
-  id: string;
-  loopCount?: number;
-  currentQuestionId?: string | null;
-  summary?: string | null;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchUpdateQuestionPayload {
-  _name: 'research.update_question';
-  questionId: string;
-  expectedRevision: number;
-  wording?: string;
-  assessment?: string;
-  priority?: number;
-  workflow?: 'open' | 'active' | 'deferred' | 'blocked' | 'closed' | 'cancelled';
-  epistemic?: 'unknown' | 'candidate' | 'supported' | 'contradicted' | 'inconclusive';
-  neededEvidence?: string[];
-  nextBoundedAction?: string;
-  evidenceRefs?: string[];
-  falsifierRefs?: string[];
-  reason?: string;
-  actor: 'human' | 'model';
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/aitpResearchOps.ts
- */
-interface ResearchUpsertAlertPayload {
-  _name: 'research.upsert_alert';
-  fingerprint: string;
-  kind: 'contradiction' | 'blocked' | 'reopened' | 'commit_failed' | 'degraded' | 'stale';
-  classification?: 'active_blocker' | 'historical_unresolved' | 'superseded_by_retry' | 'warning';
-  source?: 'question' | 'aitp_failure' | 'aitp_check' | 'adapter' | 'checkpoint';
-  state?: 'active' | 'acknowledged' | 'cleared' | 'superseded';
-  message: string;
-  questionId?: string;
-  lineSlug?: string;
-  relatedEntryId?: string;
-  workstream?: string;
-  retryOfEntryId?: string;
-  reason?: string;
-  createdAt: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/researchWorkstreamBindingOps.ts
- */
-interface ResearchWorkstreamBindingClearPayload {
-  _name: 'research.workstream_binding.clear';
-  binding: {
-    confirmationId: string;
-    lineSlug: string;
-    workstream: string;
-    topicId: string;
-    observedRevision: number;
-    confirmedBy: 'user' | 'main_agent';
-    confirmedAt: number;
-  };
-  targetLineSlug?: string;
-  expectedRevision: number;
-}
-
-/**
- * model: research · persisted
- * owner: src/features/aitpResearch/researchWorkstreamBindingOps.ts
- */
-interface ResearchWorkstreamBindingConfirmPayload {
-  _name: 'research.workstream_binding.confirm';
-  confirmationId: string;
-  lineSlug: string;
-  workstream: string;
-  topicId: string;
-  observedRevision: number;
-  confirmedBy: 'user' | 'main_agent';
-  confirmedAt: number;
-  expectedRevision: number;
 }
 
 /**
@@ -1525,6 +775,19 @@ interface TurnSteerPayload {
 }
 
 /**
+ * model: turn · persisted · toEvent
+ * owner: src/agent/loop/turnOps.ts
+ */
+interface TurnStepInterruptedPayload {
+  _name: 'turn.step.interrupted';
+  turnId: number;
+  step: number;
+  stepId?: string;
+  reason: string;
+  message?: string;
+}
+
+/**
  * model: usage · persisted
  * owner: src/agent/usage/usageOps.ts
  */
@@ -1544,11 +807,6 @@ interface UsageRecordPayload {
 
 /** Record type → payload sketch. */
 interface WirePayloadMap {
-  "aitp_mode.enter": AitpModeEnterPayload;
-  "aitp_mode.exit": AitpModeExitPayload;
-  "aitp_mode.set_line": AitpModeSetLinePayload;
-  "aitp_mode.set_loop_status": AitpModeSetLoopStatusPayload;
-  "aitp_mode.set_phase": AitpModeSetPhasePayload;
   "config.update": ConfigUpdatePayload;
   "context.append_loop_event": ContextAppendLoopEventPayload;
   "context.append_message": ContextAppendMessagePayload;
@@ -1581,46 +839,6 @@ interface WirePayloadMap {
   "plan.revision": PlanRevisionPayload;
   "plugin.session_start": PluginSessionStartPayload;
   "profile.bind": ProfileBindPayload;
-  "research_plan.discard": ResearchPlanDiscardPayload;
-  "research_plan.draft": ResearchPlanDraftPayload;
-  "research_plan.finalize": ResearchPlanFinalizePayload;
-  "research.ack_alert": ResearchAckAlertPayload;
-  "research.ack_checkpoint": ResearchAckCheckpointPayload;
-  "research.advance_revision": ResearchAdvanceRevisionPayload;
-  "research.begin_action": ResearchBeginActionPayload;
-  "research.bind_checkpoint_entry": ResearchBindCheckpointEntryPayload;
-  "research.bind_checkpoint_receipt": ResearchBindCheckpointReceiptPayload;
-  "research.clear_alert": ResearchClearAlertPayload;
-  "research.clear_goal_alignment": ResearchClearGoalAlignmentPayload;
-  "research.commit_checkpoint": ResearchCommitCheckpointPayload;
-  "research.complete_action": ResearchCompleteActionPayload;
-  "research.confirm_goal_alignment": ResearchConfirmGoalAlignmentPayload;
-  "research.create_line": ResearchCreateLinePayload;
-  "research.create_question": ResearchCreateQuestionPayload;
-  "research.end_period": ResearchEndPeriodPayload;
-  "research.observe_run": ResearchObserveRunPayload;
-  "research.plan_action": ResearchPlanActionPayload;
-  "research.plan_v2.put": ResearchPlanV2PutPayload;
-  "research.planning_policy.set": ResearchPlanningPolicySetPayload;
-  "research.propose_checkpoint": ResearchProposeCheckpointPayload;
-  "research.record_distillation_attention": ResearchRecordDistillationAttentionPayload;
-  "research.record_progress": ResearchRecordProgressPayload;
-  "research.reopen_question": ResearchReopenQuestionPayload;
-  "research.request_human_decision": ResearchRequestHumanDecisionPayload;
-  "research.resolve_human_decision": ResearchResolveHumanDecisionPayload;
-  "research.set_focus": ResearchSetFocusPayload;
-  "research.set_phase": ResearchSetPhasePayload;
-  "research.set_program": ResearchSetProgramPayload;
-  "research.start_action": ResearchStartActionPayload;
-  "research.start_period": ResearchStartPeriodPayload;
-  "research.steer": ResearchSteerPayload;
-  "research.switch_line": ResearchSwitchLinePayload;
-  "research.update_line": ResearchUpdateLinePayload;
-  "research.update_period": ResearchUpdatePeriodPayload;
-  "research.update_question": ResearchUpdateQuestionPayload;
-  "research.upsert_alert": ResearchUpsertAlertPayload;
-  "research.workstream_binding.clear": ResearchWorkstreamBindingClearPayload;
-  "research.workstream_binding.confirm": ResearchWorkstreamBindingConfirmPayload;
   "runtime.set_binding": RuntimeSetBindingPayload;
   "skill.activate": SkillActivatePayload;
   "swarm_mode.enter": SwarmModeEnterPayload;
@@ -1641,5 +859,6 @@ interface WirePayloadMap {
   "turn.ended": TurnEndedPayload;
   "turn.prompt": TurnPromptPayload;
   "turn.steer": TurnSteerPayload;
+  "turn.step.interrupted": TurnStepInterruptedPayload;
   "usage.record": UsageRecordPayload;
 }

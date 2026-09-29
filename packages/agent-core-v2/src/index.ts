@@ -550,6 +550,7 @@ export {
   compressBase64ForModel,
   compressImageForModel,
   gateImageFormatParts,
+  isRecodableImage,
   IMAGE_BYTE_BUDGET,
   MAX_IMAGE_EDGE_PX,
   READ_IMAGE_BYTE_BUDGET,
@@ -560,6 +561,7 @@ export {
 export {
   MODEL_ACCEPTED_IMAGE_MIMES,
   buildImageConversionGuidance,
+  buildOversizedImageConversionGuidance,
   buildUnsupportedImageNotice,
   decodeBase64Prefix,
   isModelAcceptedImageMime,
@@ -568,6 +570,11 @@ export {
   resolveEffectiveImageMime,
   unsupportedImageMimeFromUrl,
 } from '#/agent/media/image-format-policy';
+export {
+  DEFAULT_INLINE_IMAGE_BYTE_BUDGET,
+  providerImagePolicy,
+  type ProviderImagePolicy,
+} from '#/agent/media/providerImagePolicy';
 export {
   persistOriginalImage,
   sessionMediaOriginalsDir,
@@ -644,6 +651,9 @@ export * from '#/agent/media/mediaTools';
 export * from '#/agent/media/mediaToolsRegistrar';
 export * from '#/agent/media/registerMediaTools';
 export * from '#/agent/media/kimiFileUrl';
+export * from '#/agent/media/mediaRef';
+export * from '#/agent/media/sessionMediaStore';
+import '#/agent/media/sessionMediaStoreService';
 export * from '#/agent/media/videoUpload';
 export * from '#/agent/media/videoResolver';
 export * from '#/agent/media/videoResolverService';
@@ -711,29 +721,6 @@ export * from '#/agent/userTool/userToolService';
 export * from '#/agent/skillVisibility/skillVisibility';
 import '#/agent/skillVisibility/skillVisibilityService';
 
-// Research domain — protocol-independent pure contracts
-export * from '#/features/research/types';
-export * from '#/features/research/evidencePacket';
-
-// AITP Research Mode feature
-import '#/features/aitpResearch/errors';
-export { AitpResearchErrors } from '#/features/aitpResearch/errors';
-export * from '#/features/aitpResearch/types';
-export * from '#/features/aitpResearch/aitpResearchOps';
-export * from '#/features/aitpResearch/researchPlanOps';
-export * from '#/features/aitpResearch/adapter/sessionAitpAdapter';
-export * from '#/features/aitpResearch/coordinator/sessionAitpLifecycleCoordinator';
-export * from '#/features/aitpResearch/mode/agentAitpMode';
-export * from '#/features/aitpResearch/research/agentResearch';
-export * from '#/features/aitpResearch/research/durableCommit';
-export * from '#/features/aitpResearch/research/externalFact';
-export * from '#/features/aitpResearch/research/evidencePacket';
-import '#/features/aitpResearch/research/durableCommitService';
-import '#/features/aitpResearch/research/externalFactService';
-export * from '#/features/aitpResearch/injection/aitpResearchInjectionContract';
-export * from '#/features/aitpResearch/tools/aitpModeTools';
-import '#/features/aitpResearch/tools/aitpModeToolsImpl';
-export * from '#/features/aitpResearch/tools/researchTools';
-import '#/features/aitpResearch/tools/researchToolsImpl';
-export * from '#/features/aitpResearch/tools/aitpAdapterTools';
-import '#/features/aitpResearch/aitpResearchFeature';
+export * from '#/features/research/research';
+export * from '#/features/research/researchDiscovery';
+import '#/features/research/researchFeature';

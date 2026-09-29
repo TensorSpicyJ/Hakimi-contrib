@@ -9,18 +9,25 @@ import { ensureKimiHome, resolveConfigPath, resolveKimiHome } from '#/app/bootst
 describe('bootstrap path helpers', () => {
   describe('resolveKimiHome', () => {
     it('uses explicit homeDir when provided', () => {
-      expect(resolveKimiHome('/tmp/kimi')).toBe('/tmp/kimi');
+      expect(resolveKimiHome('/tmp/hakimi', {
+        HAKIMI_HOME: '/env/hakimi',
+        KIMI_CODE_HOME: '/env/kimi',
+      })).toBe('/tmp/hakimi');
+    });
+
+    it('prefers HAKIMI_HOME when both environment overrides are set', () => {
+      expect(resolveKimiHome(undefined, {
+        HAKIMI_HOME: '/env/hakimi',
+        KIMI_CODE_HOME: '/env/kimi',
+      })).toBe('/env/hakimi');
     });
 
     it('falls back to KIMI_CODE_HOME env', () => {
-      const prev = process.env['KIMI_CODE_HOME'];
-      process.env['KIMI_CODE_HOME'] = '/env/kimi';
-      try {
-        expect(resolveKimiHome()).toBe('/env/kimi');
-      } finally {
-        if (prev === undefined) delete process.env['KIMI_CODE_HOME'];
-        else process.env['KIMI_CODE_HOME'] = prev;
-      }
+      expect(resolveKimiHome(undefined, { KIMI_CODE_HOME: '/env/kimi' })).toBe('/env/kimi');
+    });
+
+    it('defaults to the Hakimi directory when no override is set', () => {
+      expect(resolveKimiHome(undefined, {}, '/users/example')).toBe('/users/example/.hakimi');
     });
   });
 

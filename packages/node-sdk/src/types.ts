@@ -89,26 +89,6 @@ export type { ContentPart, Role, ThinkingEffort, ToolCall } from '@moonshot-ai/k
 // from the v2 engine (v1 sessions report an empty command set).
 export type { AgentCommandInfo } from '@moonshot-ai/agent-core-v2/agent/command/agentCommand';
 
-// AITP Research Mode — wire types re-exported through agent-core (which
-// re-exports from @moonshot-ai/protocol). The node-sdk does not depend on
-// the protocol package directly.
-export type {
-  ResearchCommand,
-  ResearchCommandRequest,
-  ResearchCommandResponse,
-  ResearchEvidencePacket,
-  ResearchRunState,
-  ResearchRunStage,
-  ResearchSchedulerState,
-} from '@moonshot-ai/agent-core';
-// The snapshot and local ResearchPlan type are re-exported from agent-core-v2
-// (the engine's own types, which use `readonly` arrays) so the v2 client's
-// direct engine reads are type-compatible.
-export type {
-  ResearchPlan,
-  ResearchStatusSnapshot,
-} from '@moonshot-ai/agent-core-v2';
-
 export type PermissionMode = 'yolo' | 'manual' | 'auto';
 
 /**

@@ -91,7 +91,7 @@ describe('buildGoalReportLines', () => {
   it('titles the box with the status', () => {
     expect(goalPanelTitle(goal())).toBe(' Goal · active ');
     expect(goalPanelTitle(goal({
-      continuation: { state: 'held', owner: 'aitpResearch', reason: 'Checkpoint pending.' },
+      continuation: { state: 'held', owner: 'workflow', reason: 'Checkpoint pending.' },
     }))).toBe(' Goal · active · continuation held ');
     expect(goalPanelTitle(goal({ status: 'complete' }))).toBe(' Goal · complete ');
   });
@@ -100,12 +100,12 @@ describe('buildGoalReportLines', () => {
     const out = lines(goal({
       continuation: {
         state: 'held',
-        owner: 'aitpResearch',
+        owner: 'workflow',
         reason: 'Checkpoint pending.',
       },
     }));
     expect(out).toContain('Continue');
-    expect(out).toContain('held by aitpResearch — Checkpoint pending.');
+    expect(out).toContain('held by workflow — Checkpoint pending.');
     expect(out).not.toContain('paused');
   });
 

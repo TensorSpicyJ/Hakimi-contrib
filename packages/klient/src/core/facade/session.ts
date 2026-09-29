@@ -26,6 +26,7 @@ import type {
   SessionMetaPatch,
 } from '@moonshot-ai/agent-core-v2/session/sessionMetadata/sessionMetadata';
 import type { SkillSummary } from '@moonshot-ai/agent-core-v2/app/skillCatalog/types';
+import type { ResearchSnapshot } from '@moonshot-ai/agent-core-v2/features/research/research';
 
 import type { ScopeRef } from '../channel.js';
 import type { McpServerConfig } from '../../contract/mcp.js';
@@ -74,6 +75,12 @@ export interface SessionSkillsFacade {
   list(): Promise<readonly SkillSummary[]>;
 }
 
+export interface SessionResearchFacade {
+  snapshot(): Promise<ResearchSnapshot>;
+  select(path: string): Promise<ResearchSnapshot>;
+  setEnabled(enabled: boolean): Promise<ResearchSnapshot>;
+}
+
 /**
  * Derived session lifecycle phase. The engine retired its `sessionActivity`
  * service (#1751) — busy is now derived from agent activity views — so the
@@ -113,6 +120,7 @@ export interface SessionFacade {
   readonly questions: SessionQuestionsFacade;
   readonly interactions: SessionInteractionsFacade;
   readonly skills: SessionSkillsFacade;
+  readonly research: SessionResearchFacade;
   /** Agent id → metadata for every agent registered in this session. */
   agents(): Promise<Readonly<Record<string, AgentMeta>>>;
 }
@@ -207,6 +215,12 @@ export function createSessionFacade(call: ScopedCaller, sessionId: string): Sess
     skills: {
       list: () =>
         call(scope, 'sessionSkillCatalog', 'list', []) as Promise<readonly SkillSummary[]>,
+    },
+
+    research: {
+      snapshot: () => call(scope, 'researchService', 'snapshot', []) as Promise<ResearchSnapshot>,
+      select: (path) => call(scope, 'researchService', 'select', [path]) as Promise<ResearchSnapshot>,
+      setEnabled: (enabled) => call(scope, 'researchService', 'setEnabled', [enabled]) as Promise<ResearchSnapshot>,
     },
 
     agents: async () => {

@@ -8,7 +8,6 @@ import type { ColorToken, ThemeName } from '#/tui/theme';
 import { LLM_NOT_SET_MESSAGE } from '../constant/kimi-tui';
 import type { AuthFlowController } from '../controllers/auth-flow';
 import type { BtwPanelController } from '../controllers/btw-panel';
-import type { ResearchController } from '../controllers/research-controller';
 import type { StreamingUIController } from '../controllers/streaming-ui';
 import type { TasksBrowserController } from '../controllers/tasks-browser';
 import { tryHandleDanceCommand } from '../easter-eggs/dance';
@@ -104,7 +103,6 @@ export { handleFeedbackCommand, showMcpServers, showStatusReport, showUsage } fr
 export { handlePluginsCommand } from './plugins';
 export { handleReloadCommand, handleReloadTuiCommand } from './reload';
 export { handleGoalCommand } from './goal';
-export { handleResearchCommand, parseResearchCommand } from './research';
 export {
   handleExportDebugZipCommand,
   handleExportMdCommand,
@@ -222,7 +220,6 @@ export interface SlashCommandHost {
   readonly btwPanelController: BtwPanelController;
   readonly tasksBrowserController: TasksBrowserController;
   readonly authFlow: AuthFlowController;
-  readonly researchController: ResearchController;
 }
 
 // ---------------------------------------------------------------------------
@@ -428,9 +425,9 @@ const SESSION_REQUIRING_COMMANDS: ReadonlySet<BuiltinSlashCommandName> = new Set
   'export-md',
   'fork',
   'goal',
+  'research',
   'init',
   'plan',
-  'research',
   'swarm',
   'undo',
   'web',

@@ -8,7 +8,7 @@
 # commented "# field: type" lines describe the remaining schema fields.
 # Values resolve as: default -> config.toml -> env overlay -> memory.
 
-# Index (25 sections · 2 overlay(s))
+# Index (26 sections · 2 overlay(s))
 #   background               src/agent/task/configSection.ts
 #   builtinProductSkills     src/app/skillCatalog/configSection.ts
 #   cron                     src/app/cron/configSection.ts
@@ -27,6 +27,7 @@
 #   models                   src/app/kosongConfig/configSection.ts
 #   permission               src/agent/permissionRules/configSection.ts
 #   providers                src/app/kosongConfig/configSection.ts
+#   research                 src/features/research/configSection.ts
 #   secondaryModel           src/session/subagent/configSection.ts
 #   services                 src/app/auth/configSection.ts
 #   subagent                 src/session/subagent/configSection.ts
@@ -45,6 +46,10 @@
 #   env:
 #     keep_alive_on_exit <- KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT (custom parse)
 #     max_running_tasks <- KIMI_CODE_BACKGROUND_MAX_RUNNING_TASKS (custom parse)
+#     bash_task_timeout_s <- KIMI_CODE_BACKGROUND_BASH_TASK_TIMEOUT_S (custom parse)
+#     print_wait_ceiling_s <- KIMI_CODE_BACKGROUND_PRINT_WAIT_CEILING_S (custom parse)
+#     print_background_mode <- KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE (custom parse)
+#     print_max_turns <- KIMI_CODE_BACKGROUND_PRINT_MAX_TURNS (custom parse)
 # ##########################################################################
 
 [background]
@@ -194,6 +199,7 @@ extra_skill_dirs = []
 # max_ralph_iterations: integer
 # reserved_context_size: integer
 # compaction_trigger_ratio: number
+# compaction_max_attempts: integer
 
 # ##########################################################################
 # mcp
@@ -316,6 +322,15 @@ merge_all_available_skills = true
   # source: record<string, any>
 
 # ##########################################################################
+# research
+#   owner: src/features/research/configSection.ts
+#   scope: core
+# ##########################################################################
+
+[research]
+enabled = true
+
+# ##########################################################################
 # secondaryModel (config.toml: secondary_model)
 #   owner: src/session/subagent/configSection.ts
 #   scope: core
@@ -393,6 +408,10 @@ timeout_ms = 7200000
 #   env:
 #     keep_alive_on_exit <- KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT (custom parse)
 #     max_running_tasks <- KIMI_CODE_BACKGROUND_MAX_RUNNING_TASKS (custom parse)
+#     bash_task_timeout_s <- KIMI_CODE_BACKGROUND_BASH_TASK_TIMEOUT_S (custom parse)
+#     print_wait_ceiling_s <- KIMI_CODE_BACKGROUND_PRINT_WAIT_CEILING_S (custom parse)
+#     print_background_mode <- KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE (custom parse)
+#     print_max_turns <- KIMI_CODE_BACKGROUND_PRINT_MAX_TURNS (custom parse)
 # ##########################################################################
 
 [task]

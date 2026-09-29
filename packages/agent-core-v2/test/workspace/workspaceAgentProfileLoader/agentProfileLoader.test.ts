@@ -121,14 +121,17 @@ function workspaceContextStub(workDir: string): IWorkspaceContext {
   };
 }
 
-function fsWatchStub(): IHostFsWatchService {
+function fsWatchStub(paths?: string[]): IHostFsWatchService {
   return {
     _serviceBrand: undefined,
-    watch: (): IHostFsWatchHandle => ({
-      ready: Promise.resolve(),
-      onDidChange: Event.None as Event<HostFsChange>,
-      dispose: () => {},
-    }),
+    watch: (path): IHostFsWatchHandle => {
+      paths?.push(path);
+      return {
+        ready: Promise.resolve(),
+        onDidChange: Event.None as Event<HostFsChange>,
+        dispose: () => {},
+      };
+    },
   };
 }
 
@@ -365,6 +368,19 @@ describe('agent profile loaders + session catalog', () => {
         expect(stack.catalog.getDefault().name).toBe(DEFAULT_AGENT_PROFILE_NAME);
         expect(stack.catalog.list().length).toBeGreaterThan(0);
         expect(stack.catalog.inspect(DEFAULT_AGENT_PROFILE_NAME)?.sourceId).toBe('builtin');
+      });
+    });
+  });
+
+  it('watches workspace agent candidates directly rather than the workspace root', async () => {
+    await withFixture(async (fixture) => {
+      const watchedPaths: string[] = [];
+      await withStack(fixture, { fsWatch: fsWatchStub(watchedPaths) }, async (stack) => {
+        await stack.ready();
+
+        expect(watchedPaths).toContain(join(fixture.workDir, '.kimi-code', 'agents'));
+        expect(watchedPaths).toContain(join(fixture.workDir, '.agents', 'agents'));
+        expect(watchedPaths).not.toContain(fixture.workDir);
       });
     });
   });

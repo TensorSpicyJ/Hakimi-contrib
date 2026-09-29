@@ -86,7 +86,7 @@ import {
 } from './stepRequest';
 import { StepRequestQueue, type StepRequestBatch } from './stepRequestQueue';
 import { isDisplayablePromptOrigin, turnPromptText, type TurnInterruptReason } from './turnEvents';
-import { cancelTurn, endTurn, promptTurn, TurnModel } from './turnOps';
+import { cancelTurn, endTurn, interruptStep, promptTurn, TurnModel } from './turnOps';
 
 export type LoopInterruptReason = 'aborted' | 'max_steps' | 'error';
 
@@ -200,6 +200,9 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     switch (request.admission) {
       case 'newTurn':
         this.createAndQueueTurn(request);
+        break;
+      case 'nextTurn':
+        this.standaloneStepQueue.enqueue(request, options?.at ?? 'tail');
         break;
       case 'activeOrNewTurn':
         if (active === undefined) this.createAndQueueTurn(request);
@@ -746,6 +749,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
       runtime.current?.number,
       'aborted',
       isUserCancellation(reason) ? undefined : toErrorMessage(reason),
+      runtime.current?.uuid,
     );
     if (!runtime.turnSignal.aborted && step?.state === 'cancelled') {
       runtime.current = undefined;
@@ -797,7 +801,13 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     const reason: LoopInterruptReason = isMaxStepsExceededError(error) ? 'max_steps' : 'error';
     const interruptedError =
       isError2(error) && error.code === ErrorCodes.INTERNAL && error.cause !== undefined ? error.cause : error;
-    this.emitStepInterrupted(runtime.turnId, runtime.current?.number, reason, toErrorMessage(interruptedError));
+    this.emitStepInterrupted(
+      runtime.turnId,
+      runtime.current?.number,
+      reason,
+      toErrorMessage(interruptedError),
+      runtime.current?.uuid,
+    );
     return { type: 'return', result: { type: 'failed', error, steps: runtime.steps } };
   }
 
@@ -1069,15 +1079,10 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     activeStep: number | undefined,
     reason: LoopInterruptReason,
     message?: string,
+    stepId?: string,
   ): void {
     if (activeStep === undefined) return;
-    this.eventBus.publish({
-      type: 'turn.step.interrupted',
-      turnId,
-      step: activeStep,
-      reason,
-      message,
-    });
+    this.wire.dispatch(interruptStep({ turnId, step: activeStep, stepId, reason, message }));
   }
 
   private createStreamPartHandler(
@@ -1144,8 +1149,18 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
           }
         }
       },
-      drainInterruptedContent: () =>
-        partialContent.splice(0).filter((part) => !isVacuousContentPart(part)),
+      drainInterruptedContent: () => {
+        const drained = partialContent.splice(0).filter((part) => !isVacuousContentPart(part));
+        let lastCompleteThink = -1;
+        for (const [index, part] of drained.entries()) {
+          if (part.type === 'think' && part.encrypted !== undefined) {
+            lastCompleteThink = index;
+          }
+        }
+        return drained.filter(
+          (part, index) => part.type !== 'think' || index <= lastCompleteThink,
+        );
+      },
     };
   }
 }

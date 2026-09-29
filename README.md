@@ -38,18 +38,15 @@ A question becomes research only when an action can change what should be believ
 
 ## What is implemented
 
-- **Research surfaces:** TUI and Web provide a Research Board and Research Manager for following and steering active work.
-- **Research structure:** Research Lines, Questions, and Focus make the current unknown, assumptions, and priorities visible.
-- **Bounded actions:** `BeginResearchAction` and `ConcludeResearchAction` frame scientific work with an outcome, limitations, a next step, and one explicit durability assessment. No durable delta performs no ledger persistence; a durable delta emits one typed pending candidate for the existing AITP commit barrier.
-- **Science-first progress:** progress is organized around evidence and uncertainty rather than tool activity or transcript volume.
-- **Review and human control:** human gates and alerts support explicit judgment, while typed child-evidence review keeps delegated work inspectable.
-- **External-compute observations:** Hakimi can record structured observations about externally run HPC work while keeping scheduler state separate from scientific evidence. It does not schedule jobs, poll them to completion, or certify success. Goal is the sole owner of cross-turn continuation.
+- **Science-first progress:** work is organized around evidence and uncertainty rather than tool activity or transcript volume.
+- **Review and human control:** human review and reproducible verification remain necessary for scientific judgment.
+- **External-compute analysis:** Hakimi can help analyze external HPC work, but it does not schedule jobs, poll them to completion, or certify success.
 
 ## Theory-physics discipline
 
-The optional `theory-physics` domain pack is the upper-layer handbook for sustained theoretical-physics research. It routes a request from Research Mode admission, through Line / Question / Focus and a stage Goal, to one bounded Research Action; only durable scientific deltas or reusable-method candidates are handed to the external `using-aitp` or `distilling-methods` skills on demand.
+AITP skills are bundled with Hakimi's default Research mode. A topic's `research.md` and linked files retain the scientific argument; AITP's own instructions govern memory, research and writing.
 
-An ordinary one-off physics answer does not need Research Mode. The pack is a discipline, not an oracle: it is not a literature database, physics-correctness service, scheduler, second runtime, ledger, or background autonomous loop. The researcher remains responsible for conventions, significance, and final scientific judgment; AITP remains the protocol authority.
+Hakimi supplies topic navigation, shared agent context and Goal continuity around those files. Researchers retain responsibility for conventions, significance and scientific judgment.
 
 ## Evidence before confidence
 
@@ -57,13 +54,11 @@ Hakimi can help construct arguments, calculations, code, searches, and tests. No
 
 Human review and reproducible verification are part of the research loop, not a final cosmetic step. When the evidence is insufficient or conflicts, the honest result is uncertainty, a blocked question, or a smaller discriminating check.
 
-## Research Mode and AITP
+## AITP Skills
 
-Research Mode is discoverable by default, but every new session starts inactive. For sustained work, `theory-physics` can guide the model to call `EnterAITPMode`, wait for authoritative probe status, and perform a bounded action; inactive sessions perform zero AITP I/O. The Research Board and model context distinguish the Hakimi Goal, the observed AITP Program (including its top-level **Research goal**), and the Local Research Loop. Hakimi observes that top-level goal only through AITP `enter`; it never writes `TOPIC.md` or an AITP Topic. A Goal-to-Program alignment is a local, checkpointed binding that the user explicitly confirms rather than a text-similarity inference. In active Research Mode, a missing, stale, or explicitly conflicting binding holds Goal completion and automatic continuation; an inactive Goal is unaffected. Entering Research Mode does not schedule model turns—Goal alone owns cross-turn continuation, while Plan is only a short-lived action overlay. Interactive Research still works without a Goal. The compact TUI/Web Board uses four slots—Project, Current cycle, Attention, and Next—and labels the legacy period counter as Research turns; healthy AITP/provenance stays in expanded detail. A Line switch is rejected until any live Action/Run, checkpoint, human gate, or non-idle cycle is resolved, and another Line's alerts never appear as current attention. The default Goal engine exposes derived `idle`/`deciding`/`enqueued`/`running`/`held`/`waiting` continuation state, so an active Goal held by Research policy is shown as `active · continuation held` with its owner and reason instead of being confused with a paused Goal. Legacy snapshots without that optional field are labelled unavailable, and multi-Line Board state remains scoped to the selected Line. Every admitted Research turn performs one deterministic local reconciliation before model context is injected, so mechanically recoverable Line/Action/phase/period/cursor drift is repaired before the answer; this does not run another AITP maintenance cycle or infer scientific outcomes. A checkpoint captured from an older Question revision remains explicitly blocked and is labelled historical rather than being committed, completed, or discarded automatically. Replay repairs only deterministic Action/phase structure: the same Action remains live, blocks Goal completion, and is routed to evidence-based resolution on the next interactive Research turn without being auto-completed or auto-abandoned. In `auto` permission mode, routine in-scope Research actions follow the normal tool permission policy instead of creating a second durable approval gate; a matching action approval left by an older session is resumed as an auditable standing auto authorization.
+The bundled AITP skills use the ordinary `Skill` and `Read` tools. `/research` opens topic navigation; the Web topic panel presents the main question and related branches. See [Research mode](docs/en/guides/research-mode.md) for controls and scope.
 
-A Research Line and an AITP workstream are also separate identities. After Hakimi observes the current Topic, the user or main agent must explicitly confirm a revisioned local Line-to-workstream binding; matching slugs, text, paths, or IDs never imply membership. Each confirmation has a server-owned opaque identity, and clear must compare both that identity and the non-rewinding public Research revision. Unbound, unavailable, stale, or conflicting Lines may continue low-risk local exploration, but scoped maintenance and Hakimi checkpoint adoption require the exact confirmed binding. Hakimi re-observes the unscoped Topic before scoped maintenance and checkpoint writes, while the post-save commit barrier verifies the captured Topic and exactly one captured workstream. Checkpoint-bound saves require AITP 0.9.0 adapter-contract 0.2: Hakimi supplies the captured Topic and exact singleton workstream to atomic `record save`, so a mismatch creates no canonical Entry; post-save `show` and scoped `check` remain defense in depth. The expanded Board reports read readiness separately from scoped checkpoint-write capability, so a ready 0.1 adapter is never presented as atomic-write capable. Rebinding requires an explicit clear first, and undo or cold restore revalidates the stored Topic and observed revision instead of repairing the binding automatically. The same binding and typed durable-candidate state is projected through REST, WebSocket, Node SDK, klient, TUI, and Web.
-
-[AITP](docs/aitp/) is an optional external durable-evidence ledger, used through its CLI and files. It is not a second Hakimi runtime or database. After `ConcludeResearchAction`, Hakimi can route one assessed durable delta through the existing prepare/fill/save/show/checkpoint path; a no-delta conclusion schedules no persistence or distillation work, and human assertions or decisions remain separate from agent/tool/source verification. After the first successful commit of a new checkpoint, Hakimi makes one same-turn, best-effort handoff of only that touched Entry to the exact external `distilling-methods` Skill. A duplicate commit or unavailable Skill is a non-blocking no-op, and the external Skill alone decides whether the evidence meets an existing trigger. The Research snapshot can show only that the latest exact handoff was requested or unavailable; it never claims a trigger, card, trial, completed review, approval, or publication. Hakimi does not parse markers, create or revise cards on its own, approve or publish them, auto-initialize/adopt/backfill workspaces, add `/research goal`, introduce a workstream registry, or provide the planned native H6b coordinator. Hakimi-local Goal–Program and Line–workstream bindings never write AITP. When AITP is unavailable, Research Mode reports a degraded state and blocks durable writes, checkpoints, and completion of an active Research Goal. Detailed compatibility and operating boundaries are maintained in the [AITP documentation](docs/aitp/).
+There is no duplicate scientific ledger or background memory writer. Follow AITP's instructions to retain meaningful evidence in the existing topic files. The former ledger adapter remains retired; its history is in [the AITP documentation](docs/aitp/).
 
 ## Install from source
 
@@ -93,12 +88,6 @@ hakimi -p "Summarize the test failures in this repository."
 hakimi -c
 ```
 
-In an interactive session, enter Research Mode explicitly when the work requires it:
-
-```text
-/research on
-```
-
 Use `/login` to configure an available provider. For DeepSeek setup, run `hakimi provider deepseek`. Login is explicit; Hakimi never begins OAuth login at startup. Configuration, sessions, logs, and caches live under `~/.hakimi` by default; set `HAKIMI_HOME` to use another data directory.
 
 On Windows, install [Git for Windows](https://gitforwindows.org/) before first launch. Hakimi uses its bundled Git Bash shell; if Git Bash is installed elsewhere, set `KIMI_SHELL_PATH` to the absolute path of `bash.exe`.
@@ -106,7 +95,7 @@ On Windows, install [Git for Windows](https://gitforwindows.org/) before first l
 ## Current status
 
 - Hakimi is a development version that can be built from source.
-- The Research Loop and the optional `theory-physics` pack are experimental and may change.
+- Independently installed plugins and Skills follow the ordinary discovery and tool path.
 - There is no public npm package or release installer; use the source-build path above.
 - Hakimi does not replace expert judgment, human review, or reproducible scientific validation.
 
@@ -114,8 +103,7 @@ On Windows, install [Git for Windows](https://gitforwindows.org/) before first l
 
 - [Getting started](docs/en/guides/getting-started.md)
 - [Configuration](docs/en/configuration/config-files.md)
-- [Research Mode](docs/en/guides/research-mode.md)
-- [AITP documentation and compatibility records](docs/aitp/)
+- [AITP retirement records](docs/aitp/)
 - [Implementation notes](IMPLEMENTATION.md)
 
 ## Project background

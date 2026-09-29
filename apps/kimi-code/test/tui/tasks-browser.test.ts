@@ -10,7 +10,7 @@ import {
 import { AgentActivityViewer } from '@/tui/components/dialogs/agent-activity-viewer';
 import { TaskOutputViewer } from '@/tui/components/dialogs/task-output-viewer';
 import { SubagentActivityStore } from '@/tui/controllers/subagent-activity-store';
-import { TasksBrowserController } from '@/tui/controllers/tasks-browser';
+import { TasksBrowserController, type TasksBrowserState } from '@/tui/controllers/tasks-browser';
 import { darkColors } from '@/tui/theme/colors';
 
 const ANSI_SGR = /\[[0-9;]*m/g;
@@ -300,6 +300,20 @@ describe('TasksBrowserApp — full-screen rendering', () => {
     expect(out).toContain('bash-done');
   });
 
+  it('lists foreground and completed agents in the agent directory without process tasks', () => {
+    const tasks = [
+      task({ taskId: 'agent-foreground', kind: 'agent', detached: false, status: 'running' }),
+      task({ taskId: 'agent-completed', kind: 'agent', detached: false, status: 'completed' }),
+      task({ taskId: 'bash-background', detached: true, status: 'running' }),
+    ];
+    const out = strip(makeApp({ tasks, view: 'agents', filter: 'all' }).render(120).join('\n'));
+    expect(out).toContain('AGENT DIRECTORY');
+    expect(out).toContain('agent-foreground');
+    expect(out).toContain('agent-completed');
+    expect(out).not.toContain('bash-background');
+    expect(out).toContain('2 total');
+  });
+
   it('keeps ghost tasks whose detached field is undefined', () => {
     // task() leaves `detached` undefined by default, mimicking reconcile ghosts.
     const tasks = [task({ taskId: 'bash-ghost', status: 'lost' })];
@@ -567,7 +581,7 @@ describe('TasksBrowserController — opening an agent task', () => {
       addChild(child: unknown) {
         this.children.push(child);
       },
-      setFocus: () => {},
+      setFocus: vi.fn(),
       requestRender: () => {},
     };
     const state = {
@@ -582,7 +596,7 @@ describe('TasksBrowserController — opening an agent task', () => {
       sessionEventHandler: { subAgentEventHandler: { activityStore: store } },
       session: {
         listBackgroundTasks: async () => tasks,
-        getBackgroundTaskOutput: async () => 'captured output',
+        getBackgroundTaskOutput: async (taskId: string) => `captured output for ${taskId}`,
       },
       showError: vi.fn(),
       setTasksBrowser(value: unknown) {
@@ -611,6 +625,114 @@ describe('TasksBrowserController — opening an agent task', () => {
     ).handleOpenOutput(taskId);
   }
 
+  it.each(['\u001B', '\u001B[D'])('restores the editor from the foreground agent directory on %j', async (key) => {
+    const store = new SubagentActivityStore();
+    const foreground = task({ taskId: 'agent-foreground', kind: 'agent', detached: false, status: 'running' });
+    const { host, state } = makeControllerHost([task(), foreground], store);
+    const controller = new TasksBrowserController(host as never);
+    try {
+      await controller.show('agents');
+      const browser = state.tasksBrowser as { component: TasksBrowserApp; selectedTaskId: string };
+      expect(browser.selectedTaskId).toBe('agent-foreground');
+      expect(strip(browser.component.render(120).join('\n'))).toContain('AGENT DIRECTORY');
+      browser.component.handleInput(key);
+      expect(state.tasksBrowser).toBeUndefined();
+      expect(state.ui.setFocus).toHaveBeenLastCalledWith(state.editor);
+    } finally {
+      controller.close();
+    }
+  });
+
+  it('keeps selection, detail and preview on a visible agent when the filter hides the selected agent', async () => {
+    const running = task({ taskId: 'agent-running', kind: 'agent', detached: false });
+    const completed = task({ taskId: 'agent-completed', kind: 'agent', status: 'completed' });
+    const { host, state } = makeControllerHost([running, completed], new SubagentActivityStore());
+    let resolveStaleOutput!: (output: string) => void;
+    const staleOutput = new Promise<string>((resolve) => {
+      resolveStaleOutput = resolve;
+    });
+    vi.spyOn(host.session, 'getBackgroundTaskOutput').mockImplementation((taskId) =>
+      taskId === completed.taskId ? staleOutput : Promise.resolve('running agent preview'),
+    );
+    const controller = new TasksBrowserController(host as never);
+    try {
+      await controller.show('agents');
+      const browser = state.tasksBrowser as TasksBrowserState;
+      browser.component.handleInput('\u001B[B');
+      expect(browser.selectedTaskId).toBe(completed.taskId);
+      browser.component.handleInput('\t');
+      expect(browser.selectedTaskId).toBe(running.taskId);
+      await vi.waitFor(() => {
+        expect(browser.tailOutput).toBe('running agent preview');
+      });
+      resolveStaleOutput('completed agent stale preview');
+      await staleOutput;
+      const rendered = strip(browser.component.render(120).join('\n'));
+      expect(browser.selectedTaskId).toBe(running.taskId);
+      expect(browser.tailOutput).toBe('running agent preview');
+      expect(rendered).toMatch(/Task ID:\s+agent-running/);
+      expect(rendered).toContain('running agent preview');
+      expect(rendered).not.toContain('completed agent stale preview');
+    } finally {
+      controller.close();
+    }
+  });
+
+  it('keeps the refreshed task list after loading the replacement agent preview', async () => {
+    const removed = task({ taskId: 'agent-removed', kind: 'agent', detached: false });
+    const replacement = task({ taskId: 'agent-replacement', kind: 'agent', detached: false });
+    const { host, state } = makeControllerHost([removed], new SubagentActivityStore());
+    const listTasks = vi.spyOn(host.session, 'listBackgroundTasks');
+    const controller = new TasksBrowserController(host as never);
+    try {
+      await controller.show('agents');
+      const browser = state.tasksBrowser as TasksBrowserState;
+      await vi.waitFor(() => {
+        expect(browser.tailOutput).toContain(removed.taskId);
+      });
+      // The RPC snapshot can lead the event-maintained backgroundTasks map.
+      listTasks.mockResolvedValue([replacement]);
+      browser.component.handleInput('r');
+      await vi.waitFor(() => {
+        expect(browser.tailOutput).toBe('captured output for agent-replacement');
+      });
+      controller.repaint();
+      const rendered = strip(browser.component.render(120).join('\n'));
+      expect(browser.selectedTaskId).toBe(replacement.taskId);
+      expect(rendered).toMatch(/Task ID:\s+agent-replacement/);
+      expect(rendered).toContain('captured output for agent-replacement');
+      expect(rendered).not.toContain(removed.taskId);
+    } finally {
+      controller.close();
+    }
+  });
+
+  it('clears selection and pending preview when no agents match the filter', async () => {
+    const completed = task({ taskId: 'agent-completed', kind: 'agent', status: 'completed' });
+    const { host, state } = makeControllerHost([completed], new SubagentActivityStore());
+    let resolvePendingOutput!: (output: string) => void;
+    const pendingOutput = new Promise<string>((resolve) => {
+      resolvePendingOutput = resolve;
+    });
+    vi.spyOn(host.session, 'getBackgroundTaskOutput').mockReturnValue(pendingOutput);
+    const controller = new TasksBrowserController(host as never);
+    try {
+      await controller.show('agents');
+      const browser = state.tasksBrowser as TasksBrowserState;
+      browser.component.handleInput('\t');
+      resolvePendingOutput('hidden agent output');
+      await pendingOutput;
+      expect(browser.selectedTaskId).toBeUndefined();
+      expect(browser.tailOutput).toBeUndefined();
+      expect(browser.tailLoading).toBe(false);
+      const rendered = strip(browser.component.render(120).join('\n'));
+      expect(rendered).toContain('No task selected.');
+      expect(rendered).not.toContain('hidden agent output');
+    } finally {
+      controller.close();
+    }
+  });
+
   it('opens the activity viewer when a record exists for the agent', async () => {
     const store = new SubagentActivityStore();
     const { host, state } = makeControllerHost([agentTaskInfo(store)], store);
@@ -622,6 +744,66 @@ describe('TasksBrowserController — opening an agent task', () => {
     const viewer = (state.tasksBrowser as { viewer: { component: unknown } }).viewer;
     expect(viewer.component).toBeInstanceOf(AgentActivityViewer);
     controller.close();
+  });
+
+  it.each([true, false])('opens, refreshes and leaves an RPC-only foreground agent with activity=%s', async (hasActivity) => {
+    const store = new SubagentActivityStore();
+    const foreground = { ...agentTaskInfo(hasActivity ? store : null), detached: false };
+    const { host, state } = makeControllerHost([foreground], store);
+    host.backgroundTasks.clear();
+    const readOutput = vi.spyOn(host.session, 'getBackgroundTaskOutput');
+    const controller = new TasksBrowserController(host as never);
+    try {
+      await controller.show('agents');
+      const browser = state.tasksBrowser as TasksBrowserState;
+      browser.component.handleInput('\r');
+      await vi.waitFor(() => {
+        expect(browser.viewer?.component).toBeInstanceOf(hasActivity ? AgentActivityViewer : TaskOutputViewer);
+      });
+      if (hasActivity) {
+        store.applyEvent({ sessionId: 's1', agentId: 'agent-1', type: 'turn.step.started', turnId: 1, step: 3 } as Event);
+      } else {
+        readOutput.mockResolvedValue('updated foreground output');
+      }
+      await controller.refreshOutputViewer();
+      const viewer = browser.viewer!.component;
+      const rendered = strip(viewer.render(120).join('\n'));
+      expect(rendered).toContain(hasActivity ? '── step 3 ──' : 'updated foreground output');
+      viewer.handleInput('\u001B[D');
+      expect(browser.viewer).toBeUndefined();
+      expect(state.ui.setFocus).toHaveBeenLastCalledWith(browser.component);
+      expect(browser.selectedTaskId).toBe(foreground.taskId);
+      browser.component.handleInput('\u001B[D');
+      expect(state.tasksBrowser).toBeUndefined();
+      expect(state.ui.setFocus).toHaveBeenLastCalledWith(state.editor);
+    } finally {
+      controller.close();
+    }
+  });
+
+  it('retains RPC-only agents while applying newer task events to the directory', async () => {
+    const foreground = task({ taskId: 'agent-foreground', kind: 'agent', detached: false });
+    const background = task({ taskId: 'agent-background', kind: 'agent', detached: true });
+    const { host, state } = makeControllerHost([foreground, background], new SubagentActivityStore());
+    host.backgroundTasks.delete(foreground.taskId);
+    const controller = new TasksBrowserController(host as never);
+    try {
+      await controller.show('agents');
+      const browser = state.tasksBrowser as TasksBrowserState;
+      host.backgroundTasks.set(background.taskId, { ...background, status: 'completed' });
+      const added = task({ taskId: 'agent-added', kind: 'agent', detached: true });
+      host.backgroundTasks.set(added.taskId, added);
+      controller.repaint();
+      expect(browser.tasks.find((info) => info.taskId === background.taskId)?.status).toBe('completed');
+      browser.component.handleInput('\t');
+      const rendered = strip(browser.component.render(120).join('\n'));
+      expect(browser.selectedTaskId).toBe(foreground.taskId);
+      expect(rendered).toMatch(/Task ID:\s+agent-foreground/);
+      expect(rendered).toContain(added.taskId);
+      expect(rendered).not.toContain(background.taskId);
+    } finally {
+      controller.close();
+    }
   });
 
   it('falls back to the output viewer when no record exists', async () => {

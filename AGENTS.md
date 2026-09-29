@@ -64,16 +64,9 @@ This is a TypeScript monorepo built for agent-assisted development. Keep the roo
 
 ## Experimental Features
 
-- Gate a not-yet-public feature behind an experimental flag. Flags are env-driven and default off: `KIMI_CODE_EXPERIMENTAL_<NAME>` toggles one, `KIMI_CODE_EXPERIMENTAL_FLAG` enables all. Release by flipping the entry's `default` to `true`.
+- Gate a not-yet-public feature behind an experimental flag. Flags are env-driven and default off: `KIMI_CODE_EXPERIMENTAL_<NAME>` toggles one, `KIMI_CODE_EXPERIMENTAL_FLAG` enables all. Precedence is per-flag env > `[experimental]` config > master env > the flag's `default`. Release by flipping the entry's `default` to `true`.
   - `packages/agent-core` (v1) is frozen: do not add new feature flags or product behavior there. Touch its existing flag registry only when required by the maintenance-only compatibility policy in `packages/agent-core/AGENTS.md`.
   - `packages/agent-core-v2` and kap-server modules: there is no central catalog — declare the flag in the owning domain via `registerFlagDefinition` at import time (see `packages/agent-core-v2/docs/flag.md`), then check it with `IFlagService.enabled(id)`. Current search-index-separation flags: `persistence_minidb_readmodel` (session read model, default on) and `search_worker` (global search worker host, default on).
-
-## AITP Compatibility Maintenance
-
-- [AITP Research Protocol](https://github.com/bhjia-phys/AITP-Research-Protocol) is the source of truth for its stages, CLI commands, schemas, and golden fixtures. Hakimi orchestrates the agent and consumes AITP through CLI + files; it must not copy AITP's runtime, parser, validator, or canonical ledger writes.
-- Any change to Hakimi's AITP command/schema support, launcher resolution, session lifecycle, Skill discovery, or compatibility status must update both `README.md` and `README.zh-CN.md` in the same change. Re-check the current AITP stage and official fixtures first, and never describe a planned or blocked capability as available.
-- Before implementing or modifying any AITP integration, re-verify the AITP repository's current state (`git rev-parse HEAD` + `git status --short` in the AITP checkout, plus `aitp --help` for the actual CLI surface). Never build against a stale snapshot of AITP stages, commands, or schemas, and do not rely on the managed plugin copy as a source of truth.
-- Cross-repo handoff material lives in `docs/aitp/` on this side and in `docs/hakimi/` in the AITP checkout (`compatibility-matrix.md` + `TRACKING.md` here; `README.md` + `compatibility-matrix.md` there). Start AITP-related work by reading both sides' handoff docs, and update them in the same change.
 
 ## Where to Update Instructions
 

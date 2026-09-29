@@ -7,9 +7,9 @@
  * default; sensitive files (such as `.env`) are always filtered out. Results
  * are files-only — directories are never listed.
  *
- * Owns the `GlobInput` zod schema, the tool-owned constants (`MAX_MATCHES`,
- * `WINDOWS_PATH_HINT`), and the Agent-scope service identifier. Bound at Agent
- * scope.
+ * Owns the `GlobInput` zod schema, the tool-owned constants
+ * (`DEFAULT_HEAD_LIMIT`, `WINDOWS_PATH_HINT`), and the Agent-scope service
+ * identifier. Bound at Agent scope.
  */
 
 import { z } from 'zod';
@@ -19,6 +19,22 @@ import { type AgentTool } from '#/tool/toolContract';
 
 export const GlobInputSchema = z.object({
   pattern: z.string().describe('Glob pattern to match files.'),
+  head_limit: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe(
+      'Maximum number of matching paths to return after offset. Defaults to 100. Pass 0 to remove the match-count limit. The character limit still applies: large pages are saved for Read, and a continuation offset is provided when more paths remain. Search time and output capture limits still apply.',
+    ),
+  offset: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe(
+      'Number of matching paths to skip. Defaults to 0. Each call searches the current filesystem again; changes can shift results between pages.',
+    ),
   path: z
     .string()
     .optional()
@@ -41,7 +57,7 @@ export const GlobInputSchema = z.object({
 
 export type GlobInput = z.infer<typeof GlobInputSchema>;
 
-export const MAX_MATCHES = 100;
+export const DEFAULT_HEAD_LIMIT = 100;
 
 export const WINDOWS_PATH_HINT =
   '\n\nWindows note: the `path` argument accepts both Windows paths ' +

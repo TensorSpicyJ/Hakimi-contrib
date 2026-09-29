@@ -24,9 +24,9 @@ describe('toProtocolMessage', () => {
       content: [
         { type: 'text', text: 'hello' },
         { type: 'think', think: 'hmm', encrypted: 'sig-1' },
-        { type: 'image_url', imageUrl: { url: 'https://example.com/a.png' } },
+        { type: 'image_url', imageUrl: { url: 'https://example.com/a.png', name: 'photo.png' } },
         { type: 'audio_url', audioUrl: { url: 'https://example.com/a.mp3' } },
-        { type: 'video_url', videoUrl: { url: 'https://example.com/a.mp4' } },
+        { type: 'video_url', videoUrl: { url: 'https://example.com/a.mp4', name: 'clip.mp4' } },
       ],
       toolCalls: [],
     };
@@ -34,9 +34,17 @@ describe('toProtocolMessage', () => {
     expect(toProtocolMessage(SESSION_ID, 0, msg, CREATED_AT).content).toEqual([
       { type: 'text', text: 'hello' },
       { type: 'thinking', thinking: 'hmm', signature: 'sig-1' },
-      { type: 'image', source: { kind: 'url', url: 'https://example.com/a.png' } },
+      {
+        type: 'image',
+        name: 'photo.png',
+        source: { kind: 'url', url: 'https://example.com/a.png' },
+      },
       { type: 'text', text: '[audio:https://example.com/a.mp3]' },
-      { type: 'video', source: { kind: 'url', url: 'https://example.com/a.mp4' } },
+      {
+        type: 'video',
+        name: 'clip.mp4',
+        source: { kind: 'url', url: 'https://example.com/a.mp4' },
+      },
     ]);
   });
 
@@ -44,25 +52,28 @@ describe('toProtocolMessage', () => {
     const msg: ContextMessage = {
       role: 'user',
       content: [
-        { type: 'video_url', videoUrl: { url: 'kimi-file://file_9?path=%2Fcache%2Fclip.mp4' } },
+        {
+          type: 'video_url',
+          videoUrl: { url: 'kimi-file://file_9?path=%2Fcache%2Fclip.mp4', name: 'clip.mp4' },
+        },
       ],
       toolCalls: [],
     };
 
     expect(toProtocolMessage(SESSION_ID, 0, msg, CREATED_AT).content).toEqual([
-      { type: 'video', source: { kind: 'file', file_id: 'file_9' } },
+      { type: 'video', name: 'clip.mp4', source: { kind: 'file', file_id: 'file_9' } },
     ]);
   });
 
   it('projects a provider video url to a structured url source carrying its id', () => {
     const msg: ContextMessage = {
       role: 'user',
-      content: [{ type: 'video_url', videoUrl: { url: 'ms://prov-7', id: 'prov-7' } }],
+      content: [{ type: 'video_url', videoUrl: { url: 'ms://prov-7', id: 'prov-7', name: 'remote.mp4' } }],
       toolCalls: [],
     };
 
     expect(toProtocolMessage(SESSION_ID, 0, msg, CREATED_AT).content).toEqual([
-      { type: 'video', source: { kind: 'url', url: 'ms://prov-7', id: 'prov-7' } },
+      { type: 'video', name: 'remote.mp4', source: { kind: 'url', url: 'ms://prov-7', id: 'prov-7' } },
     ]);
   });
 

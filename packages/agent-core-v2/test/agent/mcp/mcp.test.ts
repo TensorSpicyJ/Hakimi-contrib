@@ -14,6 +14,7 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import type { McpConnectionManager, McpServerEntry } from '#/mcpCore/connection-manager';
 import { IAgentMcpService } from '#/agent/mcp/mcp';
 import { AgentMcpService } from '#/agent/mcp/mcpService';
+import { ISessionMediaStore } from '#/agent/media/sessionMediaStore';
 import { ISessionMcpHandle } from '#/session/mcp/sessionMcpHandle';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import type { McpOAuthService } from '#/mcpCore/oauth/service';
@@ -215,6 +216,15 @@ describe('AgentMcpService', () => {
       subscribe: () => toDisposable(() => {}),
     });
     ix.stub(ITelemetryService, recordingTelemetry(telemetryEvents));
+    ix.stub(ISessionMediaStore, {
+      _serviceBrand: undefined,
+      pathFor: () => undefined,
+      resolveDisplayPath: async () => undefined,
+      read: async () => undefined,
+      open: async () => undefined,
+      materialize: async () => '/tmp/kimi-code-mcp-test/attachment.bin',
+    } satisfies ISessionMediaStore);
+    ix.stub(IAgentProfileService, { getProviderType: () => undefined });
     ix.set(IAgentToolRegistryService, new SyncDescriptor(AgentToolRegistryService));
     ix.set(IAgentToolExecutorService, new SyncDescriptor(AgentToolExecutorService));
     ix.stub(IAgentToolResultTruncationService, stubToolResultTruncationService());
@@ -1087,6 +1097,10 @@ describe('AgentMcpService', () => {
         imageUrl: { url: 'data:image/png;base64,' + 'x'.repeat(100_000) },
       },
       { type: 'text', text: '</mcp_tool_result>' },
+      {
+        type: 'text',
+        text: expect.stringContaining('Attachment reference: "kimi-file://f_mcp_'),
+      },
     ]);
   });
 

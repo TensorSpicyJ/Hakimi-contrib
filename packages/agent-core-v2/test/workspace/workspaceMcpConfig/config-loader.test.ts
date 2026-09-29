@@ -13,7 +13,11 @@ import { join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ErrorCodes, Error2 } from '#/errors';
-import { loadMcpServers, resolveMcpJsonPaths } from '#/workspace/workspaceMcpConfig/internal/config-loader';
+import {
+  loadMcpServers,
+  loadMcpServersDetailed,
+  resolveMcpJsonPaths,
+} from '#/workspace/workspaceMcpConfig/internal/config-loader';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 
 const fs = new HostFileSystem();
@@ -366,5 +370,58 @@ describe('loadMcpServers', () => {
       if (saved === undefined) delete process.env['KIMI_CODE_HOME'];
       else process.env['KIMI_CODE_HOME'] = saved;
     }
+  });
+});
+
+describe('loadMcpServersDetailed', () => {
+  it('reports the file each merged entry came from, overrides included', async () => {
+    const home = makeTempDir();
+    const repoRoot = makeTempDir();
+    const cwd = join(repoRoot, 'packages', 'agent-core');
+    await mkdir(join(repoRoot, '.git'), { recursive: true });
+    await mkdir(cwd, { recursive: true });
+
+    await writeJson(join(home, 'mcp.json'), {
+      mcpServers: {
+        shared: { transport: 'stdio', command: 'shared-user' },
+        userOnly: { transport: 'stdio', command: 'user-only' },
+      },
+    });
+    await writeJson(join(repoRoot, '.mcp.json'), {
+      mcpServers: { rootOnly: { command: 'root-only' } },
+    });
+    await writeJson(join(cwd, '.kimi-code', 'mcp.json'), {
+      mcpServers: { shared: { transport: 'stdio', command: 'shared-project' } },
+    });
+
+    const { servers, origins } = await loadMcpServersDetailed({ fs, cwd, homeDir: home });
+
+    expect(Object.keys(servers).toSorted()).toEqual(['rootOnly', 'shared', 'userOnly']);
+    expect(origins['userOnly']).toBe(join(home, 'mcp.json'));
+    expect(origins['rootOnly']).toBe(join(repoRoot, '.mcp.json'));
+    // The project-local entry shadows the same-named user server, and the
+    // origin follows the winning file.
+    expect(origins['shared']).toBe(join(cwd, '.kimi-code', 'mcp.json'));
+  });
+
+  it('maps every origin to the user file when includeProject is false', async () => {
+    const home = makeTempDir();
+    const cwd = makeTempDir();
+    await writeJson(join(home, 'mcp.json'), {
+      mcpServers: { userOnly: { transport: 'stdio', command: 'user-only' } },
+    });
+    await writeJson(join(cwd, '.kimi-code', 'mcp.json'), {
+      mcpServers: { projectOnly: { transport: 'stdio', command: 'project-only' } },
+    });
+
+    const { servers, origins } = await loadMcpServersDetailed({
+      fs,
+      cwd,
+      homeDir: home,
+      includeProject: false,
+    });
+
+    expect(Object.keys(servers)).toEqual(['userOnly']);
+    expect(origins).toEqual({ userOnly: join(home, 'mcp.json') });
   });
 });

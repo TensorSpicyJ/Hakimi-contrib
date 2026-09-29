@@ -27,6 +27,11 @@ import type {
 
 import type { ModelSource } from './provider';
 
+export interface ProviderImageCapabilities {
+  readonly acceptedMimes: readonly string[];
+  readonly inlineByteBudget: number;
+}
+
 export interface ProviderDefinition {
   readonly id: string;
   readonly baseProtocol: Protocol;
@@ -34,6 +39,7 @@ export interface ProviderDefinition {
   readonly endpoint?: ProtocolEndpoint;
   readonly hostHeaders?: 'full' | 'user-agent';
   readonly modelSource?: ModelSource;
+  readonly imageCapabilities?: ProviderImageCapabilities;
 }
 
 const providerDefinitions = new Map<string, Map<Protocol, ProviderDefinition>>();
@@ -65,6 +71,13 @@ export function getProviderDefinition(
 export function getProviderDefinitions(id: string): readonly ProviderDefinition[] {
   const byProtocol = providerDefinitions.get(id);
   return byProtocol === undefined ? [] : [...byProtocol.values()];
+}
+
+export function getProviderImageCapabilities(
+  id: string | undefined,
+): ProviderImageCapabilities | undefined {
+  if (id === undefined) return undefined;
+  return getProviderDefinition(id)?.imageCapabilities;
 }
 
 export function hasProviderDefinition(id: string): boolean {

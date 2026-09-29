@@ -13,8 +13,8 @@
 
 
 import { ILogService } from '#/_base/log/log';
+import { DisposableStore } from '#/_base/di/lifecycle';
 import { TimeoutTimer } from '#/_base/utils/timer';
-import { subtreeWatchFilter } from '#/_base/utils/paths';
 import { discoverAgentFiles } from '#/workspace/workspaceAgentProfileLoader/internal/agentFileDiscovery';
 import { AgentProfileLoaderBase } from '#/workspace/workspaceAgentProfileLoader/internal/agentProfileLoader';
 import {
@@ -74,24 +74,30 @@ export class WorkspaceAgentProfileLoaderService
   }
 
   private async watchProjectAgentRoots(): Promise<void> {
-    const { projectRoot, candidates } = await projectAgentRootCandidates(
+    const { candidates } = await projectAgentRootCandidates(
       this.fs,
       this.workspace.cwd,
       (message) => this.log.warn(message),
     );
-    const handle = this.fsWatch.watch(projectRoot, {
-      ignored: subtreeWatchFilter(projectRoot, candidates),
-    });
-    this._register(handle);
-    this._register(
-      handle.onDidChange(() => {
-        this.watchDebounce.cancelAndSet(() => {
-          void this.reload().catch((error) => {
-            this.log.warn(`agent profile loader "workspace" reload failed: ${String(error)}`);
-          });
-        }, WATCH_DEBOUNCE_MS);
-      }),
-    );
+    const resources = this._register(new DisposableStore());
+    for (const candidate of candidates) {
+      try {
+        const handle = this.fsWatch.watch(candidate);
+        resources.add(handle);
+        resources.add(
+          handle.onDidChange(() => {
+            this.watchDebounce.cancelAndSet(() => {
+              void this.reload().catch((error) => {
+                this.log.warn(`agent profile loader "workspace" reload failed: ${String(error)}`);
+              });
+            }, WATCH_DEBOUNCE_MS);
+          }),
+        );
+        await handle.ready;
+      } catch (error) {
+        this.log.warn(`cannot watch workspace agent path ${candidate}: ${String(error)}`);
+      }
+    }
   }
 }
 

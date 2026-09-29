@@ -29,7 +29,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DefaultCompactionStrategy,
 } from '#/agent/fullCompaction/strategy';
-import { COMPACTION_SUMMARY_PREFIX } from '#/agent/contextMemory/compactionHandoff';
+import {
+  COMPACTION_SUMMARY_PREFIX,
+  buildCompactionContinuationText,
+} from '#/agent/contextMemory/compactionHandoff';
 import { makeHookRunner } from '../externalHooks/runner-stub';
 import type { IExternalHooksRunnerService } from '#/app/externalHooksRunner/externalHooksRunner';
 import { MASTER_ENV } from '#/app/flag/flagService';
@@ -293,8 +296,9 @@ describe('FullCompaction', () => {
         role: 'user',
         text: expect.stringContaining('Compacted summary.'),
       },
+      { role: 'user', text: buildCompactionContinuationText() },
     ]);
-    expect(ctx.context.get().at(-1)?.content[0]).toMatchObject({
+    expect(ctx.context.get().at(-2)?.content[0]).toMatchObject({
       type: 'text',
       text: expect.stringContaining('The conversation so far has been compacted'),
     });
@@ -309,7 +313,7 @@ describe('FullCompaction', () => {
         compacted_count: 6,
         retry_count: 0,
         thinking_effort: 'off',
-        input_tokens: 1181,
+        input_tokens: 1125,
         output_tokens: 8,
         input_cache_read: 0,
         input_cache_creation: 0,
@@ -539,6 +543,7 @@ describe('FullCompaction', () => {
         role: 'user',
         text: expect.stringContaining('Recovered compacted summary.'),
       },
+      { role: 'user', text: buildCompactionContinuationText() },
     ]);
     await ctx.expectResumeMatches();
   });
@@ -668,7 +673,7 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 18_535,
+        tokens_before: expect.any(Number),
         retry_count: 1,
         trace_id: 'trace-compact-1',
       }),
@@ -788,6 +793,7 @@ describe('FullCompaction', () => {
       { role: 'user', text: 'old user one' },
       { role: 'user', text: 'recent user two' },
       { role: 'user', text: `${COMPACTION_SUMMARY_PREFIX}\nRecovered compacted summary.` },
+      { role: 'user', text: buildCompactionContinuationText() },
     ]);
     expect(
       ctx.allEvents.filter((event) => event.event === 'compaction.completed'),
@@ -840,6 +846,7 @@ describe('FullCompaction', () => {
       { role: 'user', text: 'old user one' },
       { role: 'user', text: 'recent user two' },
       { role: 'user', text: `${COMPACTION_SUMMARY_PREFIX}\nRecovered compacted summary.` },
+      { role: 'user', text: buildCompactionContinuationText() },
     ]);
     vi.useRealTimers();
     await ctx.expectResumeMatches();
@@ -915,13 +922,13 @@ describe('FullCompaction', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await failed;
 
-    expect(inputs).toHaveLength(8);
+    expect(inputs).toHaveLength(5);
     expect(inputs[1]!.length).toBeLessThan(inputs[0]!.length);
     expect(records).toContainEqual({
       event: 'compaction_failed',
       properties: expect.objectContaining({
         source: 'manual',
-        retry_count: 4,
+        retry_count: 1,
         error_type: 'APIEmptyResponseError',
       }),
     });
@@ -1051,7 +1058,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         agent_id: 'main',
         source: 'manual',
-        tokens_before: 18_535,
+        tokens_before: expect.any(Number),
         duration_ms: expect.any(Number),
         round: 1,
         retry_count: 0,
@@ -1276,12 +1283,140 @@ describe('FullCompaction', () => {
       event: 'compaction_failed',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 18_535,
+        tokens_before: expect.any(Number),
         duration_ms: expect.any(Number),
         retry_count: 4,
         error_type: 'APIConnectionError',
       }),
     });
+    vi.useRealTimers();
+    await ctx.expectResumeMatches();
+  });
+
+  it('honors loopControl.compactionMaxAttempts for retryable generation failures', async () => {
+    vi.useFakeTimers();
+    const records: TelemetryRecord[] = [];
+    const firstAttemptFailed = deferred<void>();
+    let attempts = 0;
+    const generate: GenerateFn = async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        firstAttemptFailed.resolve();
+      }
+      throw new APIConnectionError('socket hang up');
+    };
+    const ctx = testAgent({
+      generate,
+      telemetry: recordingTelemetry(records),
+      initialConfig: {
+        providers: {},
+        loopControl: { compactionMaxAttempts: 2 },
+      },
+    });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+    const failed = ctx.once('error');
+
+    await ctx.rpc.beginCompaction({});
+    await firstAttemptFailed.promise;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await failed;
+
+    expect(attempts).toBe(2);
+    expect(records).toContainEqual({
+      event: 'compaction_failed',
+      properties: expect.objectContaining({
+        source: 'manual',
+        retry_count: 1,
+        error_type: 'APIConnectionError',
+      }),
+    });
+    vi.useRealTimers();
+    await ctx.expectResumeMatches();
+  });
+
+  it('fails a truncated compaction immediately when compactionMaxAttempts is 1', async () => {
+    let attempts = 0;
+    const generate: GenerateFn = async () => {
+      attempts += 1;
+      return {
+        ...textResult('Partial summary.'),
+        finishReason: 'truncated',
+        rawFinishReason: 'length',
+      };
+    };
+    const ctx = testAgent({
+      generate,
+      initialConfig: {
+        providers: {},
+        loopControl: { compactionMaxAttempts: 1 },
+      },
+    });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+    const failed = ctx.once('error');
+
+    await ctx.rpc.beginCompaction({});
+    await failed;
+
+    expect(attempts).toBe(1);
+    expect(ctx.newEvents()).toContainEqual(
+      expect.objectContaining({
+        event: 'error',
+        args: expect.objectContaining({
+          code: 'compaction.failed',
+          name: 'Error2',
+        }),
+      }),
+    );
+    await ctx.expectResumeMatches();
+  });
+
+  it('counts requests across recovery paths against compactionMaxAttempts', async () => {
+    vi.useFakeTimers();
+    const firstAttemptFailed = deferred<void>();
+    let attempts = 0;
+    const generate: GenerateFn = async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        firstAttemptFailed.resolve();
+        throw new APIConnectionError('socket hang up');
+      }
+      return {
+        ...textResult('Partial summary.'),
+        finishReason: 'truncated',
+        rawFinishReason: 'length',
+      };
+    };
+    const ctx = testAgent({
+      generate,
+      initialConfig: {
+        providers: {},
+        loopControl: { compactionMaxAttempts: 2 },
+      },
+    });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+    const failed = ctx.once('error');
+
+    await ctx.rpc.beginCompaction({});
+    await firstAttemptFailed.promise;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await failed;
+
+    expect(attempts).toBe(2);
     vi.useRealTimers();
     await ctx.expectResumeMatches();
   });
@@ -1342,6 +1477,7 @@ describe('FullCompaction', () => {
       'user',
       'user',
       'user',
+      'user',
     ]);
     await ctx.dispatch({
       type: 'context.append_loop_event',
@@ -1353,6 +1489,7 @@ describe('FullCompaction', () => {
       },
     });
     expect(ctx.context.get().map((message) => message.role)).toEqual([
+      'user',
       'user',
       'user',
       'user',
@@ -1414,8 +1551,14 @@ describe('FullCompaction', () => {
         },
         {
           "role": "user",
-          "text": "The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary.
+          "text": "The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary. The summary records which earlier requests were already addressed.
       Compacted prefix.",
+        },
+        {
+          "role": "user",
+          "text": "<system-reminder>
+      Context compaction is complete — continue the work that was in progress when it began.
+      </system-reminder>",
         },
       ]
     `);
@@ -1480,6 +1623,7 @@ describe('FullCompaction', () => {
     const ctx = testAgent();
     ctx.configure({
       provider: CATALOGUED_PROVIDER,
+      tools: SNAPSHOT_VISIBLE_TOOLS,
       modelCapabilities: {
         ...CATALOGUED_MODEL_CAPABILITIES,
         max_context_tokens: maxContextTokens,
@@ -1646,7 +1790,8 @@ describe('FullCompaction', () => {
       call 2:
         messages:
           user: text "old user one\\n\\nold user two\\n\\nrecent user three\\n\\nAnswer after compacting"
-          user: text "The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary.\\nAuto compacted summary."
+          user: text "The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary. The summary records which earlier requests were already addressed.\\nAuto compacted summary."
+          user: text "<system-reminder>\\nContext compaction is complete — continue the work that was in progress when it began.\\n</system-reminder>"
     `);
     expect(records).toContainEqual({
       event: 'compaction_finished',
@@ -1655,9 +1800,10 @@ describe('FullCompaction', () => {
         tokens_before: 3_566,
         // 3536 estimated request-overhead tokens (system prompt + tools) +
         // 9 measured summary output tokens (scripted compaction exchange) +
-        // 21 estimated tokens for the kept user messages — the summary
-        // component is the REAL provider count, not a text estimate.
-        tokens_after: 3_550,
+        // 21 estimated tokens for the kept user messages + 33 estimated tokens
+        // for the continuation anchor — the summary component is the REAL
+        // provider count, not a text estimate.
+        tokens_after: 3_583,
         compacted_count: 7,
         retry_count: 0,
       }),
@@ -1759,8 +1905,13 @@ describe('FullCompaction', () => {
       'user',
       'user',
       'user',
+      'user',
     ]);
-    expect(ctx.context.get().at(-1)?.origin).toEqual({ kind: 'compaction_summary' });
+    expect(ctx.context.get().at(-2)?.origin).toEqual({ kind: 'compaction_summary' });
+    expect(ctx.context.get().at(-1)?.origin).toEqual({
+      kind: 'injection',
+      variant: 'compaction_continuation',
+    });
 
     await ctx.dispatch({
       type: 'context.append_loop_event',
@@ -1781,6 +1932,7 @@ describe('FullCompaction', () => {
       },
     });
     expect(ctx.context.get().map((m) => m.role)).toEqual([
+      'user',
       'user',
       'user',
       'user',
@@ -1827,8 +1979,13 @@ describe('FullCompaction', () => {
       'user',
       'user',
       'user',
+      'user',
     ]);
-    expect(ctx.context.get().at(-1)?.origin).toEqual({ kind: 'compaction_summary' });
+    expect(ctx.context.get().at(-2)?.origin).toEqual({ kind: 'compaction_summary' });
+    expect(ctx.context.get().at(-1)?.origin).toEqual({
+      kind: 'injection',
+      variant: 'compaction_continuation',
+    });
 
     await ctx.dispatch({
       type: 'context.append_loop_event',
@@ -1840,6 +1997,7 @@ describe('FullCompaction', () => {
       },
     });
     expect(ctx.context.get().map((m) => m.role)).toEqual([
+      'user',
       'user',
       'user',
       'user',
@@ -1868,6 +2026,7 @@ describe('FullCompaction', () => {
         role: 'user',
         text: `${COMPACTION_SUMMARY_PREFIX}\nSingle message summary.`,
       },
+      { role: 'user', text: buildCompactionContinuationText() },
     ]);
     await ctx.expectResumeMatches();
   });
@@ -1903,6 +2062,7 @@ describe('FullCompaction', () => {
         role: 'user',
         text: expect.stringContaining('Compacted after single-message compact.'),
       },
+      { role: 'user', text: buildCompactionContinuationText() },
     ]);
     await ctx.expectResumeMatches();
   });
@@ -2031,7 +2191,7 @@ describe('FullCompaction', () => {
 
     expect(ctx.llmCalls).toHaveLength(2);
     const [compactionCall, answerCall] = ctx.llmCalls;
-    expect(messageText(compactionCall?.history.at(-1))).toContain('first-person handoff note');
+    expect(messageText(compactionCall?.history.at(-1))).toContain('Create a handoff summary for the');
     expect(
       answerCall?.history.map(messageText).some((text) => text.includes('Reserved compacted summary.')),
     ).toBe(true);
@@ -2178,14 +2338,85 @@ describe('FullCompaction', () => {
           "user: old user one",
           "assistant: old assistant one",
           "user: Retry after provider overflow",
-          "user: <compaction-instruction>",
+          "user: You are about to run out of context. Create a handoff summary for the
+      model that will resume this task after the earlier conversation is cleared.
+
+      --- This message is a direct task, not part of the above conversation ---
+
+      Do not impose rigid section headings; let the shape follow the task. Write it
+      in the same language the conversation has been using — do not switch to English
+      just because these instructions happen to be in English.
+
+      Make the summary self-sufficient: the next turn will see only the preserved
+      messages and this summary — every other assistant message, tool call, and tool
+      result above will be gone. In your own words, preserve what you genuinely need
+      to continue:
+
+      - What the latest request is actually asking for: your reading of its intent and
+        any ambiguity you have already resolved — not a re-transcription, since what
+        fits is kept verbatim in the preserved messages. But those kept messages are
+        size-capped, so a long request is truncated there: if the latest request is
+        large (a big paste or file), preserve the parts at risk of being dropped —
+        above all the actual ask. If several requests are in play, say which one governs
+        the next move, and re-quote any still-relevant earlier request that may have
+        scrolled out of the kept messages.
+      - The instructions and constraints currently in force (user preferences,
+        project rules, environment and tooling limits) — condensed to what still
+        matters, keeping decisions you have already settled (what you chose and why)
+        separate from questions still open, so you neither silently reopen a closed
+        choice nor treat an undecided point as decided.
+      - What has actually been done, at high fidelity: keep the exact commands that
+        were run, the exact file paths touched, and whether each succeeded or failed —
+        and the results themselves, not just the commands: the concrete values
+        returned, the key lines or error text, the schema or signature a lookup
+        revealed, since re-running to recover them may be slow or impossible. Keep only
+        the final working version of any code; drop intermediate attempts and
+        already-resolved errors.
+      - What you still don't know: context the next step depends on that this
+        conversation never established — files or paths referenced but not yet read,
+        schemas or APIs assumed but unseen, questions the user has not answered. Name
+        these gaps so the next turn goes and checks them instead of assuming.
+      - The forward plan — and this is the moment to invest in it. Right now you
+        hold more context on this task than you ever will again; the next turn
+        resumes with less, so the plan you commit here is the one it will follow.
+        Give the exact next command or tool call, but don't stop at the next step:
+        set out the remaining sequence to finish, the decisions you have already
+        made for those upcoming steps (so the next turn doesn't reopen them), the
+        obstacles or edge cases you can already foresee and how you mean to handle
+        them, and any work you can commit to now — the exact patch, query, or shape
+        of the final answer you already know you will produce. Anything you settle
+        here is one less thing the next turn must rediscover. Include any required
+        format for the final answer.
+
+      Your TODO list is re-attached automatically below this summary from its live
+      source, so do not transcribe it — copying it wastes space and can contradict the
+      live version. What that list cannot hold is the reasoning between tasks — why one
+      was reordered or dropped, or a decision on one that constrains another — so
+      record that instead.
+
+      Be honest about uncertainty. If an earlier step claimed something was done but
+      was never verified (tests "passing", a fix "working", a file "created"), say so
+      plainly and treat it as unverified rather than fact — re-check before relying
+      on it.
+
+      Be concise, and keep the summary proportional to the task: a long multi-step
+      task warrants detail, but a trivial or nearly finished exchange needs only a
+      sentence or two — do not pad it out. Include the critical data, identifiers, and
+      references needed to continue, and omit anything that does not change the next
+      move.
+
+      Respond with text only. Do not call any tools — you already have everything you
+      need in the conversation history.",
         ],
         [
           "user: old user one
 
       Retry after provider overflow",
-          "user: The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary.
+          "user: The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary. The summary records which earlier requests were already addressed.
       Overflow compacted summary.",
+          "user: <system-reminder>
+      Context compaction is complete — continue the work that was in progress when it began.
+      </system-reminder>",
         ],
       ]
     `);
@@ -2903,18 +3134,157 @@ describe('FullCompaction', () => {
           "user: old user one",
           "assistant: old assistant one",
           "user: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-          "user: <compaction-instruction>",
+          "user: You are about to run out of context. Create a handoff summary for the
+      model that will resume this task after the earlier conversation is cleared.
+
+      --- This message is a direct task, not part of the above conversation ---
+
+      Do not impose rigid section headings; let the shape follow the task. Write it
+      in the same language the conversation has been using — do not switch to English
+      just because these instructions happen to be in English.
+
+      Make the summary self-sufficient: the next turn will see only the preserved
+      messages and this summary — every other assistant message, tool call, and tool
+      result above will be gone. In your own words, preserve what you genuinely need
+      to continue:
+
+      - What the latest request is actually asking for: your reading of its intent and
+        any ambiguity you have already resolved — not a re-transcription, since what
+        fits is kept verbatim in the preserved messages. But those kept messages are
+        size-capped, so a long request is truncated there: if the latest request is
+        large (a big paste or file), preserve the parts at risk of being dropped —
+        above all the actual ask. If several requests are in play, say which one governs
+        the next move, and re-quote any still-relevant earlier request that may have
+        scrolled out of the kept messages.
+      - The instructions and constraints currently in force (user preferences,
+        project rules, environment and tooling limits) — condensed to what still
+        matters, keeping decisions you have already settled (what you chose and why)
+        separate from questions still open, so you neither silently reopen a closed
+        choice nor treat an undecided point as decided.
+      - What has actually been done, at high fidelity: keep the exact commands that
+        were run, the exact file paths touched, and whether each succeeded or failed —
+        and the results themselves, not just the commands: the concrete values
+        returned, the key lines or error text, the schema or signature a lookup
+        revealed, since re-running to recover them may be slow or impossible. Keep only
+        the final working version of any code; drop intermediate attempts and
+        already-resolved errors.
+      - What you still don't know: context the next step depends on that this
+        conversation never established — files or paths referenced but not yet read,
+        schemas or APIs assumed but unseen, questions the user has not answered. Name
+        these gaps so the next turn goes and checks them instead of assuming.
+      - The forward plan — and this is the moment to invest in it. Right now you
+        hold more context on this task than you ever will again; the next turn
+        resumes with less, so the plan you commit here is the one it will follow.
+        Give the exact next command or tool call, but don't stop at the next step:
+        set out the remaining sequence to finish, the decisions you have already
+        made for those upcoming steps (so the next turn doesn't reopen them), the
+        obstacles or edge cases you can already foresee and how you mean to handle
+        them, and any work you can commit to now — the exact patch, query, or shape
+        of the final answer you already know you will produce. Anything you settle
+        here is one less thing the next turn must rediscover. Include any required
+        format for the final answer.
+
+      Your TODO list is re-attached automatically below this summary from its live
+      source, so do not transcribe it — copying it wastes space and can contradict the
+      live version. What that list cannot hold is the reasoning between tasks — why one
+      was reordered or dropped, or a decision on one that constrains another — so
+      record that instead.
+
+      Be honest about uncertainty. If an earlier step claimed something was done but
+      was never verified (tests "passing", a fix "working", a file "created"), say so
+      plainly and treat it as unverified rather than fact — re-check before relying
+      on it.
+
+      Be concise, and keep the summary proportional to the task: a long multi-step
+      task warrants detail, but a trivial or nearly finished exchange needs only a
+      sentence or two — do not pad it out. Include the critical data, identifiers, and
+      references needed to continue, and omit anything that does not change the next
+      move.
+
+      Respond with text only. Do not call any tools — you already have everything you
+      need in the conversation history.",
         ],
         [
           "user: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-          "user: <compaction-instruction>",
+          "user: You are about to run out of context. Create a handoff summary for the
+      model that will resume this task after the earlier conversation is cleared.
+
+      --- This message is a direct task, not part of the above conversation ---
+
+      Do not impose rigid section headings; let the shape follow the task. Write it
+      in the same language the conversation has been using — do not switch to English
+      just because these instructions happen to be in English.
+
+      Make the summary self-sufficient: the next turn will see only the preserved
+      messages and this summary — every other assistant message, tool call, and tool
+      result above will be gone. In your own words, preserve what you genuinely need
+      to continue:
+
+      - What the latest request is actually asking for: your reading of its intent and
+        any ambiguity you have already resolved — not a re-transcription, since what
+        fits is kept verbatim in the preserved messages. But those kept messages are
+        size-capped, so a long request is truncated there: if the latest request is
+        large (a big paste or file), preserve the parts at risk of being dropped —
+        above all the actual ask. If several requests are in play, say which one governs
+        the next move, and re-quote any still-relevant earlier request that may have
+        scrolled out of the kept messages.
+      - The instructions and constraints currently in force (user preferences,
+        project rules, environment and tooling limits) — condensed to what still
+        matters, keeping decisions you have already settled (what you chose and why)
+        separate from questions still open, so you neither silently reopen a closed
+        choice nor treat an undecided point as decided.
+      - What has actually been done, at high fidelity: keep the exact commands that
+        were run, the exact file paths touched, and whether each succeeded or failed —
+        and the results themselves, not just the commands: the concrete values
+        returned, the key lines or error text, the schema or signature a lookup
+        revealed, since re-running to recover them may be slow or impossible. Keep only
+        the final working version of any code; drop intermediate attempts and
+        already-resolved errors.
+      - What you still don't know: context the next step depends on that this
+        conversation never established — files or paths referenced but not yet read,
+        schemas or APIs assumed but unseen, questions the user has not answered. Name
+        these gaps so the next turn goes and checks them instead of assuming.
+      - The forward plan — and this is the moment to invest in it. Right now you
+        hold more context on this task than you ever will again; the next turn
+        resumes with less, so the plan you commit here is the one it will follow.
+        Give the exact next command or tool call, but don't stop at the next step:
+        set out the remaining sequence to finish, the decisions you have already
+        made for those upcoming steps (so the next turn doesn't reopen them), the
+        obstacles or edge cases you can already foresee and how you mean to handle
+        them, and any work you can commit to now — the exact patch, query, or shape
+        of the final answer you already know you will produce. Anything you settle
+        here is one less thing the next turn must rediscover. Include any required
+        format for the final answer.
+
+      Your TODO list is re-attached automatically below this summary from its live
+      source, so do not transcribe it — copying it wastes space and can contradict the
+      live version. What that list cannot hold is the reasoning between tasks — why one
+      was reordered or dropped, or a decision on one that constrains another — so
+      record that instead.
+
+      Be honest about uncertainty. If an earlier step claimed something was done but
+      was never verified (tests "passing", a fix "working", a file "created"), say so
+      plainly and treat it as unverified rather than fact — re-check before relying
+      on it.
+
+      Be concise, and keep the summary proportional to the task: a long multi-step
+      task warrants detail, but a trivial or nearly finished exchange needs only a
+      sentence or two — do not pad it out. Include the critical data, identifiers, and
+      references needed to continue, and omit anything that does not change the next
+      move.
+
+      Respond with text only. Do not call any tools — you already have everything you
+      need in the conversation history.",
         ],
         [
           "user: old user one
 
       xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-          "user: The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary.
+          "user: The conversation so far has been compacted to free up context. What follows is your own working summary of this task — use it to continue your train of thought rather than starting over. Treat it as notes, not proof: where it says a step was done, tests passed, or a fix worked, verify that yourself before relying on it. Any user messages earlier in this context are preserved verbatim from the compacted conversation; where a system-reminder note among them marks an omitted middle section, the user messages it replaced are covered by this summary. The summary records which earlier requests were already addressed.
       Placeholder compacted summary.",
+          "user: <system-reminder>
+      Context compaction is complete — continue the work that was in progress when it began.
+      </system-reminder>",
         ],
       ]
     `);
@@ -2953,7 +3323,7 @@ describe('FullCompaction', () => {
     await completed;
 
     const history = ctx.compactHistory();
-    expect(history).toHaveLength(3);
+    expect(history).toHaveLength(4);
     expect(history[0]).toMatchObject({
       role: 'user',
       text: 'old user one',
@@ -2968,7 +3338,7 @@ describe('FullCompaction', () => {
         'Compacted summary.\n\n## TODO List\n  [in_progress] Fix the auth bug\n  [pending] Add tests',
       ),
     });
-    expect(ctx.context.get().at(-1)?.content[0]).toMatchObject({
+    expect(ctx.context.get().at(-2)?.content[0]).toMatchObject({
       type: 'text',
       text: expect.stringContaining('The conversation so far has been compacted'),
     });

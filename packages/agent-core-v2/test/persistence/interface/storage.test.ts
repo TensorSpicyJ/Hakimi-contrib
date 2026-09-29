@@ -89,6 +89,26 @@ function storageServiceSuite(
       await expect(service.delete('s', 'k')).resolves.toBeUndefined();
     });
 
+    it('mtime returns undefined for a missing key and a fresh timestamp after a write', async () => {
+      expect(await service.mtime('s', 'missing')).toBeUndefined();
+
+      await service.write('s', 'k', enc.encode('v'));
+      const written = await service.mtime('s', 'k');
+      expect(written).toBeDefined();
+      // File-system timestamps come from a coarser kernel clock, so compare
+      // against a window rather than a strictly monotonic reading.
+      expect(Math.abs(Date.now() - (written ?? 0))).toBeLessThan(5_000);
+
+      await service.append('s', 'k', enc.encode('w'));
+      expect(await service.mtime('s', 'k')).toBeGreaterThanOrEqual(written ?? 0);
+    });
+
+    it('mtime clears on delete', async () => {
+      await service.write('s', 'k', enc.encode('v'));
+      await service.delete('s', 'k');
+      expect(await service.mtime('s', 'k')).toBeUndefined();
+    });
+
     it('watch fires when a watched key is written', async ({ skip }) => {
       if (service.watch === undefined) skip();
       const fired = new Promise<void>((resolve) => {

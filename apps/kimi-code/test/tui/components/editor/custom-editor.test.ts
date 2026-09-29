@@ -47,6 +47,18 @@ function providerRecordingForce(items: AutocompleteItem[]): {
 }
 
 describe('CustomEditor autocomplete Escape handling', () => {
+  it('left arrow opens the directory only when the prompt is empty', () => {
+    const editor = makeEditor();
+    const open = vi.fn(() => true);
+    editor.onEmptyLeft = open;
+    editor.handleInput('\u001B[D');
+    expect(open).toHaveBeenCalledOnce();
+    editor.setText('derivation');
+    editor.handleInput('\u001B[D');
+    expect(open).toHaveBeenCalledOnce();
+    expect(editor.getText()).toBe('derivation');
+  });
+
   it('escape closes a visible slash command menu without firing app-level escape', async () => {
     const editor = makeEditor();
     const onEscape = vi.fn();

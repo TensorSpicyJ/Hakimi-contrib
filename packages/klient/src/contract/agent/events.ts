@@ -10,7 +10,6 @@
 import { z } from 'zod';
 
 import type { EventRegistration } from '../types.js';
-import { researchStatusSnapshotSchema } from './researchSchemas.js';
 import { goalActorSchema, goalSnapshotSchema, goalStatusSchema } from './services.js';
 
 /**
@@ -184,17 +183,6 @@ export const agentStatusUpdatedEventSchema = z.looseObject({
   phase: z.string().optional(),
 });
 
-/** `research.updated` carries the full post-dispatch snapshot. */
-export const researchUpdatedEventSchema = z.object({
-  type: z.literal('research.updated'),
-  snapshot: researchStatusSnapshotSchema,
-});
-
-/** `aitp_mode.updated` is a bare signal (no payload). */
-export const aitpModeUpdatedEventSchema = z.object({
-  type: z.literal('aitp_mode.updated'),
-});
-
 /** Protocol `GoalChangeStats` — mirrored field-for-field. */
 export const goalChangeStatsSchema = z.object({
   turnsUsed: z.number(),
@@ -269,8 +257,6 @@ export interface AgentEventPayloads {
   error: z.infer<typeof errorEventSchema>;
   warning: z.infer<typeof warningEventSchema>;
   'agent.status.updated': z.infer<typeof agentStatusUpdatedEventSchema>;
-  'research.updated': z.infer<typeof researchUpdatedEventSchema>;
-  'aitp_mode.updated': z.infer<typeof aitpModeUpdatedEventSchema>;
   'goal.updated': z.infer<typeof goalUpdatedEventSchema>;
 }
 
@@ -331,18 +317,6 @@ export const agentEvents = {
     name: 'events',
     type: 'agent.status.updated',
     schema: agentStatusUpdatedEventSchema,
-  },
-  'research.updated': {
-    kind: 'stream',
-    name: 'events',
-    type: 'research.updated',
-    schema: researchUpdatedEventSchema,
-  },
-  'aitp_mode.updated': {
-    kind: 'stream',
-    name: 'events',
-    type: 'aitp_mode.updated',
-    schema: aitpModeUpdatedEventSchema,
   },
   'goal.updated': {
     kind: 'stream',

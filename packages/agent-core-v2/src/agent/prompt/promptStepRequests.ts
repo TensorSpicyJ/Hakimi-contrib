@@ -31,6 +31,7 @@ abstract class UserMessageStepRequest extends StepRequest {
     message: ContextMessage,
     private readonly captions: readonly string[],
     private readonly reminders: IAgentSystemReminderService,
+    providerType?: string,
     options?: StepRequestOptions,
   ) {
     super(options);
@@ -38,7 +39,7 @@ abstract class UserMessageStepRequest extends StepRequest {
     this.message = {
       ...message,
       id: this.ownerPromptId,
-      content: gateImageFormatParts(message.content),
+      content: gateImageFormatParts(message.content, providerType),
     };
   }
 
@@ -73,8 +74,9 @@ export class PromptStepRequest extends UserMessageStepRequest {
     message: ContextMessage,
     captions: readonly string[],
     reminders: IAgentSystemReminderService,
+    providerType?: string,
   ) {
-    super(message, captions, reminders, { admission: 'newTurn' });
+    super(message, captions, reminders, providerType, { admission: 'newTurn' });
   }
 
   override get turnSeed(): TurnSeed {
@@ -92,8 +94,9 @@ export class SteerStepRequest extends UserMessageStepRequest {
     private readonly recordSteer: (message: ContextMessage) => void,
     private readonly forgetSteer: (request: SteerStepRequest) => void,
     admission: 'activeTurnOnly' | 'activeOrNewTurn' = 'activeTurnOnly',
+    providerType?: string,
   ) {
-    super(message, captions, reminders, {
+    super(message, captions, reminders, providerType, {
       mergeable: true,
       turnScoped: false,
       admission,

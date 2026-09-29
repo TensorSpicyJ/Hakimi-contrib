@@ -15,6 +15,8 @@ export const MAX_DOC_TEXT_CHARS = 20_000;
 
 export interface MessageDoc {
   readonly kind: 'message';
+  /** Filesystem identity of the session directory at index time. */
+  readonly sessionIdentity?: string;
   readonly sessionId: string;
   readonly workspaceId: string;
   readonly sessionTitle: string;
@@ -37,6 +39,8 @@ export interface MessageDoc {
 
 export interface TitleDoc {
   readonly kind: 'title';
+  /** Filesystem identity of the session directory at index time. */
+  readonly sessionIdentity?: string;
   readonly sessionId: string;
   readonly workspaceId: string;
   readonly sessionTitle: string;
@@ -110,10 +114,18 @@ export interface FileMetaDoc {
 
 export interface SessionMetaDoc {
   readonly kind: 'sessionMeta';
+  /** Title read from the session's authoritative metadata file. */
+  readonly title?: string;
+  /** Absolute session directory used for source verification. */
+  readonly dir?: string;
+  /** Filesystem identity of `dir` when this marker was written. */
+  readonly identity?: string;
 }
 
 export interface StatsDoc {
   readonly kind: 'stats';
+  /** Diagnostic when one or more listed sessions could not be indexed. */
+  readonly degraded?: string;
   readonly sessions: number;
   readonly documents: number;
   readonly lastIndexedAt: number;

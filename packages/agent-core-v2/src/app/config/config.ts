@@ -76,6 +76,8 @@ export interface ConfigSectionDeprecation {
   readonly message?: string;
 }
 
+export type ConfigCollectDiagnostics = (rawSection: unknown) => readonly ConfigDiagnostic[];
+
 export type EnvBindings<T> = EnvBinding | { [K in keyof T]?: EnvBinding | EnvBindings<T[K]> };
 
 export type AnyEnvBindings = EnvBinding | { readonly [key: string]: EnvBinding | AnyEnvBindings };
@@ -150,6 +152,12 @@ export interface ConfigSection<T = unknown> {
   readonly fromToml?: ConfigFromToml;
   readonly toToml?: ConfigToToml;
   readonly deprecations?: readonly ConfigKeyDeprecation[];
+  /**
+   * Section-owned load-time diagnostics over the raw on-disk section (before
+   * `fromToml`), for shapes the schema accepts but cannot use — reported on
+   * every load, removed when the section is fixed.
+   */
+  readonly collectDiagnostics?: ConfigCollectDiagnostics;
   readonly deprecation?: ConfigSectionDeprecation;
 }
 
@@ -162,6 +170,7 @@ export interface RegisterSectionOptions<T> {
   readonly fromToml?: ConfigFromToml;
   readonly toToml?: ConfigToToml;
   readonly deprecations?: readonly ConfigKeyDeprecation[];
+  readonly collectDiagnostics?: ConfigCollectDiagnostics;
   readonly deprecation?: ConfigSectionDeprecation;
 }
 

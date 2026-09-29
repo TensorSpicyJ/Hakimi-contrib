@@ -93,7 +93,6 @@ import type { ToolUpdate } from '@moonshot-ai/agent-core-v2/tool/toolContract';
 
 import { ToolInputDisplaySchema } from './display';
 import { configResponseSchema } from './rest-config';
-import { researchStatusSnapshotSchema } from './research';
 import { sessionPendingInteractionSchema, sessionSchema } from './session';
 import { workspaceSchema } from './workspace';
 
@@ -713,15 +712,6 @@ export const goalUpdatedEventSchema = z.object({
   mutation: goalMutationSchema.optional(),
 });
 
-export const researchUpdatedEventSchema = z.object({
-  type: z.literal('research.updated'),
-  snapshot: researchStatusSnapshotSchema,
-});
-
-export const aitpModeUpdatedEventSchema = z.object({
-  type: z.literal('aitp_mode.updated'),
-});
-
 export const skillActivatedEventSchema = z.object({
   type: z.literal('skill.activated'),
   activationId: z.string(),
@@ -1048,8 +1038,6 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   pluginChangedEventSchema,
   capabilityChangedEventSchema,
   goalUpdatedEventSchema,
-  researchUpdatedEventSchema,
-  aitpModeUpdatedEventSchema,
   skillActivatedEventSchema,
   pluginCommandActivatedEventSchema,
   turnStartedEventSchema,

@@ -14,7 +14,7 @@ import { rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { createServices } from '#/_base/di/test';
@@ -46,6 +46,7 @@ describe('WorkspaceInstructionsService', () => {
   let brandHomeDir: string;
   let disposables: DisposableStore;
   let watchFires: Map<string, Emitter<HostFsChange>>;
+  let watchedPaths: string[];
 
   beforeEach(() => {
     workDir = mkdtempSync(join(tmpdir(), 'kimi-instructions-work-'));
@@ -53,6 +54,7 @@ describe('WorkspaceInstructionsService', () => {
     brandHomeDir = mkdtempSync(join(tmpdir(), 'kimi-instructions-brand-'));
     disposables = new DisposableStore();
     watchFires = new Map();
+    watchedPaths = [];
   });
 
   afterEach(async () => {
@@ -68,6 +70,7 @@ describe('WorkspaceInstructionsService', () => {
     return {
       _serviceBrand: undefined,
       watch: (path: string): IHostFsWatchHandle => {
+        watchedPaths.push(path);
         let emitter = watchFires.get(path);
         if (emitter === undefined) {
           emitter = new Emitter<HostFsChange>();
@@ -118,6 +121,17 @@ describe('WorkspaceInstructionsService', () => {
     const provider = service.sessionProvider();
     expect(provider.agentsMd).toBe(service.snapshot.agentsMd);
     expect(provider.agentsMdWarning).toBeUndefined();
+  });
+
+  it('watches AGENTS.md candidates directly rather than their roots', async () => {
+    const { service } = createService();
+    await service.ready;
+    await vi.waitFor(() => expect(watchedPaths).not.toEqual([]));
+
+    expect(watchedPaths).toContain(join(workDir, 'AGENTS.md'));
+    expect(watchedPaths).not.toContain(workDir);
+    expect(watchedPaths).not.toContain(osHomeDir);
+    expect(watchedPaths).not.toContain(brandHomeDir);
   });
 
   it('refreshes the snapshot and fires onDidChange when a watched file changes', async () => {

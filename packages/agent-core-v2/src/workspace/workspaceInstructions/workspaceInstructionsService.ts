@@ -6,9 +6,8 @@
  * `profile` domain's pure loader (over the os `hostFs`, the host home dir,
  * and the `bootstrap` brand dir), then watches the loader's probe set
  * (`agentsMdWatchRoots` — brand / user-generic / project-root→leaf chain,
- * each plan root watched recursively and pruned to its candidates so files
- * created later inside not-yet-existing directories are still caught)
- * through `hostFsWatch` and reloads debounced; the change event fires only
+ * each candidate watched directly through `hostFsWatch`) and reloads debounced;
+ * the change event fires only
  * when the combined content or warning actually changed. The snapshot is shared by every session of
  * the handler through the `ISessionInstructionsProvider` seed
  * (`sessionProvider()`), a live read view over this service. The plain-data
@@ -22,7 +21,6 @@ import { Emitter, type Event } from '#/_base/event';
 import { ILogService } from '#/_base/log/log';
 import { defineState } from '#/_base/state/stateRegistry';
 import { TimeoutTimer } from '#/_base/utils/timer';
-import { subtreeWatchFilter } from '#/_base/utils/paths';
 import { agentsMdWatchRoots, loadAgentsMdForRoots } from '#/agent/profile/context';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IHostEnvironment, type HostEnvironmentInfo } from '#/os/interface/hostEnvironment';
@@ -68,7 +66,9 @@ export class WorkspaceInstructionsService
     super();
     this.states.register(workspaceInstructionsCurrentKey);
     this.ready = this.reload();
-    void this.watchCandidateFiles();
+    void this.watchCandidateFiles().catch((error) => {
+      this.log.warn(`cannot plan instruction watches: ${String(error)}`);
+    });
   }
 
   private get current(): WorkspaceInstructionsSnapshot {
@@ -133,23 +133,24 @@ export class WorkspaceInstructionsService
       this.workspace.cwd,
       this.bootstrap.homeDir,
     );
-    for (const { root, candidates } of plan) {
-      try {
-        const handle = this.fsWatch.watch(root, {
-          ignored: subtreeWatchFilter(root, candidates),
-        });
-        this._register(handle);
-        this._register(
-          handle.onDidChange(() => {
-            this.watchDebounce.cancelAndSet(() => {
-              void this.reload().catch((error) => {
-                this.log.warn(`AGENTS.md reload failed: ${String(error)}`);
-              });
-            }, WATCH_DEBOUNCE_MS);
-          }),
-        );
-      } catch (error) {
-        this.log.warn(`cannot watch instruction root ${root}: ${String(error)}`);
+    for (const { candidates } of plan) {
+      for (const candidate of candidates) {
+        try {
+          const handle = this.fsWatch.watch(candidate);
+          this._register(handle);
+          this._register(
+            handle.onDidChange(() => {
+              this.watchDebounce.cancelAndSet(() => {
+                void this.reload().catch((error) => {
+                  this.log.warn(`AGENTS.md reload failed: ${String(error)}`);
+                });
+              }, WATCH_DEBOUNCE_MS);
+            }),
+          );
+          await handle.ready;
+        } catch (error) {
+          this.log.warn(`cannot watch instruction path ${candidate}: ${String(error)}`);
+        }
       }
     }
   }

@@ -322,17 +322,23 @@ describe('WireService', () => {
         testWireScope(SCOPE, KEY),
         [
           { type: 'store.counter.add', by: 2 },
-          { type: 'no.such.op', foo: 1 },
+          { type: 'aitp_mode.enter', actor: 'user' },
+          { type: 'research.create_line', slug: 'legacy-line', title: 'Legacy line' },
           { type: 'store.counter.add', by: 3 },
         ],
       );
 
       expect(wire.getModel(CounterModel)).toEqual({ value: 5 });
-      expect(unexpected).toHaveLength(1);
-      expect(unexpected[0]).toMatchObject({
-        code: 'wire.unknown_record',
-        details: { type: 'no.such.op', index: 1 },
-      });
+      expect(unexpected).toEqual([
+        expect.objectContaining({
+          code: 'wire.unknown_record',
+          details: { type: 'aitp_mode.enter', index: 1 },
+        }),
+        expect.objectContaining({
+          code: 'wire.unknown_record',
+          details: { type: 'research.create_line', index: 2 },
+        }),
+      ]);
     } finally {
       resetUnexpectedErrorHandler();
     }

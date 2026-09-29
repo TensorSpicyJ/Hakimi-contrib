@@ -55,7 +55,7 @@ const config = withMermaid(defineConfig({
                 { text: '交互与输入', link: '/zh/guides/interaction' },
                 { text: '会话与上下文', link: '/zh/guides/sessions' },
                 { text: '使用目标模式', link: '/zh/guides/goals' },
-                { text: '研究模式', link: '/zh/guides/research-mode' },
+                { text: 'Research 模式', link: '/zh/guides/research-mode' },
                 { text: '在 IDE 中使用', link: '/zh/guides/ides' },
                 { text: '本地服务与 API', link: '/zh/guides/server' },
               ],

@@ -4,15 +4,15 @@
  * The kap-server suites pin flag-off engine behavior: several scenarios
  * assert wire semantics that an experimental flag deliberately changes
  * (e.g. the minidb session read model makes externally written sessions
- * eventually consistent). A developer shell exporting
- * `KIMI_CODE_EXPERIMENTAL_FLAG` (or a single-flag variant) must not flip the
- * whole suite — scrub the env here, then pin the defaults-ON flags OFF
- * below; a test that wants a flag re-enables its env var explicitly.
+ * eventually consistent). A developer shell exporting a `KIMI_CODE_*` var
+ * (an experimental flag, or `KIMI_CODE_LEGACY_FLAG=1` selecting the v1
+ * engine) must not flip the whole suite — scrub the env here, then pin the
+ * defaults-ON flags OFF below; a test that wants a flag re-enables its env
+ * var explicitly.
  */
 
-delete process.env['KIMI_CODE_EXPERIMENTAL_FLAG'];
 for (const key of Object.keys(process.env)) {
-  if (key.startsWith('KIMI_CODE_EXPERIMENTAL_')) {
+  if (key.startsWith('KIMI_CODE_')) {
     delete process.env[key];
   }
 }

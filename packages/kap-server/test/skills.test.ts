@@ -381,12 +381,12 @@ describe('server-v2 /api/v1 skills', () => {
       expect(sessionTree.filter((entry) => entry.includes('attachments'))).toEqual([]);
     });
 
-    it('rejects an inactive AITP skill with attachments before materializing them (40415)', async () => {
+    it('activates an ordinary AITP plugin skill with attachments', async () => {
       const pluginRoot = join(home as string, 'aitp-plugin-source');
       await mkdir(join(pluginRoot, 'skills', 'aitp'), { recursive: true });
       await writeFile(
         join(pluginRoot, 'kimi.plugin.json'),
-        JSON.stringify({ name: 'aitp-research-protocol', version: '0.8.0', skills: './skills' }),
+        JSON.stringify({ name: 'aitp', version: '1.1.0', skills: './skills' }),
       );
       await writeFile(
         join(pluginRoot, 'skills', 'aitp', 'SKILL.md'),
@@ -403,9 +403,9 @@ describe('server-v2 /api/v1 skills', () => {
       expect(workspace.body.data.skills.some((candidate) => candidate.name === 'aitp')).toBe(true);
 
       const session = await getJson<{ skills: SkillWire[] }>(`/api/v1/sessions/${id}/skills`);
-      expect(session.body.data.skills.some((candidate) => candidate.name === 'aitp')).toBe(false);
+      expect(session.body.data.skills.some((candidate) => candidate.name === 'aitp')).toBe(true);
 
-      const noteBytes = Buffer.from('must not be materialized for a hidden skill');
+      const noteBytes = Buffer.from('materialize an ordinary plugin skill attachment');
       const form = new FormData();
       form.set('file', new Blob([noteBytes], { type: 'text/plain' }), 'note.txt');
       const uploadRes = await fetch(`${base}/api/v1/files`, {
@@ -424,10 +424,10 @@ describe('server-v2 /api/v1 skills', () => {
           ],
         },
       );
-      expect(activation.body.code).toBe(40415);
+      expect(activation.body.code).toBe(0);
 
       const sessionTree = await readdir(join(home as string, 'sessions'), { recursive: true });
-      expect(sessionTree.filter((entry) => entry.includes('attachments'))).toEqual([]);
+      expect(sessionTree.filter((entry) => entry.includes('attachments'))).not.toEqual([]);
     });
   });
 

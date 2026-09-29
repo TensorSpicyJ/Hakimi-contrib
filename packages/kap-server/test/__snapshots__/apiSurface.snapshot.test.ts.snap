@@ -218,6 +218,10 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     ],
     [
       "GET",
+      "/api/v1/sessions/{session_id}/research/note",
+    ],
+    [
+      "GET",
       "/api/v1/sessions/{session_id}/runtime",
     ],
     [
@@ -426,7 +430,7 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     ],
     [
       "POST",
-      "/api/v1/sessions/{session_id}/research/command",
+      "/api/v1/sessions/{session_id}/research",
     ],
     [
       "POST",
@@ -463,6 +467,10 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     [
       "POST",
       "/api/v1/workspaces",
+    ],
+    [
+      "POST",
+      "/api/v1/workspaces/{workspace_id}/add-dir",
     ],
     [
       "POST",

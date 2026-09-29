@@ -108,8 +108,10 @@ export interface ProjectorInteraction {
 /**
  * The plan domain's `plan.revision` event (agent-core-v2 `planOps.ts` — the
  * persisted op's `toEvent`): one per ExitPlanMode review submission, carrying
- * the reference to the offloaded plan file version. Derived from `DomainEvent`
- * so a shape drift on the engine side fails the compile here.
+ * the reference to the offloaded plan file version. The reference is the
+ * agent-relative blob `key`; `resolvePlanRevisionKey` turns it back into the
+ * display path. Derived from `DomainEvent` so a shape drift on the engine
+ * side fails the compile here.
  */
 type PlanRevisionEvent = Extract<DomainEvent, { type: 'plan.revision' }>;
 
@@ -157,11 +159,20 @@ export type ProjectorToolFrameLookup = (toolCallId: string) => ToolFrameRecord |
  */
 export type ProjectorStepOrdinalLookup = (turnId: string) => number | undefined;
 
+/**
+ * Resolve a `plan.revision` record's agent-relative blob `key` into the
+ * homeDir-relative display path of the current agent scope. The persisted key
+ * is agent-relative on purpose: a forked session inherits the records verbatim
+ * and must resolve them against its own scope.
+ */
+export type ProjectorPlanRevisionKey = (key: string) => string;
+
 /** Optional producer-store lookups that let the projector adopt seeded state. */
 export interface ProjectorLookups {
   readonly stepFrames?: ProjectorFrameLookup;
   readonly toolFrame?: ProjectorToolFrameLookup;
   readonly stepOrdinal?: ProjectorStepOrdinalLookup;
+  readonly resolvePlanRevisionKey?: ProjectorPlanRevisionKey;
 }
 
 interface OpenTextFrame {
@@ -1233,14 +1244,18 @@ export class AgentTranscriptProjector {
    * submission. Always lands as a 'plan.revision' timeline marker (it stays
    * after plan mode exits); while plan mode is still active it also refines
    * the plan badge with the revision reference (`exit`/`cancel` later clear
-   * the badge via the `planMode: false` slice, as before).
+   * the badge via the `planMode: false` slice, as before). The marker keeps
+   * the external `path` field: the record's agent-relative `key` is resolved
+   * to the current agent scope's display path here.
    */
   private onPlanRevision(event: PlanRevisionEvent): TranscriptOperation[] {
-    const ops: TranscriptOperation[] = [this.markerOp('plan.revision', restOf(event))];
+    const path = this.lookups?.resolvePlanRevisionKey?.(event.key) ?? event.key;
+    const { key: _key, ...rest } = restOf(event);
+    const ops: TranscriptOperation[] = [this.markerOp('plan.revision', { ...rest, path })];
     if (this.planModeActive) {
       ops.push({
         op: 'meta.merge',
-        meta: { modes: { plan: { reviewPath: event.path, version: event.version } } },
+        meta: { modes: { plan: { reviewPath: path, version: event.version } } },
       });
     }
     return ops;

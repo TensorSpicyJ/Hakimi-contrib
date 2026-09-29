@@ -9,8 +9,10 @@
  * pick a cheaper implementation (one native recursive watch instead of
  * per-node watchers). Signal events may use the watched root as their path
  * and report coarse action/kind values. A handle's `ready` promise resolves
- * after its backend has installed the initial subscription and rejects when
- * initialization fails. App-scoped — one shared instance.
+ * after its backend has installed the initial subscription; it also resolves
+ * when the host exhausts watcher resources (`ENOSPC`) and the handle degrades
+ * to no change delivery. Other initialization failures reject. App-scoped —
+ * one shared instance.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';

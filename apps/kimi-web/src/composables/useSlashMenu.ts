@@ -12,8 +12,6 @@ export interface SlashMenuDeps {
   autosize: () => void;
   /** Current session skills (getter, so the menu stays reactive). */
   skills: () => AppSkill[];
-  /** Whether the connected backend exposes the Research command. */
-  researchEnabled?: () => boolean;
   /** Emit a chosen slash command up to the parent. */
   emitCommand: (cmd: string) => void;
   /** Record a sent command for ↑/↓ recall. */
@@ -40,7 +38,6 @@ export function useSlashMenu(deps: SlashMenuDeps) {
     textareaRef,
     autosize,
     skills,
-    researchEnabled,
     emitCommand,
     historyPush,
     clearDraft,
@@ -58,7 +55,7 @@ export function useSlashMenu(deps: SlashMenuDeps) {
       // Built-in commands + the active session's skills (shown as /<skill-name>).
       items.value = filterCommands(
         val,
-        buildSlashItems(skills(), { researchEnabled: researchEnabled?.() }),
+        buildSlashItems(skills()),
       );
       active.value = 0;
       open.value = items.value.length > 0;

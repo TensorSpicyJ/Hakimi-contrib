@@ -412,26 +412,45 @@ function corePartsToProtocol(content: readonly ContentPart[]): PromptSubmission[
     else if (part.type === 'image_url') {
       const match = /^data:([^;]+);base64,(.*)$/.exec(part.imageUrl.url);
       parts.push(match === null
-        ? { type: 'image', source: { kind: 'url', url: part.imageUrl.url, id: part.imageUrl.id } }
-        : { type: 'image', source: { kind: 'base64', media_type: match[1]!, data: match[2]! } });
+        ? {
+            type: 'image',
+            name: part.imageUrl.name,
+            source: { kind: 'url', url: part.imageUrl.url, id: part.imageUrl.id },
+          }
+        : {
+            type: 'image',
+            name: part.imageUrl.name,
+            source: { kind: 'base64', media_type: match[1]!, data: match[2]! },
+          });
     } else if (part.type === 'video_url') {
       // An internal `kimi-file://<id>?path=…` reference projects back to the
       // daemon upload it came from — the materialization path never leaks to
       // the client.
       const kimiFile = parseKimiFileUrl(part.videoUrl.url);
       if (kimiFile !== undefined) {
-        parts.push({ type: 'video', source: { kind: 'file', file_id: kimiFile.fileId } });
+        parts.push({
+          type: 'video',
+          name: part.videoUrl.name,
+          source: { kind: 'file', file_id: kimiFile.fileId },
+        });
         continue;
       }
       const match = /^data:([^;]+);base64,(.*)$/.exec(part.videoUrl.url);
       parts.push(match === null
-        ? { type: 'video', source: { kind: 'url', url: part.videoUrl.url, id: part.videoUrl.id } }
-        : { type: 'video', source: { kind: 'base64', media_type: match[1]!, data: match[2]! } });
+        ? {
+            type: 'video',
+            name: part.videoUrl.name,
+            source: { kind: 'url', url: part.videoUrl.url, id: part.videoUrl.id },
+          }
+        : {
+            type: 'video',
+            name: part.videoUrl.name,
+            source: { kind: 'base64', media_type: match[1]!, data: match[2]! },
+          });
     }
   }
   return parts;
 }
-
 
 function sendMappedError(
   reply: { send(payload: unknown): unknown },

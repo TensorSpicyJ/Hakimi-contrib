@@ -9,8 +9,7 @@ import { buildSlashItems, parseSlash, SKILL_COMMAND_PREFIX } from '../../lib/sla
 import { formatTokens } from '../../lib/formatTokens';
 import type { FileItem } from './MentionMenu.vue';
 import type { ActivationBadges, ConversationStatus, PermissionMode, QueuedPromptView } from '../../types';
-import type { AppGoal, AppModel, AppSkill, ResearchStatusSnapshot, ThinkingLevel } from '../../api/types';
-import { researchComposerEntryState } from '../../lib/researchCommand';
+import type { AppGoal, AppModel, AppSkill, ThinkingLevel } from '../../api/types';
 import {
   commitLevel,
   effectiveThinkingLevel,
@@ -58,8 +57,6 @@ const props = withDefaults(defineProps<{
   planMode?: boolean;
   swarmMode?: boolean;
   goalMode?: boolean;
-  researchEnabled?: boolean;
-  research?: ResearchStatusSnapshot | null;
   goal?: AppGoal | null;
   activationBadges?: ActivationBadges;
   /** Available models for the quick-switch dropdown. */
@@ -73,7 +70,6 @@ const props = withDefaults(defineProps<{
 }>(), {
   running: false,
   starting: false,
-  researchEnabled: false,
   queued: () => [],
   searchFiles: undefined,
   uploadImage: undefined,
@@ -108,8 +104,6 @@ const emit = defineEmits<{
   createGoal: [objective: string];
   controlGoal: [action: 'pause' | 'resume' | 'cancel'];
   focusGoal: [];
-  startResearch: [];
-  manageResearch: [];
   focusSwarm: [];
   compact: [];
   pickModel: [];
@@ -221,7 +215,6 @@ const {
   textareaRef,
   autosize,
   skills: () => props.skills,
-  researchEnabled: () => props.researchEnabled,
   emitCommand: (cmd) => emit('command', cmd),
   historyPush: (entry) => history.push(entry),
   clearDraft: finalizeSubmissionDraft,
@@ -355,13 +348,8 @@ function handleSubmit(): void {
   // resolves to its prefixed menu entry (`/skill:deploy`), mirroring the TUI.
   if (trimmed) {
     const parsed = parseSlash(trimmed);
-    // Keep a hand-typed `/research` on the command path even when Research is
-    // unavailable and hidden from the menu; App owns the backend guard and must
-    // never send it as a normal prompt.
     const known = parsed
-      ? parsed.cmd === '/research' || buildSlashItems(props.skills, {
-          researchEnabled: props.researchEnabled,
-        }).some(
+      ? buildSlashItems(props.skills).some(
           (item) => item.name === parsed.cmd || item.name === `/${SKILL_COMMAND_PREFIX}${parsed.cmd.slice(1)}`,
         )
       : false;
@@ -699,23 +687,8 @@ const goalActive = computed(() => goalStatus.value !== null && goalStatus.value 
 const goalArmed = computed(() => goalActive.value || props.goalMode === true);
 const goalCanPause = computed(() => goalStatus.value === 'active');
 const goalCanResume = computed(() => goalStatus.value === 'paused' || goalStatus.value === 'blocked');
-const researchEntryAction = computed(() =>
-  researchComposerEntryState(props.researchEnabled, props.research?.mode),
-);
-const researchVisible = computed(() => researchEntryAction.value !== 'hidden');
-const researchActive = computed(() => researchEntryAction.value === 'manage');
-const planBlockedByResearch = computed(() => researchActive.value && !planOn.value);
-function activateResearchEntry(): void {
-  const action = researchEntryAction.value;
-  if (action === 'hidden') return;
-  closeModesAndFocus();
-  if (action === 'start') emit('startResearch');
-  else emit('manageResearch');
-}
-
-// Modes selector (plan / goal / swarm / research) — the popover that replaces
-// the bare "plan" pill. Plan/Swarm are real client toggles; Goal and Research
-// reflect server state and focus their lifecycle surfaces when active.
+// Modes selector (plan / goal / swarm) — the popover that replaces
+// the bare "plan" pill. Plan/Swarm are real client toggles; Goal reflects server state and focuses its lifecycle surface when active.
 const modesOpen = ref(false);
 const modesRef = ref<HTMLElement | null>(null);
 const modesTriggerRef = ref<HTMLButtonElement | null>(null);
@@ -724,7 +697,7 @@ const modesMenuRef = ref<HTMLElement | null>(null);
 // it); these coords anchor it just above the pill, computed on open.
 const modesMenuStyle = ref<Record<string, string>>({});
 const anyModeActive = computed(
-  () => planOn.value || swarmOn.value || goalArmed.value || researchActive.value,
+  () => planOn.value || swarmOn.value || goalArmed.value,
 );
 function closeModes(): void {
   modesOpen.value = false;
@@ -767,7 +740,6 @@ const MODE_DESC_KEYS = [
   'status.planDesc',
   'status.swarmDesc',
   'status.goalDesc',
-  'status.researchDesc',
 ] as const;
 
 const menuMeasureRef = ref<HTMLElement | null>(null);
@@ -1045,7 +1017,7 @@ function selectModel(modelId: string): void {
             </button>
           </div>
 
-          <!-- Modes selector (plan / goal / swarm / research) — replaces the plan pill. -->
+          <!-- Modes selector (plan / goal / swarm) — replaces the plan pill. -->
           <div
             v-if="status"
             ref="modesRef"
@@ -1065,7 +1037,6 @@ function selectModel(modelId: string): void {
               <span v-if="planOn" class="mode-tag">{{ t('status.planLabel') }}</span>
               <span v-if="swarmOn" class="mode-tag">{{ t('status.swarmLabel') }}</span>
               <span v-if="goalArmed" class="mode-tag">{{ t('status.goalLabel') }}</span>
-              <span v-if="researchActive" class="mode-tag">{{ t('status.researchLabel') }}</span>
             </button>
 
             <div
@@ -1080,7 +1051,6 @@ function selectModel(modelId: string): void {
                 type="button"
                 class="mode-row"
                 :class="{ on: planOn }"
-                :disabled="planBlockedByResearch"
                 @click="emit('togglePlan')"
               >
                 <span class="mode-row-icon"><Icon name="file-edit" size="sm" /></span>
@@ -1142,36 +1112,6 @@ function selectModel(modelId: string): void {
                   >
                     <Icon name="close" size="sm" />
                     <span>{{ t('status.goalCancel') }}</span>
-                  </Button>
-                </div>
-              </div>
-              <!-- Research — inactive starts the capability; active opens Manager. -->
-              <div
-                v-if="researchVisible"
-                class="mode-row mode-row-lifecycle"
-                :class="{ on: researchActive }"
-              >
-                <button
-                  type="button"
-                  class="mode-row-main"
-                  @click="activateResearchEntry"
-                >
-                  <span class="mode-row-icon"><Icon name="search" size="sm" /></span>
-                  <span class="mode-row-info">
-                    <span class="mode-row-name">{{ t('status.researchLabel') }}</span>
-                    <span class="mode-row-desc">{{ t('status.researchDesc') }}</span>
-                  </span>
-                  <span v-if="!researchActive" class="mode-switch"><span class="mode-knob" /></span>
-                </button>
-                <div v-if="researchActive" class="mode-row-actions">
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    class="mode-row-action"
-                    @click="activateResearchEntry"
-                  >
-                    <Icon name="search" size="sm" />
-                    <span>{{ t('status.researchManage') }}</span>
                   </Button>
                 </div>
               </div>
@@ -1998,7 +1938,7 @@ function selectModel(modelId: string): void {
   line-height: var(--leading-normal);
 }
 
-/* Modes selector (plan / goal / swarm / research) — replaces the old plan
+/* Modes selector (plan / goal / swarm) — replaces the old plan
    pill + badges. z-index lifts the whole control (incl. its upward-opening
    popover) above the composer input row, which otherwise paints over it. */
 .modes { position: relative; display: inline-flex; z-index: var(--z-sticky); }
