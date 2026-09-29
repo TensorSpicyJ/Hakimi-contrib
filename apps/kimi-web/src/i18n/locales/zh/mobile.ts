@@ -12,11 +12,16 @@ export default {
   sessionCount: '{n} 个会话',
   newSession: '新建会话',
   permManualSub: '每个工具都确认',
-  permAutoSub: '完全自主，不再提问',
+  permAutoSub: '自动工具，不问普通问题',
   permYoloSub: '自动批准工具，仍可能提问',
   planModeSub: '计划模式',
   swarmModeSub: 'Swarm 模式',
   archivedSessions: '已归档会话',
   archivedSessionsSub: '查看并恢复已归档会话',
   archivedBack: '返回',
+  /** Session-actions group: desktop ChatHeader kebab entries exposed on mobile. */
+  groupSessionActions: '会话操作',
+  gitSummary: 'Git 摘要',
+  subagentPreset: '子代理预设',
+  presetBack: '返回',
 } as const;

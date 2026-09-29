@@ -7,7 +7,7 @@ export default {
   goal: { desc: 'Create/control a goal: /goal <objective>, /goal pause|resume|cancel' },
   btw: { desc: 'Side chat: /btw <question> asks a forked side session' },
   yolo: { desc: 'Auto-approve tool actions; the agent may still ask questions' },
-  auto: { desc: 'Fully autonomous — the agent never asks questions' },
+  auto: { desc: 'Auto-approve tools and suppress ordinary questions' },
   thinking: { desc: 'Set the thinking level' },
   compact: { desc: 'Compact the conversation history' },
   fork: { desc: 'Fork this session into a new one' },

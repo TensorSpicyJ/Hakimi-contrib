@@ -63,9 +63,11 @@ import type {
   AppSessionRuntimeStatus,
   AppSkill,
   AppTask,
+  AppTurnProgress,
   AppWarning,
   AppWorkspace,
   ApprovalDecision,
+  AutoSubagentPresetStatus,
   KimiEventConnection,
   KimiEventMeta,
   ProviderUsageResult,
@@ -283,6 +285,8 @@ interface QueuedPrompt {
 
 export interface ExtendedState extends KimiClientState {
   connected: boolean;
+  /** The initial deep-link session for `?remote=1`, or null in the full local UI. */
+  remoteSessionId: string | null;
   serverVersion: string;
   /** Effective experimental flags from `/meta`; missing fields enable nothing. */
   experimentalFlags: Record<string, boolean>;
@@ -355,6 +359,8 @@ export interface ExtendedState extends KimiClientState {
   availableOpenInApps: string[];
   /** Global daemon configuration (secrets redacted). */
   config: AppConfig | null;
+  /** Latest process-global automatic subagent-preset evaluation (v2 only). */
+  autoSubagentPresetStatus?: AutoSubagentPresetStatus;
   /** Provider usage is prefetched after server auth and refreshed from settings. */
   providerUsage: ProviderUsageResult[];
   providerUsageLoading: boolean;
@@ -390,6 +396,7 @@ export interface ExtendedState extends KimiClientState {
 const rawState: ExtendedState = reactive({
   ...createInitialState(),
   connected: false,
+  remoteSessionId: null,
   serverVersion: '',
   experimentalFlags: {},
   dangerousBypassAuth: false,
@@ -422,6 +429,7 @@ const rawState: ExtendedState = reactive({
   hiddenWorkspaceRoots: loadHiddenWorkspacesFromStorage(),
   availableOpenInApps: [],
   config: null,
+  autoSubagentPresetStatus: undefined,
   providerUsage: [],
   providerUsageLoading: false,
   providerUsageLoaded: false,
@@ -628,6 +636,7 @@ function forgetSession(sessionId: string): void {
   delete rawState.promptIdBySession[sessionId];
   delete rawState.inFlightBySession[sessionId];
   delete rawState.turnActiveBySession[sessionId];
+  delete rawState.turnProgressBySession[sessionId];
   // Drop per-session mode toggles and re-persist so a deleted session's entry
   // doesn't linger in localStorage.
   delete rawState.planModeBySession[sessionId];
@@ -810,6 +819,27 @@ function setOnboarded(done: boolean): void {
 // Singleton WS connection
 let eventConn: KimiEventConnection | null = null;
 
+// The status endpoint has no replay cursor, so every successful connect pulls
+// its authoritative snapshot. A live evaluated event that lands during the GET
+// wins over the older response; unsupported/404 daemons resolve to undefined.
+let autoPresetStatusRequestId = 0;
+async function refreshAutoSubagentPresetStatus(): Promise<void> {
+  const requestId = ++autoPresetStatusRequestId;
+  const statusAtRequest = rawState.autoSubagentPresetStatus;
+  try {
+    const status = await getKimiWebApi().getAutoSubagentPresetStatus();
+    if (
+      requestId !== autoPresetStatusRequestId ||
+      rawState.autoSubagentPresetStatus !== statusAtRequest
+    ) {
+      return;
+    }
+    rawState.autoSubagentPresetStatus = status;
+  } catch {
+    // A transient status read must not disturb the last live/reconciled snapshot.
+  }
+}
+
 // Monotonic counter for optimistic user-message ids. Date.now() alone collides
 // when two prompts are submitted in the same millisecond (e.g. a queued send
 // then a steer), which gave both messages the SAME id — breaking Vue keying and
@@ -835,8 +865,10 @@ function applyEvent(event: ReturnType<typeof toAppEvent>, sessionId: string, seq
     goalVersionBySession: rawState.goalVersionBySession,
     lastSeqBySession: rawState.lastSeqBySession,
     turnActiveBySession: rawState.turnActiveBySession,
+    turnProgressBySession: rawState.turnProgressBySession,
     compactionBySession: rawState.compactionBySession,
     config: rawState.config,
+    autoSubagentPresetStatus: rawState.autoSubagentPresetStatus,
     warnings: rawState.warnings,
   };
   const next = reduceAppEvent(snapshot, event, { sessionId, seq });
@@ -852,6 +884,7 @@ function applyEvent(event: ReturnType<typeof toAppEvent>, sessionId: string, seq
   rawState.goalVersionBySession = next.goalVersionBySession;
   rawState.lastSeqBySession = next.lastSeqBySession;
   rawState.turnActiveBySession = next.turnActiveBySession;
+  rawState.turnProgressBySession = next.turnProgressBySession;
   rawState.compactionBySession = next.compactionBySession;
   if (event.type === 'configChanged') {
     workspaceState.applyConfig(event.config);
@@ -859,6 +892,7 @@ function applyEvent(event: ReturnType<typeof toAppEvent>, sessionId: string, seq
   } else {
     rawState.config = next.config ?? null;
   }
+  rawState.autoSubagentPresetStatus = next.autoSubagentPresetStatus;
   rawState.warnings = next.warnings;
 
   if (event.type === 'modelCatalogChanged') {
@@ -1113,10 +1147,14 @@ function connectEventsIfNeeded(): void {
         dismissWsError();
         // A (re)connect can mean the backend was restarted — or switched, when
         // the dev proxy was moved to the other engine. Re-read authoritative
-        // metadata and config: global config events currently have no client
-        // replay cursor, so this closes any disconnect-window gap.
+        // metadata and config plus auto-preset status: these process-global facts
+        // have no client replay cursor, so this closes the gap after both the
+        // first handshake and every reconnect. Fail closed to the legacy
+        // capability set until this connection's metadata has been confirmed.
+        rawState.backend = 'v1';
         void workspaceState.refreshServerMeta(true, true);
         void workspaceState.loadConfig();
+        void refreshAutoSubagentPresetStatus();
       }
     },
   });
@@ -1860,7 +1898,7 @@ function findBashCommandForTask(task: AppTask): string | undefined {
 }
 
 /** Map AppTask to UI TaskItem */
-function toUiTask(task: AppTask): TaskItem {
+export function toUiTask(task: AppTask): TaskItem {
   let state: TaskState;
   if (task.status === 'running') {
     state = 'run';
@@ -1905,6 +1943,9 @@ function toUiTask(task: AppTask): TaskItem {
     timing,
     meta,
     output,
+    subagentType: task.subagentType,
+    model: task.model,
+    thinkingEffort: task.thinkingEffort,
     runInBackground: task.runInBackground,
     parentToolCallId: task.parentToolCallId,
   };
@@ -2006,6 +2047,13 @@ const turnActive = computed<boolean>(() => {
   );
 });
 
+const turnProgress = computed<AppTurnProgress | null>(() => {
+  const sid = rawState.activeSessionId;
+  if (!sid || !turnActive.value) return null;
+  const progress = rawState.turnProgressBySession[sid];
+  return progress?.active ? progress : null;
+});
+
 /** The working moon: the main conversation has an unfinished prompt — either
  *  submitted-but-not-terminated (`inFlight`) or a main turn in flight
  *  (`turnActive`). */
@@ -2061,6 +2109,7 @@ const loadMoreMessagesError = computed<boolean>(() => {
   return sid ? rawState.messagesLoadMoreErrorBySession[sid] ?? false : false;
 });
 const serverVersion = computed<string>(() => rawState.serverVersion);
+const experimentalFlags = computed<Record<string, boolean>>(() => rawState.experimentalFlags);
 const backend = computed<'v1' | 'v2'>(() => rawState.backend);
 const dangerousBypassAuth = computed<boolean>(() => rawState.dangerousBypassAuth);
 
@@ -2281,6 +2330,9 @@ const authReady = computed<boolean>(() => rawState.authReady);
 const defaultModel = computed<string | null>(() => rawState.defaultModel);
 const managedProviderStatus = computed<string | null>(() => rawState.managedProviderStatus);
 const config = computed<AppConfig | null>(() => rawState.config);
+const autoSubagentPresetStatus = computed<AutoSubagentPresetStatus | undefined>(
+  () => rawState.autoSubagentPresetStatus,
+);
 const providerUsage = computed<ProviderUsageResult[]>(() => rawState.providerUsage);
 const providerUsageLoading = computed<boolean>(() => rawState.providerUsageLoading);
 const providerUsageLoaded = computed<boolean>(() => rawState.providerUsageLoaded);
@@ -2685,8 +2737,8 @@ function onMainTurnEnd(sid: string, status: 'idle' | 'aborted', turnWasActive: b
   // wolf when opening a historical session.
   workspaceState.finishPromptLocal(sid, { turnWasActive });
 
-  // For the session on screen, refresh git status (edits the agent just made)
-  // and runtime status (model/context usage may have changed this turn).
+  // For the session on screen, refresh runtime status (model/context usage may
+  // have changed this turn) plus the git sidecar.
   if (sid === rawState.activeSessionId) {
     void workspaceState.loadGitStatus(sid);
     void refreshSessionStatus(sid);
@@ -2823,6 +2875,7 @@ export function useKimiWebClient() {
     hasMoreMessages,
     loadMoreMessagesError,
     serverVersion,
+    experimentalFlags,
     backend,
     dangerousBypassAuth,
     clearDangerousBypassAuth,
@@ -2838,6 +2891,7 @@ export function useKimiWebClient() {
     questions,
     activity,
     turnActive,
+    turnProgress,
     inFlight,
     working,
     isStartingFirstPrompt,
@@ -2976,11 +3030,13 @@ export function useKimiWebClient() {
 
     // Config + provider usage state/actions
     config,
+    autoSubagentPresetStatus,
     providerUsage,
     providerUsageLoading,
     providerUsageLoaded,
     providerUsageError,
     updateConfig: workspaceState.updateConfig,
+    activateSubagentPreset: workspaceState.activateSubagentPreset,
     refreshProviderUsage: workspaceState.refreshProviderUsage,
 
     // Auth actions

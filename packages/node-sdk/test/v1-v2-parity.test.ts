@@ -188,19 +188,43 @@ interface ExperimentalFeatureLike {
   description?: string;
 }
 
-const NON_PARITY_SKILL_NAMES = new Set(['check-hakimi-docs', 'tower']);
+const NON_PARITY_SKILL_NAMES = new Set([
+  'check-hakimi-docs',
+  'tower',
+  // v2-only AITP host integration skills (the research feature is default on
+  // in v2; the frozen v1 runtime has no AITP bundle).
+  'aitp-distill',
+  'aitp-human-brainstorming',
+  'aitp-human-learning',
+  'aitp-memory',
+  'aitp-research',
+  'aitp-writing',
+  'developing-librpa',
+]);
 const NON_PARITY_TOOL_NAMES = new Set([
   'select_tools',
   'TowerInit',
   'GetProviderUsage',
   'SetSubagentPreset',
 ]);
+// Inline builtin skills whose description is engine-branded (v1 "kimi-code"
+// vs v2 "Hakimi"): only the description is projected out.
+const ENGINE_BRANDED_SKILL_NAMES = new Set([
+  'custom-theme',
+  'import-from-cc-codex',
+  'update-config',
+]);
 
 function projectSharedSkills(skills: readonly SkillSummary[]): readonly unknown[] {
   return skills
     .filter((skill) => !NON_PARITY_SKILL_NAMES.has(skill.name))
     .map((skill) => {
-      if (skill.name !== 'check-kimi-code-docs') return skill;
+      if (
+        !ENGINE_BRANDED_SKILL_NAMES.has(skill.name) &&
+        skill.name !== 'check-kimi-code-docs'
+      ) {
+        return skill;
+      }
       const projected: Record<string, unknown> = { ...skill };
       delete projected['description'];
       delete projected['disableModelInvocation'];
@@ -372,10 +396,11 @@ const KNOWN_DIFFS = {
   },
   // Session skills: `path`s point into each engine's own home (user skills)
   // or the shared packages (builtins) — after the home-prefix scrub the
-  // summaries compare in full. V2-only product skills (tower and Hakimi docs)
-  // are projected out. The shared Kimi docs skill remains required on both
-  // engines, with only its engine-specific description and invocation policy
-  // projected out (v1 product skill versus v2 compatibility alias).
+  // summaries compare in full. V2-only product skills (tower, Hakimi docs,
+  // and the default-on AITP bundle — see projectSharedSkills) are projected
+  // out. The shared Kimi docs skill and the engine-branded inline skills
+  // remain required on both engines, with only their engine-specific
+  // description (and invocation policy) projected out.
   listSkills: (skills: readonly SkillSummary[], home: HomePair): unknown =>
     scrubHomePrefixes(projectSharedSkills(skills), home),
 } satisfies Record<string, (value: never, other: never) => unknown>;
@@ -2505,9 +2530,21 @@ describe('v1↔v2 agent interaction parity', () => {
       const v2SubagentNames = v2Resumed.agents['main']!.config.subagentNames;
       expect(v1SubagentNames).toEqual(['coder', 'explore', 'plan', 'alpha']);
       // The v2 engine unconditionally registers the tower feature's
-// `tower-worker` profile (v1 tower was removed upstream), so the v2
-// catalog carries it after the builtin delegatable agents.
-      expect(v2SubagentNames).toEqual(['coder', 'explore', 'plan', 'alpha', 'tower-worker']);
+// `tower-worker` profile and the research feature's five worker profiles
+// (v1 tower and research were removed upstream), so the v2 catalog carries
+// them after the builtin delegatable agents and file profiles.
+      expect(v2SubagentNames).toEqual([
+        'coder',
+        'explore',
+        'plan',
+        'alpha',
+        'tower-worker',
+        'research-theory',
+        'research-code',
+        'research-literature',
+        'research-review',
+        'research-writing',
+      ]);
     } finally {
       await closeSessionPair(pair);
       restoreEnv();
@@ -2605,7 +2642,19 @@ describe('v1↔v2 agent interaction parity', () => {
       const v1SubagentNames = v1Resumed.agents['main']!.config.subagentNames;
       const v2SubagentNames = v2Resumed.agents['main']!.config.subagentNames;
       expect(v1SubagentNames).toEqual(['agent', 'coder', 'explore', 'plan', 'alpha']);
-            expect(v2SubagentNames).toEqual(['agent', 'coder', 'explore', 'plan', 'alpha', 'tower-worker']);
+      expect(v2SubagentNames).toEqual([
+        'agent',
+        'coder',
+        'explore',
+        'plan',
+        'alpha',
+        'tower-worker',
+        'research-theory',
+        'research-code',
+        'research-literature',
+        'research-review',
+        'research-writing',
+      ]);
     } finally {
       await closeSessionPair(pair);
       restoreEnv();
@@ -2646,7 +2695,18 @@ describe('v1↔v2 agent interaction parity', () => {
       const v1SubagentNames = v1Resumed.agents['main']!.config.subagentNames;
       const v2SubagentNames = v2Resumed.agents['main']!.config.subagentNames;
       expect(v1SubagentNames).toEqual(['agent', 'coder', 'explore', 'plan']);
-            expect(v2SubagentNames).toEqual(['agent', 'coder', 'explore', 'plan', 'tower-worker']);
+      expect(v2SubagentNames).toEqual([
+        'agent',
+        'coder',
+        'explore',
+        'plan',
+        'tower-worker',
+        'research-theory',
+        'research-code',
+        'research-literature',
+        'research-review',
+        'research-writing',
+      ]);
     } finally {
       await closeSessionPair(pair);
       restoreEnv();
@@ -2681,9 +2741,21 @@ describe('v1↔v2 agent interaction parity', () => {
       const v2SubagentNames = v2Resumed.agents['main']!.config.subagentNames;
       expect(v1SubagentNames).toEqual(['coder', 'explore', 'plan', 'alpha']);
       // The v2 engine unconditionally registers the tower feature's
-// `tower-worker` profile (v1 tower was removed upstream), so the v2
-// catalog carries it after the builtin delegatable agents.
-      expect(v2SubagentNames).toEqual(['coder', 'explore', 'plan', 'alpha', 'tower-worker']);
+// `tower-worker` profile and the research feature's five worker profiles
+// (v1 tower and research were removed upstream), so the v2 catalog carries
+// them after the builtin delegatable agents and file profiles.
+      expect(v2SubagentNames).toEqual([
+        'coder',
+        'explore',
+        'plan',
+        'alpha',
+        'tower-worker',
+        'research-theory',
+        'research-code',
+        'research-literature',
+        'research-review',
+        'research-writing',
+      ]);
     } finally {
       await closeSessionPair(pair);
       restoreEnv();
@@ -2725,7 +2797,17 @@ describe('v1↔v2 agent interaction parity', () => {
       const v1SubagentNames = v1Resumed.agents['main']!.config.subagentNames;
       const v2SubagentNames = v2Resumed.agents['main']!.config.subagentNames;
       expect(v1SubagentNames).toEqual(['coder', 'explore', 'plan']);
-            expect(v2SubagentNames).toEqual(['coder', 'explore', 'plan', 'tower-worker']);
+      expect(v2SubagentNames).toEqual([
+        'coder',
+        'explore',
+        'plan',
+        'tower-worker',
+        'research-theory',
+        'research-code',
+        'research-literature',
+        'research-review',
+        'research-writing',
+      ]);
     } finally {
       await closeSessionPair(pair);
       restoreEnv();
@@ -2770,7 +2852,19 @@ describe('v1↔v2 agent interaction parity', () => {
         const v1SubagentNames = v1Resumed.agents['main']!.config.subagentNames;
         const v2SubagentNames = v2Resumed.agents['main']!.config.subagentNames;
         expect(v1SubagentNames).toEqual(['agent', 'coder', 'explore', 'plan', 'alpha']);
-              expect(v2SubagentNames).toEqual(['agent', 'coder', 'explore', 'plan', 'alpha', 'tower-worker']);
+        expect(v2SubagentNames).toEqual([
+          'agent',
+          'coder',
+          'explore',
+          'plan',
+          'alpha',
+          'tower-worker',
+          'research-theory',
+          'research-code',
+          'research-literature',
+          'research-review',
+          'research-writing',
+        ]);
       } finally {
         await v1Client2.close();
         await v2Client2.close();
@@ -2816,7 +2910,18 @@ describe('v1↔v2 agent interaction parity', () => {
       const v1SubagentNames = v1Resumed.agents['main']!.config.subagentNames;
       const v2SubagentNames = v2Resumed.agents['main']!.config.subagentNames;
       expect(v1SubagentNames).toEqual(['agent', 'coder', 'explore', 'plan']);
-            expect(v2SubagentNames).toEqual(['agent', 'coder', 'explore', 'plan', 'tower-worker']);
+      expect(v2SubagentNames).toEqual([
+        'agent',
+        'coder',
+        'explore',
+        'plan',
+        'tower-worker',
+        'research-theory',
+        'research-code',
+        'research-literature',
+        'research-review',
+        'research-writing',
+      ]);
     } finally {
       await closeSessionPair(pair);
       restoreEnv();
@@ -3557,7 +3662,19 @@ describe('v1↔v2 goal parity', () => {
       // An active goal cannot still be running after a restart: both engines
       // demote it to paused with the same reason on replay.
       const [v1Got, v2Got] = await Promise.all([pair.v1.getGoal(input), pair.v2.getGoal(input)]);
-      const projectGet = KNOWN_DIFFS.getGoal;
+      // The pause-demotion reason wording differs by design (v1 "Paused
+      // after agent resume" vs v2 "Paused after agent closed"); the demotion
+      // to paused itself is the parity fact.
+      const projectGet = (result: GoalToolResult): Record<string, unknown> => {
+        const projected = projectGoalSnapshot(result.goal) as Record<string, unknown>;
+        if (
+          typeof projected['terminalReason'] === 'string' &&
+          projected['terminalReason'].startsWith('Paused after agent')
+        ) {
+          projected['terminalReason'] = '<PAUSE_DEMOTION>';
+        }
+        return projected;
+      };
       expect(projectGet(v2Got)).toEqual(projectGet(v1Got));
       expect(v1Got.goal).toMatchObject({
         status: 'paused',
@@ -5135,9 +5252,19 @@ describe('v1↔v2 residual surface parity', () => {
       // so the inherited contexts are already identical right after fork.
       expect(v1Context.history).toHaveLength(2);
       expect(v2Context.history).toHaveLength(2);
-      expect(stripOrigins(v2Context)).toEqual(stripOrigins(v1Context));
-      // Non-vacuous: the inherited import plus the side-question reminder
-      // (byte-identical template on both engines).
+      // The inherited import message compares in full. The side-question
+      // reminder template differs by design (v2 allows the read-only tools
+      // Read/Grep/Glob; v1 disables all tool calls), so only its role and
+      // text class compare.
+      const [v1Stripped, v2Stripped] = [
+        stripOrigins(v1Context) as { role?: string }[],
+        stripOrigins(v2Context) as { role?: string }[],
+      ];
+      expect(v2Stripped[0]).toEqual(v1Stripped[0]);
+      expect(v2Stripped[1]?.['role']).toBe(v1Stripped[1]?.['role']);
+      expect(JSON.stringify(v2Stripped[1])).toContain('side-channel conversation');
+      // Non-vacuous: the inherited import plus the side-question reminder on
+      // both engines.
       const v1History = v1Context.history;
       expect(v1History.length).toBeGreaterThanOrEqual(2);
       const reminder = v1History.at(-1);

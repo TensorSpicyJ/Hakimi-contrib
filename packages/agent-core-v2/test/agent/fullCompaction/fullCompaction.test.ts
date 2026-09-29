@@ -307,7 +307,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         agent_id: 'main',
         source: 'manual',
-        tokens_before: 3_559,
+        tokens_before: 3_877,
         tokens_after: expect.any(Number),
         duration_ms: expect.any(Number),
         compacted_count: 6,
@@ -587,7 +587,7 @@ describe('FullCompaction', () => {
       session_id: 'test-session',
       cwd: dir,
       trigger: 'auto',
-      token_count: 3_559,
+      token_count: 3_877,
     });
     expect(post).toMatchObject({
       hook_event_name: 'PostCompact',
@@ -1617,9 +1617,9 @@ describe('FullCompaction', () => {
 
   it('auto-compacts very large context in one full-history round when the summarizer accepts it', async () => {
     // The window must stay above the harness's fixed request overhead
-    // (system prompt + tools, ~17k): the post-compaction size is reported on
+    // (system prompt + tools, ~18.7k): the post-compaction size is reported on
     // the full-request basis, so a smaller window could never be satisfied.
-    const maxContextTokens = 22_000;
+    const maxContextTokens = 24_000;
     const ctx = testAgent();
     ctx.configure({
       provider: CATALOGUED_PROVIDER,
@@ -1797,13 +1797,13 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'auto',
-        tokens_before: 3_566,
-        // 3536 estimated request-overhead tokens (system prompt + tools) +
+        tokens_before: 3_884,
+        // 3854 estimated request-overhead tokens (system prompt + tools) +
         // 9 measured summary output tokens (scripted compaction exchange) +
-        // 21 estimated tokens for the kept user messages + 33 estimated tokens
+        // 21 estimated tokens for the kept user messages + 17 estimated tokens
         // for the continuation anchor — the summary component is the REAL
         // provider count, not a text estimate.
-        tokens_after: 3_583,
+        tokens_after: 3_901,
         compacted_count: 7,
         retry_count: 0,
       }),

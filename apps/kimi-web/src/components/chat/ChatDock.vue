@@ -163,8 +163,8 @@ defineExpose({ loadForEdit, loadAttachmentsForEdit, focus });
   <div ref="dockRef" class="chat-dock" :class="[mobile ? 'align-mobile' : 'align-center']" @click.stop>
     <Transition name="dock-panel">
       <div
-        ref="workPanelRef"
         v-if="dockPanel"
+        ref="workPanelRef"
         class="dock-work-panel"
         @click.stop
       >

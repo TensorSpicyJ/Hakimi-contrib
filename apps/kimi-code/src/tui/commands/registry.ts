@@ -165,7 +165,7 @@ export const BUILTIN_SLASH_COMMANDS = [
   {
     name: 'auto',
     aliases: [],
-    description: 'Toggle Auto mode: fully autonomous, agent decides everything without asking.',
+    description: 'Toggle Auto mode: auto-approve tools and suppress ordinary questions; explicit workflow decisions may still pause.',
     priority: 99,
     availability: 'always',
   },
@@ -449,6 +449,13 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Open the current session in the Web UI by starting a new server',
     priority: 40,
     availability: 'always',
+  },
+  {
+    name: 'remote',
+    aliases: [],
+    description: 'Temporarily control the current session from another device',
+    priority: 40,
+    availability: 'idle-only',
   },
   {
     name: 'exit',

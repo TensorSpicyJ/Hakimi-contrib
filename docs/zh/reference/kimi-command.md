@@ -21,7 +21,7 @@ hakimi <subcommand> [options]
 | `--prompt <prompt>` | `-p` | 非交互执行单次 prompt，并把 Assistant 输出流式写到 stdout。该模式不会打开 TUI |
 | `--output-format <format>` | | 设置非交互输出格式，支持 `text` 与 `stream-json`。仅可与 `--prompt` 一起使用，默认 `text` |
 | `--yolo` | `-y` | 自动批准普通工具调用，跳过审批请求 |
-| `--auto` | | 以 auto 权限模式启动；工具审批自动处理，Agent 不会向用户提问 |
+| `--auto` | | 以 auto 权限模式启动；工具审批自动处理并抑制普通对话提问，显式协议级工作流决策仍可能暂停 |
 | `--plan` | | 以 Plan 模式启动新会话，AI 会优先使用只读工具进行探索和规划 |
 | `--skills-dir <dir>` | | 从指定目录加载 Skills，替换自动发现的用户和项目目录。可重复传入 |
 | `--agent <name>` | | 以指定 Agent 作为 main agent 启动新会话。不能与 `--session`/`--continue` 同时使用 |
@@ -117,6 +117,8 @@ hakimi -p "Summarize the current repository status"
 
 输出采用 transcript 样式：thinking 内容和 Assistant 正文都以 `• ` 开头，换行后两个空格缩进。Assistant 正文输出到 stdout；thinking、工具进度和"恢复会话"提示输出到 stderr。`-p` 模式不会请求人工审批，普通工具调用按 `auto` 权限策略处理，静态 deny 规则仍然生效。
 
+退出时，默认运行时会先暂停仍为 active 的 Goal，再取消剩余回合并刷出会话日志。SIGINT、SIGTERM 和 SIGHUP 同样走这条路径，退出码分别保持为 130、143 和 129。已经 completed、paused 或 blocked 的 Goal 不改写。退出不会把 Research Action 标为完成、解决人类决定或保存 AITP 证据。清理仍以八秒为上限：SIGKILL、进程崩溃或存储写入卡住可能导致状态未能持久化，因此冷恢复只是后备处理，不能证明上次已正常退出。
+
 临时切换模型：
 
 ```sh
@@ -133,7 +135,7 @@ hakimi -p "List changed files" --output-format stream-json
 
 ## 子命令
 
-`hakimi` 提供以下子命令：`login`（非交互式登录）、`acp`（ACP IDE 模式）、`web`（前台运行本地 REST/WebSocket/web 服务并打开 web UI）、`doctor`（校验配置文件）、`export`（导出会话）、`migrate`（迁移旧版数据）、`upgrade`（检查更新）、`provider`（管理供应商）。
+`hakimi` 提供以下子命令：`login`（非交互式登录）、`acp`（ACP IDE 模式）、`web`（前台运行本地 REST/WebSocket/web 服务并打开 web UI）、`remote`（管理长期个人远程访问）、`doctor`（校验配置文件）、`export`（导出会话）、`migrate`（迁移旧版数据）、`upgrade`（检查更新）、`provider`（管理供应商）。
 
 ### `hakimi login`
 
@@ -202,6 +204,34 @@ hakimi web --port 58628    # 指定绑定端口
 #### `hakimi web rotate-token`
 
 生成新的持久化 bearer token（写入 `~/.hakimi/server.token`），旧 token 立即失效。token 是整个 home 目录共享的，所有运行中的实例会在下一次鉴权校验时自动换用新 token，无需重启。
+
+### `hakimi remote`
+
+通过免费的 Cloudflare Quick Tunnel 管理 Linux 上的长期个人远程访问。该命令会启动一个经过鉴权的完整 Web listener，可访问所有工作区和会话，包括配置、供应商、OAuth、plugins、文件，以及完整的 Agent、Bash、工具和任务输出。该 listener 仍不提供 PTY 终端、debug endpoints、server shutdown 或嵌套远程控制路由。它不需要 Cloudflare 账号、域名、VPS、公网 IP 地址或路由器入站端口。
+
+先安装官方 [`cloudflared` 二进制文件](https://developers.cloudflare.com/tunnel/downloads/)，然后启动服务：
+
+```sh
+hakimi remote start
+```
+
+首次启动会在 `~/.hakimi/remote/` 下创建一个私有的固定控制 token，安装 `systemd --user` 服务，为之后的 Linux 用户会话启用它，并打印当前公网 URL 和二维码。如果 `cloudflared` 不在 `PATH` 中，请在首次启动时传入它的绝对路径：
+
+```sh
+hakimi remote start --cloudflared /absolute/path/to/cloudflared
+```
+
+之后使用这些管理命令：
+
+| 命令 | 说明 |
+| --- | --- |
+| `hakimi remote start` | 创建或复用私有配置，启用用户服务，并打印当前 URL 和二维码 |
+| `hakimi remote status` | 显示服务是否 active 且健康，以及当前 URL、二维码、进程 ID 和本地端口 |
+| `hakimi remote stop` | 禁用并停止用户服务，同时保留固定 token 供下次启动使用 |
+
+该服务运行期间没有 TTL。控制 token 在多次启动之间保持不变，但每当 `cloudflared`、用户服务或电脑重启时，免费的 `*.trycloudflare.com` hostname 通常会变化。请在宿主电脑上运行 `hakimi remote status` 获取替换后的链接。Cloudflare 不为 Quick Tunnels 提供 SLA 或 uptime 保证。
+
+该后台管理器目前要求 Linux 上存在可用的 `systemd --user` 会话。在 Hakimi Web 中打开**远程控制**并切换到**长期运行**，即可查看、启动或停止同一个服务。TUI 的 `/remote` 命令仍是独立的临时 handoff：链接会先打开所选会话，随后提供同样完整的远程 Web 访问。
 
 ### `hakimi doctor`
 

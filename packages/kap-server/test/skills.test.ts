@@ -316,11 +316,18 @@ describe('server-v2 /api/v1 skills', () => {
 
       // The activation's user message carries the rendered skill prompt
       // followed by the materialized attachment's path notice — the same
-      // pipeline a prompt submission runs through.
+      // pipeline a prompt submission runs through. The research-mode
+      // disclosure reminder is injected as its own user message ahead of
+      // it, so locate the activation message instead of assuming the
+      // first user message.
       const messages = await getJson<{
         items: Array<{ role: string; content: Array<{ type: string; text?: string }> }>;
       }>(`/api/v1/sessions/${id}/messages`);
-      const userMsg = messages.body.data.items.find((m) => m.role === 'user');
+      const userMsg = messages.body.data.items.findLast(
+        (m) =>
+          m.role === 'user' &&
+          m.content.some((c) => c.text?.includes('User activated the skill "update-config"')),
+      );
       expect(userMsg).toBeDefined();
       expect(userMsg!.content[0]?.type).toBe('text');
       expect(userMsg!.content[0]?.text).toContain('User activated the skill "update-config"');

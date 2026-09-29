@@ -20,8 +20,8 @@ import { readFile } from 'node:fs/promises';
 
 import {
   IAgentGoalService,
-  IAgentLoopService,
   IAgentLifecycleService,
+  IAgentLoopService,
   IAgentPermissionModeService,
   IAgentProfileService,
   IAgentPromptService,
@@ -36,6 +36,7 @@ import {
   ISessionIndex,
   ISessionManager,
   ITelemetryService,
+  IWireService,
   IWorkspaceInstanceManager,
   PRINT_MAX_TURNS_DEFAULT,
   PRINT_WAIT_CEILING_S_DEFAULT,
@@ -197,6 +198,7 @@ export async function runV2Print(
   }
 
   let restorePermission = async (): Promise<void> => {};
+  let stopAgent = async (): Promise<void> => {};
   let removeTerminationCleanup: (() => void) | undefined;
   let cleanupPromise: Promise<void> | undefined;
   let telemetryService: ITelemetryService | undefined;
@@ -205,13 +207,17 @@ export async function runV2Print(
       removeTerminationCleanup?.();
       setCrashPhase('shutdown');
       try {
-        await restorePermission();
+        await stopAgent();
       } finally {
-        if (telemetryService !== undefined) {
-          await raceWithTimeout(telemetryService.shutdown(), CLI_SHUTDOWN_TIMEOUT_MS);
+        try {
+          await restorePermission();
+        } finally {
+          if (telemetryService !== undefined) {
+            await raceWithTimeout(telemetryService.shutdown(), CLI_SHUTDOWN_TIMEOUT_MS);
+          }
+          await shutdownTelemetry({ timeoutMs: CLI_SHUTDOWN_TIMEOUT_MS }).catch(() => {});
+          app.dispose();
         }
-        await shutdownTelemetry({ timeoutMs: CLI_SHUTDOWN_TIMEOUT_MS }).catch(() => {});
-        app.dispose();
       }
     })());
     await raceWithTimeout(pending, PROMPT_CLEANUP_TIMEOUT_MS);
@@ -254,6 +260,20 @@ export async function runV2Print(
 
     const resolved = await resolveNativeSession(app, opts, workDir, defaultModel, stderr);
     restorePermission = resolved.restorePermission;
+    stopAgent = async () => {
+      const goal = resolved.agent.accessor.get(IAgentGoalService);
+      const loop = resolved.agent.accessor.get(IAgentLoopService);
+      const wire = resolved.agent.accessor.get(IWireService);
+      if (goal.getGoal().goal?.status === 'active') {
+        await goal.pauseGoal({ reason: 'Paused when print mode exited' }, 'system');
+      }
+      resolved.agent.accessor.get(IAgentPromptService).clear();
+      for (const turnId of loop.status().pendingTurnIds) loop.cancel(turnId);
+      loop.cancel();
+      await wire.flush();
+      await loop.settled();
+      await wire.flush();
+    };
 
     telemetryService.setContext({ sessionId: resolved.session.id, model: resolved.telemetryModel });
     setTelemetryContext({ sessionId: resolved.session.id });

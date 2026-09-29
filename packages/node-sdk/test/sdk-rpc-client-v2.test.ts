@@ -26,10 +26,19 @@ import {
   removeProviderFromConfig,
   SDKRpcClientV2,
   Session,
+  type AutoSubagentPresetStatus,
   type Event,
   type KimiConfig,
+  type SubagentPresetChangedEvent,
+  type SubagentPresetEvaluatedEvent,
+  type Unsubscribe,
 } from '#/index';
 import { foldAgentWireReplay } from '#/v2/resume-replay';
+import {
+  translateSubagentPresetChanged,
+  translateSubagentPresetEvaluated,
+  translateSubagentPresetStatus,
+} from '#/v2/event-mapper';
 import {
   drainQueryStoreDisposals,
   drainSessionIndexMirror,
@@ -37,11 +46,15 @@ import {
   IAppendLogStore,
   ensureMainAgent,
   getLiveSessionById,
+  IAutoSubagentPresetService,
+  IEventService,
   IHostRequestHeaders,
   ISessionIndex,
   ISessionIndexMirror,
   ISessionManager,
   OsProcessErrors,
+  SUBAGENT_PRESET_CHANGED_EVENT_TYPE,
+  SUBAGENT_PRESET_EVALUATED_EVENT_TYPE,
 } from '@moonshot-ai/agent-core-v2';
 
 import { McpOAuthService } from '../../agent-core/src/mcp/oauth/service';
@@ -51,6 +64,61 @@ import { startMcpAuthStatusServer } from './mcp-auth-status-server';
 import { recordingTelemetry, type TelemetryRecord } from './telemetry';
 
 const hostEnvProbe = vi.hoisted(() => ({ failWithMissingShell: false }));
+
+const AUTO_PRESET_STATUS_FIXTURE = {
+  evaluatedAt: 1_750_000_000_000,
+  route: 'agent',
+  profileName: 'reviewer',
+  reasonCode: 'higher_score',
+  currentPreset: 'balanced',
+  selectedPreset: 'kimi-heavy',
+  activatedPreset: 'kimi-heavy',
+  currentScore: 58.5,
+  selectedScore: 76.25,
+  switchCooldownUntil: 1_750_000_030_000,
+  candidates: [
+    {
+      preset: 'kimi-heavy',
+      provider: 'provider-a',
+      availability: 'healthy',
+      selectable: true,
+      score: 76.25,
+      quotaRemainingPercent: 80,
+      quotaResetAt: 1_750_003_600_000,
+      contributions: {
+        quotaRemaining: 80,
+        priorityBonus: 8,
+        resetBonus: 1,
+        routeFitBonus: 2,
+        tokenPenalty: 3,
+        reliabilityPenalty: 7.5,
+        latencyPenalty: 4.25,
+      },
+      localEvidence: {
+        scope: 'profile',
+        sampleCount: 8,
+        failureCount: 1,
+        adjustedFailureRate: 0.15,
+        tokenCount: 42_000,
+        averageFirstTokenLatencyMs: 320,
+        firstTokenLatencySampleCount: 9,
+        llmRequestCount: 12,
+      },
+    },
+  ],
+  policy: {
+    quotaFloorPercent: 10,
+    switchMarginPercent: 5,
+    localUsageWindowMs: 86_400_000,
+    localUsageWeightPercent: 10,
+    priorityWeightPercent: 20,
+    reliabilityWeightPercent: 15,
+    latencyWeightPercent: 10,
+    switchCooldownMs: 30_000,
+    circuitBreakerFailureThreshold: 3,
+    circuitBreakerCooldownMs: 60_000,
+  },
+} satisfies AutoSubagentPresetStatus;
 
 vi.mock('@moonshot-ai/agent-core-v2/_base/execEnv/environmentProbe', async (importOriginal) => {
   const actual = await importOriginal<
@@ -205,11 +273,10 @@ describe('SDKRpcClientV2 (agent-core-v2 wiring)', () => {
     const workDir = await makeProjectRoot();
     const id = 'ses_missing_preset';
     try {
-      await harness.setConfig({ subagent: { preset: 'missing', presets: {} } });
+      await expect(
+        harness.setConfig({ subagent: { preset: 'missing', presets: {} } }),
+      ).rejects.toMatchObject({ code: ErrorCodes.CONFIG_INVALID });
 
-      await expect(harness.createSession({ id, workDir })).rejects.toMatchObject({
-        code: ErrorCodes.CONFIG_INVALID,
-      });
       expect(harness.getSession(id)).toBeUndefined();
       expect(await sessionDirExists(homeDir, id)).toBe(false);
     } finally {
@@ -222,11 +289,10 @@ describe('SDKRpcClientV2 (agent-core-v2 wiring)', () => {
     const workDir = await makeProjectRoot();
     const id = 'ses_prototype_preset';
     try {
-      await harness.setConfig({ subagent: { preset: 'toString', presets: {} } });
-
-      await expect(harness.createSession({ id, workDir })).rejects.toMatchObject({
+      await expect(
+        harness.setConfig({ subagent: { preset: 'toString', presets: {} } }),
+      ).rejects.toMatchObject({
         code: ErrorCodes.CONFIG_INVALID,
-        message: expect.stringContaining('does not name a configured preset'),
       });
       expect(harness.getSession(id)).toBeUndefined();
       expect(await sessionDirExists(homeDir, id)).toBe(false);
@@ -958,8 +1024,7 @@ key = "${titleOAuthRef.key}"
 
   it('serves listWorkspaceSkills through the engineAccessor escape hatch', async () => {
     const { harness, homeDir } = await makeHarness();
-    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
-    tempDirs.push(workDir);
+    const workDir = await makeProjectRoot();
     await writeSkill(join(homeDir, 'skills', 'demo-user-skill'), 'demo-user-skill');
     await writeSkill(join(workDir, '.kimi-code', 'skills', 'demo-project-skill'), 'demo-project-skill');
     try {
@@ -1177,8 +1242,7 @@ key = "${titleOAuthRef.key}"
 describe('SDKRpcClientV2 workspace trust', () => {
   it('reports an untrusted workspace with the project MCP servers it gates', async () => {
     const { harness } = await makeHarness();
-    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
-    tempDirs.push(workDir);
+    const workDir = await makeProjectRoot();
     await writeFile(
       join(workDir, '.mcp.json'),
       JSON.stringify({

@@ -105,6 +105,7 @@ watch(
       :title="t('common.preview')"
       :subtitle="member.name"
       :close-label="t('thinking.close')"
+      wrap
       @close="emit('close')"
     >
       <Badge variant="neutral" size="sm" class="ap-phase">{{ t(`researchContext.phases.${member.phase}`) }}</Badge>
@@ -115,7 +116,6 @@ watch(
       <span v-if="workspaceRoot" class="ap-directory"><span class="ap-context-label">{{ t('researchContext.sessionDirectory') }}</span> {{ workspaceRoot }}</span>
     </div>
     <div ref="bodyEl" class="ap-body">
-      <div v-if="member.subagentType" class="ap-type">{{ member.subagentType }}</div>
       <div v-if="member.suspendedReason" class="ap-reason">{{ member.suspendedReason }}</div>
       <div v-if="member.prompt" class="ap-field">
         <span class="ap-field-label">{{ t('researchContext.agentTask') }}</span>
@@ -177,11 +177,6 @@ watch(
   padding: 12px 14px;
   font: var(--text-base)/var(--leading-normal) var(--font-ui);
   color: var(--color-text-muted);
-}
-.ap-type {
-  font: var(--text-xs) var(--font-mono);
-  color: var(--color-text-muted);
-  margin-bottom: 8px;
 }
 .ap-reason {
   color: var(--color-warning);

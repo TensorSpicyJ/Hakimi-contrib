@@ -74,6 +74,7 @@ import type { ColorToken } from '#/tui/theme';
 import { errorReportHintLine } from '../constant/feedback';
 import { formatStepDebugTiming } from '#/utils/usage/debug-timing';
 import { nextTranscriptId } from '../utils/transcript-id';
+import type { ActivityProgressController } from './activity-progress';
 import type { BtwPanelController } from './btw-panel';
 import { isPluginMcpToolName, PluginUpdateNotifier } from './plugin-update-notifier';
 import type { StreamingUIController } from './streaming-ui';
@@ -121,6 +122,7 @@ export interface SessionEventHost {
   sendQueuedMessage(session: Session, item: QueuedMessage): void;
   shiftQueuedMessage(): QueuedMessage | undefined;
   readonly btwPanelController: BtwPanelController;
+  readonly activityProgress: ActivityProgressController;
   readonly tasksBrowserController: TasksBrowserController;
 }
 
@@ -214,6 +216,9 @@ export class SessionEventHandler {
     const { sessionId } = host.state.appState;
     host.sessionEventUnsubscribe = session.onEvent((event) => {
       if (host.aborted) return;
+      // Drop events from a stale subscription: a session id can be reused
+      // (close + recreate), so only the live session object itself counts.
+      if (host.session !== session) return;
       if (event.sessionId !== sessionId) return;
       if (event.type === 'tool.progress') {
         mcpOAuthOpener.handleToolProgress(event);
@@ -336,6 +341,7 @@ export class SessionEventHandler {
       streamingPhase: 'waiting',
       streamingStartTime: Date.now(),
     });
+    this.host.activityProgress.start(event.turnId);
   }
 
   private handleCronFired(event: CronFiredEvent): void {
@@ -358,6 +364,7 @@ export class SessionEventHandler {
 
   private handleTurnEnd(event: TurnEndedEvent, sendQueued: (item: QueuedMessage) => void): void {
     this.host.streamingUI.flushNow();
+    this.host.activityProgress.reset(event.turnId);
     this.clearStepRetry();
     if (event.reason === 'cancelled') {
       this.markActiveAgentSwarmsCancelled();
@@ -404,6 +411,7 @@ export class SessionEventHandler {
   private handleStepBegin(event: TurnStepStartedEvent): void {
     this.host.streamingUI.flushNow();
     this.host.streamingUI.setStep(event.step);
+    this.host.activityProgress.noteStep(event.turnId);
     this.host.streamingUI.resetToolUi();
     this.host.streamingUI.finalizeLiveTextBuffers('waiting');
     this.host.patchLivePane({
@@ -608,6 +616,7 @@ export class SessionEventHandler {
   private handleToolCall(event: ToolCallStartedEvent): void {
     const { streamingUI } = this.host;
     streamingUI.flushNow();
+    this.host.activityProgress.noteToolCall(event.turnId, event.toolCallId);
     const { turnId, step } = streamingUI.getTurnContext();
     const toolCall: ToolCallBlockData = {
       id: event.toolCallId,
@@ -671,6 +680,7 @@ export class SessionEventHandler {
   private handleToolResult(event: ToolResultEvent): void {
     const { streamingUI } = this.host;
     streamingUI.flushNow();
+    this.host.activityProgress.noteToolResult(event.turnId, event.toolCallId);
     this.clearStepRetry();
     const resultData: ToolResultBlockData = {
       tool_call_id: event.toolCallId,

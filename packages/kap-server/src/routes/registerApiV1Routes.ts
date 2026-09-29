@@ -15,6 +15,15 @@ import type { KimiHostIdentity } from '@moonshot-ai/kimi-code-oauth';
 import { ulid } from 'ulid';
 
 import { okEnvelope } from '../envelope';
+import type { RemoteAccessOptions } from '../middleware/remoteAccess';
+import {
+  registerRemoteShareControlRoutes,
+  type RemoteShareControlRoutesOptions,
+} from '../remoteShare/controlRoutes';
+import {
+  registerRemotePersistentControlRoutes,
+  type RemotePersistentControlRoutesOptions,
+} from '../remotePersistent/controlRoutes';
 import { type IConnectionRegistry } from '../transport/ws/connectionRegistry';
 import { type SessionEventBroadcaster } from '../transport/ws/v1/sessionEventBroadcaster';
 import type { TranscriptService } from '../services/transcript/transcriptService';
@@ -81,6 +90,20 @@ export interface RegisterApiV1RoutesOptions {
   readonly connectionRegistry: IConnectionRegistry;
   readonly broadcaster: SessionEventBroadcaster;
   readonly transcriptService: TranscriptService;
+  readonly remoteAccess?: RemoteAccessOptions;
+  /**
+   * Remote-share control surface (main listener only): present when the host
+   * supplied a controller AND the `remote_control` experimental flag is on.
+   * The remote edge never mounts these routes.
+   */
+  readonly remoteShare?: RemoteShareControlRoutesOptions;
+  /**
+   * Long-lived remote-control surface (main listener only): present when the
+   * host supplied a controller AND the `remote_control` experimental flag is
+   * on. The standalone `remote serve` never supplies one, so these routes are
+   * not registered on its listener.
+   */
+  readonly remotePersistent?: RemotePersistentControlRoutesOptions;
   /** Catalog URL for the `/plugins/marketplace` route (resolved by start.ts). */
   readonly pluginMarketplaceUrl: string;
   /** True when the catalog URL is the built-in default (no option/env set). */
@@ -139,6 +162,7 @@ export async function registerApiV1Routes(
         apiV1 as unknown as Parameters<typeof registerSessionsRoutes>[0],
         core,
         { sessionEventCursor: (sessionId) => opts.broadcaster.getCursor(sessionId) },
+        { remoteSessionId: opts.remoteAccess?.sessionId },
       );
       registerRuntimeRoutes(apiV1 as unknown as Parameters<typeof registerRuntimeRoutes>[0], core);
       registerResearchRoutes(apiV1 as unknown as Parameters<typeof registerResearchRoutes>[0], core);
@@ -159,12 +183,18 @@ export async function registerApiV1Routes(
       registerMessagesRoutes(
         apiV1 as unknown as Parameters<typeof registerMessagesRoutes>[0],
         core,
+        { remoteSessionId: opts.remoteAccess?.sessionId },
       );
       registerSearchRoutes(apiV1 as unknown as Parameters<typeof registerSearchRoutes>[0], core);
-      registerTasksRoutes(apiV1 as unknown as Parameters<typeof registerTasksRoutes>[0], core);
+      registerTasksRoutes(
+        apiV1 as unknown as Parameters<typeof registerTasksRoutes>[0],
+        core,
+        { remoteSessionId: opts.remoteAccess?.sessionId },
+      );
       registerApprovalsRoutes(
         apiV1 as unknown as Parameters<typeof registerApprovalsRoutes>[0],
         core,
+        { remoteSessionId: opts.remoteAccess?.sessionId },
       );
       registerQuestionsRoutes(
         apiV1 as unknown as Parameters<typeof registerQuestionsRoutes>[0],
@@ -173,6 +203,7 @@ export async function registerApiV1Routes(
       registerPromptsRoutes(
         apiV1 as unknown as Parameters<typeof registerPromptsRoutes>[0],
         core,
+        { remoteSessionId: opts.remoteAccess?.sessionId },
       );
       registerWorkspacesRoutes(
         apiV1 as unknown as Parameters<typeof registerWorkspacesRoutes>[0],
@@ -199,6 +230,7 @@ export async function registerApiV1Routes(
       registerSnapshotRoutes(apiV1 as unknown as Parameters<typeof registerSnapshotRoutes>[0], {
         core,
         broadcaster: opts.broadcaster,
+        remoteSessionId: opts.remoteAccess?.sessionId,
       });
       registerTranscriptRoutes(apiV1 as unknown as Parameters<typeof registerTranscriptRoutes>[0], {
         core,
@@ -208,6 +240,18 @@ export async function registerApiV1Routes(
         registerShutdownRoutes(apiV1 as unknown as Parameters<typeof registerShutdownRoutes>[0], {
           onShutdown: opts.onShutdown,
         });
+      }
+      if (opts.remoteShare !== undefined) {
+        registerRemoteShareControlRoutes(
+          apiV1 as unknown as Parameters<typeof registerRemoteShareControlRoutes>[0],
+          opts.remoteShare,
+        );
+      }
+      if (opts.remotePersistent !== undefined) {
+        registerRemotePersistentControlRoutes(
+          apiV1 as unknown as Parameters<typeof registerRemotePersistentControlRoutes>[0],
+          opts.remotePersistent,
+        );
       }
     },
     { prefix: '/api/v1' },

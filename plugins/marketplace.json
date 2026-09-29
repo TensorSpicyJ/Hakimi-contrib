@@ -11,6 +11,16 @@
       "source": "./official/kimi-datasource"
     },
     {
+      "id": "theory-physics",
+      "tier": "official",
+      "displayName": "Theory Physics",
+      "version": "0.2.3",
+      "description": "Upper-layer routing handbook for sustained theoretical-physics research.",
+      "keywords": ["physics", "research", "derivation", "numerics", "literature"],
+      "source": "./official/theory-physics"
+    },
+    {
+
       "id": "kimi-webbridge",
       "tier": "official",
       "displayName": "Kimi WebBridge",

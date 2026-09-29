@@ -21,7 +21,7 @@ All flags are optional — run `hakimi` directly to enter an interactive session
 | `--prompt <prompt>` | `-p` | Run a single prompt non-interactively and stream the Assistant output to stdout. This mode does not open the TUI |
 | `--output-format <format>` | | Set the non-interactive output format; supports `text` and `stream-json`. Can only be used with `--prompt`; defaults to `text` |
 | `--yolo` | `-y` | Auto-approve regular tool calls, skipping approval requests |
-| `--auto` | | Start with auto permission mode; tool approvals are handled automatically and the Agent will not ask the user questions |
+| `--auto` | | Start with auto permission mode; tool approvals are handled automatically and ordinary conversational questions are suppressed, while explicit protocol-owned workflow decisions may still pause |
 | `--plan` | | Start a new session in Plan mode — the AI will prioritize read-only tools for exploration and planning |
 | `--skills-dir <dir>` | | Load Skills from the specified directory, replacing the automatically discovered user and project directories. Can be repeated |
 | `--agent <name>` | | Start a new session with the specified agent as the main Agent. Cannot be combined with `--session`/`--continue` |
@@ -72,7 +72,7 @@ Skip approval prompts — suitable for batch tasks that are known to be safe:
 hakimi --yolo
 ```
 
-Let the Agent handle everything autonomously, without asking the user questions:
+Let the Agent handle tool approvals and ordinary reversible choices autonomously; explicit protocol-owned workflow decisions may still pause:
 
 ```sh
 hakimi --auto
@@ -117,6 +117,8 @@ hakimi -p "Summarize the current repository status"
 
 Output uses a transcript style: thinking content and Assistant text are both prefixed with `• `, and wrapped lines are indented by two spaces. Assistant text goes to stdout; thinking, tool progress, and "resuming session" notices go to stderr. In `-p` mode, no human approval is requested — regular tool calls are handled under the `auto` permission policy, while static deny rules remain in effect.
 
+On exit, the default runtime pauses any still-active Goal before cancelling remaining turns and flushing the session journal. This also applies to SIGINT, SIGTERM and SIGHUP; their exit codes remain 130, 143 and 129. Completed, paused and blocked Goals are not rewritten. Shutdown does not mark Research Actions complete, resolve human decisions or save AITP evidence. Cleanup remains bounded to eight seconds: SIGKILL, process crashes or a stalled storage write may prevent persistence, so cold recovery remains a fallback rather than proof of a graceful exit.
+
 Temporarily switch the model:
 
 ```sh
@@ -133,7 +135,7 @@ In `stream-json` mode, regular replies produce an Assistant message; when the mo
 
 ## Subcommands
 
-`hakimi` provides the following subcommands: `login` (non-interactive login), `acp` (ACP IDE mode), `web` (run the local REST/WebSocket/web service in the foreground and open the web UI), `doctor` (validate configuration files), `export` (export a session), `migrate` (migrate legacy data), `upgrade` (check for updates), and `provider` (manage providers).
+`hakimi` provides the following subcommands: `login` (non-interactive login), `acp` (ACP IDE mode), `web` (run the local REST/WebSocket/web service in the foreground and open the web UI), `remote` (manage persistent personal remote access), `doctor` (validate configuration files), `export` (export a session), `migrate` (migrate legacy data), `upgrade` (check for updates), and `provider` (manage providers).
 
 ### `hakimi login`
 
@@ -202,6 +204,34 @@ Deprecated — only stops a server started by a version before 0.28.0. Those ver
 #### `hakimi web rotate-token`
 
 Generate a new persistent bearer token (written to `~/.hakimi/server.token`); the previous token stops working immediately. The token is shared by the whole home directory, so every running instance picks the new one up on its next auth check — no restart needed.
+
+### `hakimi remote`
+
+Manage long-running personal remote access on Linux through a free Cloudflare Quick Tunnel. The command starts an authenticated full Web listener for all workspaces and sessions, including configuration, providers, OAuth, plugins, files, and complete Agent, Bash, tool, and task output. PTY terminals, debug endpoints, server shutdown, and nested remote-control routes remain unavailable through this listener. It does not require a Cloudflare account, domain, VPS, public IP address, or inbound router port.
+
+Install the official [`cloudflared` binary](https://developers.cloudflare.com/tunnel/downloads/) first, then start the service:
+
+```sh
+hakimi remote start
+```
+
+The first start creates a private fixed control token under `~/.hakimi/remote/`, installs a `systemd --user` service, enables it for future Linux user sessions, and prints the current public URL and QR code. If `cloudflared` is not on `PATH`, pass its absolute path on the first start:
+
+```sh
+hakimi remote start --cloudflared /absolute/path/to/cloudflared
+```
+
+Use the management commands after that:
+
+| Command | Description |
+| --- | --- |
+| `hakimi remote start` | Create or reuse the private configuration, enable the user service, and print the current URL and QR code |
+| `hakimi remote status` | Show whether the service is active and healthy, plus its current URL, QR code, process ID, and local port |
+| `hakimi remote stop` | Disable and stop the user service while keeping the fixed token for the next start |
+
+There is no TTL while this service is running. The control token remains the same across starts, but the free `*.trycloudflare.com` hostname normally changes whenever `cloudflared`, the user service, or the computer restarts. Run `hakimi remote status` on the host computer to obtain the replacement link. Cloudflare provides no SLA or uptime guarantee for Quick Tunnels.
+
+This background manager currently requires Linux with a working `systemd --user` session. In Hakimi Web, open **Remote control** and select **Persistent** to view, start, or stop the same service. The TUI `/remote` command remains a separate temporary handoff: its link opens the selected session first, then provides the same full remote Web access.
 
 ### `hakimi doctor`
 
