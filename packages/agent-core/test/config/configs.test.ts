@@ -245,6 +245,26 @@ read_byte_budget = 524288
     expect(roundTripped.image).toEqual({ maxEdgePx: 2500, readByteBudget: 524288 });
   });
 
+  it('round-trips the compaction request limit in [loop_control]', async () => {
+    const dir = makeTempDir();
+    const configPath = join(dir, 'compaction-limit.toml');
+    const config = parseConfigString(
+      '[loop_control]\ncompaction_max_attempts = 7\n',
+      configPath,
+    );
+
+    expect(config.loopControl).toEqual({ compactionMaxAttempts: 7 });
+    await writeConfigFile(configPath, config);
+    const text = await readFile(configPath, 'utf-8');
+    expect(text).toContain('compaction_max_attempts = 7');
+    expect(parseConfigString(text, configPath).loopControl).toEqual({
+      compactionMaxAttempts: 7,
+    });
+    expect(
+      KimiConfigSchema.safeParse({ loopControl: { compactionMaxAttempts: 0 } }).success,
+    ).toBe(false);
+  });
+
   it('round-trips a custom registry source field on a provider', async () => {
     const dir = makeTempDir();
     const configPath = join(dir, 'round-trip.toml');

@@ -2,8 +2,8 @@
  * ACP-backed `IHostFileSystem` — Session-scoped `IHostFileSystem` that routes
  * text file reads/writes through the ACP client (`fs.readTextFile` /
  * `fs.writeTextFile`, keyed by this session's `sessionId`) and delegates every
- * other operation (binary IO, stat/realpath/readdir/mkdir/remove, exclusive
- * create) to a node-local inner backend.
+ * other operation (binary IO, stat/realpath/readdir/mkdir/remove, temporary
+ * directories, exclusive create) to a node-local inner backend.
  *
  * Registered at Session scope so it shadows the App-scope node-local
  * `IHostFileSystem` for Session- and Agent-scope consumers (the os file tools),
@@ -55,8 +55,8 @@ export class AcpHostFileSystem implements IHostFileSystem {
 
   /**
    * Local inner backend for every operation the ACP `fs` protocol cannot
-   * express (binary IO, stat, realpath, directory ops, exclusive create),
-   * plus capability fallbacks for text operations.
+   * express (binary IO, stat, realpath, directory and temporary-directory ops,
+   * exclusive create), plus capability fallbacks for text operations.
    */
   private readonly inner = new HostFileSystem();
 
@@ -153,6 +153,10 @@ export class AcpHostFileSystem implements IHostFileSystem {
 
   mkdir(path: string, options?: { readonly recursive?: boolean }): Promise<void> {
     return this.inner.mkdir(path, options);
+  }
+
+  createTempDirectory(prefix: string): ReturnType<IHostFileSystem['createTempDirectory']> {
+    return this.inner.createTempDirectory(prefix);
   }
 
   remove(path: string): Promise<void> {

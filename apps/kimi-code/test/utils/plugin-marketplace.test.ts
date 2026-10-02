@@ -228,6 +228,15 @@ describe('loadPluginMarketplace', () => {
         source: join(REPO_ROOT, 'plugins/official/kimi-datasource'),
       }),
     );
+    expect(marketplace.plugins).toContainEqual(
+      expect.objectContaining({
+        id: 'aitp',
+        tier: 'curated',
+        version: '1.1.0',
+        source:
+          'https://github.com/bhjia-phys/AITP-Research-Protocol/releases/download/v1.1.0/aitp-1.1.0.zip',
+      }),
+    );
   });
 
   it('loads the default CDN marketplace with injectable fetch', async () => {

@@ -25,7 +25,9 @@ import {
   IHostFsWatchService,
 } from '#/os/interface/hostFsWatch';
 
-const DEFAULT_IGNORED = (p: string): boolean => /(?:^|[/\\])\.git(?:$|[/\\])/.test(p);
+const ATOMIC_WRITE_TEMP_BASENAME = /\.tmp\.\d+\.[0-9a-fA-F]{8}$/;
+const DEFAULT_IGNORED = (p: string): boolean =>
+  /(?:^|[/\\])\.git(?:$|[/\\])/.test(p) || ATOMIC_WRITE_TEMP_BASENAME.test(basename(p));
 
 const NATIVE_RETRY_BASE_MS = 1000;
 const NATIVE_RETRY_MAX_MS = 30000;
@@ -37,6 +39,7 @@ interface NativeFsWatcher {
 
 interface HostFsWatchRuntime {
   readonly platform: NodeJS.Platform;
+  createChokidar(options: HostFsWatchOptions | undefined): FSWatcher;
   watchNative(
     root: string,
     listener: (eventType: string, filename: string | null) => void,
@@ -46,6 +49,14 @@ interface HostFsWatchRuntime {
 
 const NODE_HOST_FS_WATCH_RUNTIME: HostFsWatchRuntime = {
   platform: process.platform,
+  createChokidar: (options) =>
+    new FSWatcher({
+      ignoreInitial: true,
+      persistent: false,
+      followSymlinks: false,
+      depth: options?.recursive === false ? 0 : undefined,
+      ignored: options?.ignored ?? DEFAULT_IGNORED,
+    }),
   watchNative: (root, listener) =>
     fsWatch(root, { persistent: false, recursive: true }, listener),
   scheduleRetry: (callback, delayMs) => {
@@ -95,37 +106,53 @@ class HostFsWatchHandle implements IHostFsWatchHandle {
 
   private readonly readiness = createWatchReadiness();
   private readonly emitter: Emitter<HostFsChange>;
-  private readonly watcher: FSWatcher;
+  private watcher: FSWatcher | undefined;
+  private degraded = false;
   private disposed = false;
 
-  constructor(path: string, options: HostFsWatchOptions | undefined) {
+  constructor(
+    path: string,
+    options: HostFsWatchOptions | undefined,
+    runtime: HostFsWatchRuntime,
+  ) {
     this.ready = this.readiness.promise;
     this.emitter = new Emitter<HostFsChange>();
     this.onDidChange = this.emitter.event;
-    this.watcher = new FSWatcher({
-      ignoreInitial: true,
-      persistent: false,
-      followSymlinks: false,
-      depth: options?.recursive === false ? 0 : undefined,
-      ignored: options?.ignored ?? DEFAULT_IGNORED,
-    });
-    this.watcher.on('all', (eventName: string, absPath: string) => {
-      const mapped = mapChokidarEvent(eventName, absPath);
-      if (mapped !== undefined) this.emitter.fire(mapped);
-    });
-    this.watcher.on('error', (error: unknown) => {
-      this.readiness.reject(error);
-      onUnexpectedError(error);
-    });
-    this.watcher.once('ready', () => this.readiness.resolve());
-    this.watcher.add(path);
+    try {
+      const watcher = runtime.createChokidar(options);
+      this.watcher = watcher;
+      watcher.on('all', (eventName: string, absPath: string) => {
+        if (this.disposed || this.degraded) return;
+        const mapped = mapChokidarEvent(eventName, absPath);
+        if (mapped !== undefined) this.emitter.fire(mapped);
+      });
+      watcher.on('error', (error: unknown) => this.onError(error));
+      watcher.once('ready', () => this.readiness.resolve());
+      watcher.add(path);
+    } catch (error) {
+      this.onError(error);
+    }
+  }
+
+  private onError(error: unknown): void {
+    if (this.disposed || this.degraded) return;
+    if ((error as NodeJS.ErrnoException).code === 'ENOSPC') {
+      this.degraded = true;
+      void this.watcher?.close().catch(() => undefined);
+      this.watcher = undefined;
+      this.readiness.resolve();
+      return;
+    }
+    this.readiness.reject(error);
+    onUnexpectedError(error);
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.readiness.resolve();
-    void this.watcher.close().catch(() => undefined);
+    void this.watcher?.close().catch(() => undefined);
+    this.watcher = undefined;
     this.emitter.dispose();
   }
 }
@@ -142,6 +169,7 @@ class SignalWatchHandle implements IHostFsWatchHandle {
   private retry: IDisposable | undefined;
   private retryAttempts = 0;
   private recovering = false;
+  private degraded = false;
   private disposed = false;
 
   constructor(
@@ -157,10 +185,10 @@ class SignalWatchHandle implements IHostFsWatchHandle {
   }
 
   private startNativeLeg(): void {
-    if (this.disposed) return;
+    if (this.disposed || this.degraded) return;
     try {
       const watcher = this.runtime.watchNative(this.root, (_eventType, filename) => {
-        if (this.disposed) return;
+        if (this.disposed || this.degraded) return;
         this.retryAttempts = 0;
         const absPath = resolveNativeSignalPath(this.root, filename);
         if (absPath !== this.root && this.ignored(absPath)) return;
@@ -181,10 +209,25 @@ class SignalWatchHandle implements IHostFsWatchHandle {
   }
 
   private onNativeError(watcher: NativeFsWatcher | undefined, error: NodeJS.ErrnoException): void {
-    if (this.disposed) return;
+    if (this.disposed || this.degraded) return;
     if (watcher !== undefined && watcher !== this.nativeWatcher) return;
+    const wasRunning = watcher !== undefined;
     watcher?.close();
     this.nativeWatcher = undefined;
+    if (error.code === 'ENOSPC') {
+      this.degraded = true;
+      this.recovering = false;
+      this.retry?.dispose();
+      this.retry = undefined;
+      this.readiness.resolve();
+      return;
+    }
+    if (error.code === 'ENOENT') {
+      this.recovering = false;
+      this.startChokidarLeg();
+      if (wasRunning) this.fireInvalidation();
+      return;
+    }
     if (error.code === 'ERR_FEATURE_UNAVAILABLE_ON_PLATFORM') {
       this.recovering = false;
       this.startChokidarLeg();
@@ -193,7 +236,7 @@ class SignalWatchHandle implements IHostFsWatchHandle {
     }
     onUnexpectedError(error);
     this.recovering = true;
-    this.fireInvalidation();
+    if (wasRunning) this.fireInvalidation();
     const delay = Math.min(NATIVE_RETRY_BASE_MS * 2 ** this.retryAttempts, NATIVE_RETRY_MAX_MS);
     this.retryAttempts += 1;
     this.retry?.dispose();
@@ -204,8 +247,12 @@ class SignalWatchHandle implements IHostFsWatchHandle {
   }
 
   private startChokidarLeg(): void {
-    if (this.chokidarLeg !== undefined) return;
-    const leg = new HostFsWatchHandle(this.root, { recursive: true, ignored: this.ignored });
+    if (this.disposed || this.degraded || this.chokidarLeg !== undefined) return;
+    const leg = new HostFsWatchHandle(
+      this.root,
+      { recursive: true, ignored: this.ignored },
+      this.runtime,
+    );
     leg.onDidChange((event) => {
       if (!this.disposed) this.emitter.fire(event);
     });
@@ -217,6 +264,7 @@ class SignalWatchHandle implements IHostFsWatchHandle {
   }
 
   private fireInvalidation(): void {
+    if (this.disposed || this.degraded) return;
     this.emitter.fire({ path: this.root, action: 'modified', kind: 'directory' });
   }
 
@@ -240,7 +288,7 @@ export class HostFsWatchService implements IHostFsWatchService {
     if (useNativeRecursive(options, this.runtime.platform)) {
       return new SignalWatchHandle(path, options, this.runtime);
     }
-    return new HostFsWatchHandle(path, options);
+    return new HostFsWatchHandle(path, options, this.runtime);
   }
 }
 

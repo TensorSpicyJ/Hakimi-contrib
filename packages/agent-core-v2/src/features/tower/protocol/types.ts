@@ -26,6 +26,8 @@ export interface TowerRosterEntry {
   readonly missionId?: string;
   /** Reviewers: the branch they are assigned to review. */
   readonly reviewTarget?: string;
+  /** Reviewers: the mission record they were assigned when spawned. */
+  readonly reviewMissionId?: string;
   /** Workers: worktree slot, e.g. `wt-1`. */
   readonly worktree?: string;
   /** Workers: their branch, e.g. `feat/vulkan-build`. */
@@ -110,6 +112,9 @@ export interface TowerReviewInfo {
   readonly reviewedCommit: string;
   readonly date: string;
   readonly file: string;
+  readonly mission?: string;
+  readonly seq?: number;
+  readonly mtimeMs: number;
 }
 
 export interface TowerInboxItem {

@@ -12,7 +12,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   resetUnexpectedErrorHandler,
@@ -28,6 +28,38 @@ import type {
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 type HostFsWatchRuntime = NonNullable<ConstructorParameters<typeof HostFsWatchService>[0]>;
+
+class TestChokidarWatcher {
+  private errorListener: ((error: unknown) => void) | undefined;
+  private readyListener: (() => void) | undefined;
+  closed = false;
+
+  on(event: string, listener: (...args: never[]) => void): this {
+    if (event === 'error') this.errorListener = listener as (error: unknown) => void;
+    return this;
+  }
+
+  once(event: string, listener: () => void): this {
+    if (event === 'ready') this.readyListener = listener;
+    return this;
+  }
+
+  add(_path: string): this {
+    return this;
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+  }
+
+  fail(code: string): void {
+    this.errorListener?.(Object.assign(new Error('chokidar failed'), { code }));
+  }
+
+  readyNow(): void {
+    this.readyListener?.();
+  }
+}
 
 class TestNativeWatcher {
   private errorListener: ((error: NodeJS.ErrnoException) => void) | undefined;
@@ -58,7 +90,11 @@ interface TestRetry {
   run(): void;
 }
 
-function signalRig(options?: { readonly synchronousFailures?: number }): {
+function signalRig(options?: {
+  readonly synchronousFailures?: number;
+  readonly synchronousFailureCode?: string;
+  readonly chokidarWatcher?: TestChokidarWatcher;
+}): {
   readonly service: IHostFsWatchService;
   readonly attempts: TestNativeAttempt[];
   readonly retries: TestRetry[];
@@ -70,10 +106,16 @@ function signalRig(options?: { readonly synchronousFailures?: number }): {
   let synchronousFailures = options?.synchronousFailures ?? 0;
   const runtime: HostFsWatchRuntime = {
     platform: 'darwin',
+    createChokidar: () => {
+      if (options?.chokidarWatcher !== undefined) return options.chokidarWatcher as never;
+      throw new Error('chokidar is not used in signal tests');
+    },
     watchNative: (_root, listener) => {
       if (synchronousFailures > 0) {
         synchronousFailures -= 1;
-        throw Object.assign(new Error('native watch creation failed'), { code: 'EIO' });
+        throw Object.assign(new Error('native watch creation failed'), {
+          code: options?.synchronousFailureCode ?? 'EIO',
+        });
       }
       const watcher = new TestNativeWatcher();
       attempts.push({
@@ -152,6 +194,133 @@ describe('host filesystem change notifications', () => {
     await handle.ready;
     return events;
   }
+
+  it('silently degrades a Chokidar watch after ENOSPC before ready', async () => {
+    const watcher = new TestChokidarWatcher();
+    const unexpected = vi.fn();
+    setUnexpectedErrorHandler(unexpected);
+    const runtime: HostFsWatchRuntime = {
+      platform: 'linux',
+      createChokidar: () => watcher as never,
+      watchNative: () => {
+        throw new Error('native watch is not used');
+      },
+      scheduleRetry: () => ({ dispose: () => {} }),
+    };
+    handle = new HostFsWatchService(runtime).watch('/repo');
+
+    watcher.fail('ENOSPC');
+    await expect(handle.ready).resolves.toBeUndefined();
+
+    expect(watcher.closed).toBe(true);
+    expect(unexpected).not.toHaveBeenCalled();
+  });
+
+  it('silently degrades when creating a Chokidar watch throws ENOSPC', async () => {
+    const unexpected = vi.fn();
+    setUnexpectedErrorHandler(unexpected);
+    const runtime: HostFsWatchRuntime = {
+      platform: 'linux',
+      createChokidar: () => {
+        throw Object.assign(new Error('chokidar creation failed'), { code: 'ENOSPC' });
+      },
+      watchNative: () => {
+        throw new Error('native watch is not used');
+      },
+      scheduleRetry: () => ({ dispose: () => {} }),
+    };
+    handle = new HostFsWatchService(runtime).watch('/repo');
+
+    await expect(handle.ready).resolves.toBeUndefined();
+    expect(unexpected).not.toHaveBeenCalled();
+  });
+
+  it('silently degrades a Chokidar watch after ready', async () => {
+    const watcher = new TestChokidarWatcher();
+    const unexpected = vi.fn();
+    setUnexpectedErrorHandler(unexpected);
+    const runtime: HostFsWatchRuntime = {
+      platform: 'linux',
+      createChokidar: () => watcher as never,
+      watchNative: () => {
+        throw new Error('native watch is not used');
+      },
+      scheduleRetry: () => ({ dispose: () => {} }),
+    };
+    handle = new HostFsWatchService(runtime).watch('/repo');
+    watcher.readyNow();
+    await handle.ready;
+
+    watcher.fail('ENOSPC');
+
+    expect(watcher.closed).toBe(true);
+    expect(unexpected).not.toHaveBeenCalled();
+  });
+
+  it('rejects and reports a non-ENOSPC Chokidar failure', async () => {
+    const watcher = new TestChokidarWatcher();
+    const unexpected = vi.fn();
+    setUnexpectedErrorHandler(unexpected);
+    const runtime: HostFsWatchRuntime = {
+      platform: 'linux',
+      createChokidar: () => watcher as never,
+      watchNative: () => {
+        throw new Error('native watch is not used');
+      },
+      scheduleRetry: () => ({ dispose: () => {} }),
+    };
+    handle = new HostFsWatchService(runtime).watch('/repo');
+
+    watcher.fail('EACCES');
+    await expect(handle.ready).rejects.toMatchObject({ code: 'EACCES' });
+    expect(unexpected).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to Chokidar when a native signal watch starts on a missing path', async () => {
+    const chokidar = new TestChokidarWatcher();
+    const rig = signalRig({
+      synchronousFailures: 1,
+      synchronousFailureCode: 'ENOENT',
+      chokidarWatcher: chokidar,
+    });
+    const events: HostFsChange[] = [];
+    handle = rig.service.watch('/missing', { signal: true });
+    handle.onDidChange((event) => events.push(event));
+    chokidar.readyNow();
+
+    await expect(handle.ready).resolves.toBeUndefined();
+    expect(rig.retries).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it('falls back to Chokidar when a running native signal watch loses its path', async () => {
+    const chokidar = new TestChokidarWatcher();
+    const rig = signalRig({ chokidarWatcher: chokidar });
+    const events: HostFsChange[] = [];
+    handle = rig.service.watch('/missing', { signal: true });
+    handle.onDidChange((event) => events.push(event));
+
+    rig.attempt(0).watcher.fail('ENOENT');
+    chokidar.readyNow();
+    await expect(handle.ready).resolves.toBeUndefined();
+
+    expect(rig.retries).toEqual([]);
+    expect(events).toEqual([{ path: '/missing', action: 'modified', kind: 'directory' }]);
+  });
+
+  it('does not retry a native signal watch after ENOSPC', async () => {
+    const rig = signalRig();
+    const unexpected = vi.fn();
+    setUnexpectedErrorHandler(unexpected);
+    handle = rig.service.watch('/repo', { signal: true });
+
+    rig.attempt(0).watcher.fail('ENOSPC');
+    await expect(handle.ready).resolves.toBeUndefined();
+
+    expect(rig.attempt(0).watcher.closed).toBe(true);
+    expect(rig.retries).toEqual([]);
+    expect(unexpected).not.toHaveBeenCalled();
+  });
 
   it('emits a coarse root invalidation when a native signal path changes', () => {
     const rig = signalRig();
@@ -272,6 +441,20 @@ describe('host filesystem change notifications', () => {
     await wait(300);
 
     expect(events.some((e) => e.path.includes('/.git/') || e.path.endsWith('/.git'))).toBe(false);
+  });
+
+  it('ignores atomic-write temporary files but reports adjacent ordinary files', async () => {
+    root = await mkdtemp(join(tmpdir(), 'hostfswatch-'));
+    const events = await start();
+
+    const atomicTemp = join(root, 'workspaces.json.tmp.29309.7d6ff724');
+    const ordinary = join(root, 'workspaces.json.backup');
+    await writeFile(atomicTemp, 'temporary');
+    await writeFile(ordinary, 'ordinary');
+    await wait(300);
+
+    expect(events.some((e) => e.path === atomicTemp)).toBe(false);
+    expect(events.some((e) => e.path === ordinary)).toBe(true);
   });
 
   it('does not fire for pre-existing files (ignoreInitial)', async () => {

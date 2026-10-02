@@ -18,12 +18,11 @@
  * to the socket — they never enter the broadcaster / journal (fs changes are
  * volatile: on overflow the client sees `truncated` and re-syncs).
  *
- * The core watch service is Workspace-scoped: one os watcher per handler,
- * shared by every session of the workspace. The bridge holds ONE
- * `IWorkspaceFsWatchSubscription` per session (driven with the union of every
- * connection's paths for that session) and re-filters per connection on the
- * way out — two sessions of one workspace fan out from the same handler
- * watch instead of hanging a second os watcher.
+ * Local sessions use one Workspace-scoped subscription each (the underlying
+ * handler owns one os watcher shared by all subscriptions), driven with the
+ * union of every connection's paths and re-filtered per connection on the way
+ * out. Non-local runtimes, and local sessions without a live Workspace
+ * instance, retain a direct runtime watcher for compatibility.
  */
 
 import {
@@ -39,7 +38,11 @@ import {
 import type { Runtime, RuntimeLease } from '@moonshot-ai/agent-core-v2/runtime/runtime';
 import { RuntimeWorkspaceView } from '@moonshot-ai/agent-core-v2/runtime/runtimeWorkspaceView';
 import type { IHostFsWatchHandle, HostFsChange } from '@moonshot-ai/agent-core-v2/os/interface/hostFsWatch';
-import type { FsChangeEntry, FsChangeEvent } from '@moonshot-ai/agent-core-v2/workspace/workspaceFs/fsWatch';
+import type {
+  FsChangeEntry,
+  FsChangeEvent,
+  IWorkspaceFsWatchSubscription,
+} from '@moonshot-ai/agent-core-v2/workspace/workspaceFs/fsWatch';
 
 import type { EventEnvelope, JournalLogger } from './sessionEventJournal';
 
@@ -91,6 +94,18 @@ interface ConnEntry {
   readonly paths: Set<string>;
 }
 
+type SessionWatchSource =
+  | {
+      readonly kind: 'workspace';
+      readonly subscription: IWorkspaceFsWatchSubscription;
+      readonly events: IDisposable;
+    }
+  | {
+      readonly kind: 'runtime';
+      readonly handle: IHostFsWatchHandle;
+      readonly events: IDisposable;
+    };
+
 interface SessionWatch {
   readonly id: string;
   readonly runtimeId: string;
@@ -99,13 +114,12 @@ interface SessionWatch {
   readonly session: ISessionScopeHandle;
   readonly runtime: Runtime;
   readonly view: RuntimeWorkspaceView;
-  readonly handle: IHostFsWatchHandle;
+  readonly source: SessionWatchSource;
   readonly lease: RuntimeLease;
   readonly workspace: ISessionWorkspaceContext;
   readonly conns: Map<string, ConnEntry>;
   union: Set<string>;
   seq: number;
-  sub: IDisposable | undefined;
   pending: FsChangeEntry[];
   rawCount: number;
   truncated: boolean;
@@ -240,27 +254,56 @@ export class FsWatchBridge {
       { workspaceId: sessionContext.workspaceId, runtimeId },
       ['watch'],
     );
+    let source: SessionWatchSource | undefined;
+    let workspaceSubscription: IWorkspaceFsWatchSubscription | undefined;
     try {
       const view = new RuntimeWorkspaceView(lease.runtime, context);
-      const handle = lease.track(lease.runtime.watch!.watch(view.workDir, { recursive: true }));
-      await handle.ready;
+      const workspaceInstance = runtimeId === 'local'
+        ? this.core.accessor.get(IWorkspaceInstanceManager).get(sessionContext.workspaceId)
+        : undefined;
+      if (workspaceInstance !== undefined) {
+        try {
+          workspaceSubscription = workspaceInstance.program.watch.subscribe();
+          source = {
+            kind: 'workspace',
+            subscription: workspaceSubscription,
+            events: workspaceSubscription.onDidChangeFiles((event) => this.onWorkspaceEvent(key, event)),
+          };
+        } catch {
+          workspaceSubscription?.dispose();
+          workspaceSubscription = undefined;
+          const handle = lease.track(lease.runtime.watch!.watch(view.workDir, { recursive: true }));
+          await handle.ready;
+          source = {
+            kind: 'runtime',
+            handle,
+            events: handle.onDidChange((event) => this.onRuntimeEvent(key, event)),
+          };
+        }
+      } else {
+        const handle = lease.track(lease.runtime.watch!.watch(view.workDir, { recursive: true }));
+        await handle.ready;
+        source = {
+          kind: 'runtime',
+          handle,
+          events: handle.onDidChange((event) => this.onRuntimeEvent(key, event)),
+        };
+      }
+      if (source === undefined) throw new Error('fs-watch source was not initialized');
       const sw: SessionWatch = {
         id: sessionId,
         runtimeId,
         workspaceId: sessionContext.workspaceId,
         generation: lease.runtime.identity.generation,
         session,
-        // One subscription per session, held on the handler-shared Workspace
-        // watch service (resolved through the session's parent scope).
         runtime: lease.runtime,
         view,
-        handle,
+        source,
         lease,
         workspace: context,
         conns: carried?.conns ?? new Map(),
         union: new Set(),
         seq: carried?.seq ?? 0,
-        sub: undefined,
         pending: [],
         rawCount: 0,
         truncated: false,
@@ -268,12 +311,15 @@ export class FsWatchBridge {
         debounceMs: readPositiveIntEnv('KIMI_CODE_FS_WATCH_DEBOUNCE_MS', DEFAULT_DEBOUNCE_MS),
         maxChangesPerWindow: readPositiveIntEnv('KIMI_CODE_FS_WATCH_MAX_CHANGES_PER_WINDOW', DEFAULT_MAX_CHANGES_PER_WINDOW),
       };
-      sw.sub = handle.onDidChange((event) => this.onRuntimeEvent(key, event));
       this.recomputeAndApply(sw);
       this.bySession.set(key, sw);
       this.subscribeRegistry(sessionContext.workspaceId);
       return sw;
     } catch (error) {
+      source?.events.dispose();
+      if (source?.kind === 'workspace') source.subscription.dispose();
+      else if (source?.kind === 'runtime') source.handle.dispose();
+      else workspaceSubscription?.dispose();
       lease.dispose();
       throw error;
     }
@@ -337,16 +383,21 @@ export class FsWatchBridge {
       for (const p of paths) union.add(p);
     }
     sw.union = union;
+    if (sw.source.kind === 'workspace') sw.source.subscription.setWatchedPaths([...union]);
   }
 
   private teardownSession(sw: SessionWatch): void {
-    sw.sub?.dispose();
-    sw.sub = undefined;
+    sw.source.events.dispose();
+    if (sw.source.kind === 'workspace') sw.source.subscription.dispose();
+    else sw.source.handle.dispose();
     if (sw.debounceTimer !== undefined) clearTimeout(sw.debounceTimer);
     sw.debounceTimer = undefined;
-    sw.handle.dispose();
     sw.lease.dispose();
     this.bySession.delete(sessionRuntimeKey(sw.id, sw.runtimeId));
+  }
+
+  private onWorkspaceEvent(key: string, event: FsChangeEvent): void {
+    if (this.bySession.has(key)) this.onSessionEvent(key, event);
   }
 
   private onRuntimeEvent(key: string, event: HostFsChange): void {

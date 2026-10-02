@@ -17,15 +17,20 @@ import {
   IConfigService,
   IEventBus,
   IFileSystemStorageService,
+  IHostFileSystem,
   IOAuthToolkit,
   ISessionCronService,
   ISessionIndex,
   ISessionManager,
   ITelemetryService,
+  IWorkspaceInstanceManager,
+  resolveKimiHome,
   IWireService,
   type BootstrapInput,
   type DomainEvent,
 } from '@moonshot-ai/agent-core-v2';
+
+import { CLI_SHUTDOWN_TIMEOUT_MS, CLI_USER_AGENT_PRODUCT } from '#/constant/app';
 
 import { runV2Print } from '../../src/cli/v2/run-v2-print';
 import type { PromptProcess } from '../../src/cli/run-prompt';
@@ -38,9 +43,23 @@ import {
 const mocks = vi.hoisted(() => ({
   bootstrap: vi.fn(),
   ensureMainAgent: vi.fn(),
+  loadMcpServersDetailed: vi.fn(async () => ({
+    servers: {},
+    origins: {},
+  })),
+  resolveMcpJsonPaths: vi.fn(async () => ({
+    user: '/tmp/kimi-code-test-home/mcp.json',
+    projectRoot: '/tmp/project/.mcp.json',
+    project: '/tmp/project/.kimi-code/mcp.json',
+  })),
   createKimiDefaultHeaders: vi.fn(() => ({})),
   resolveKimiHome: vi.fn((homeDir?: string) => homeDir ?? '/tmp/kimi-code-test-home'),
   createKimiDeviceId: vi.fn(() => 'device-1'),
+  initializeTelemetry: vi.fn(),
+  setCrashPhase: vi.fn(),
+  setTelemetryContext: vi.fn(),
+  setTelemetryModel: vi.fn(),
+  shutdownTelemetry: vi.fn(async () => {}),
 }));
 
 vi.mock('@moonshot-ai/agent-core-v2', async (importOriginal) => {
@@ -51,6 +70,11 @@ vi.mock('@moonshot-ai/agent-core-v2', async (importOriginal) => {
     ensureMainAgent: mocks.ensureMainAgent,
   };
 });
+
+vi.mock('@moonshot-ai/agent-core-v2/workspace/workspaceMcpConfig/internal/config-loader', () => ({
+  loadMcpServersDetailed: mocks.loadMcpServersDetailed,
+  resolveMcpJsonPaths: mocks.resolveMcpJsonPaths,
+}));
 
 vi.mock('@moonshot-ai/kimi-code-oauth', async () => {
   const actual = await vi.importActual<typeof import('@moonshot-ai/kimi-code-oauth')>(
@@ -71,14 +95,22 @@ vi.mock('@bhjia-phys/hakimi-sdk', async (importOriginal) => {
   };
 });
 
-vi.mock('@moonshot-ai/kimi-telemetry', () => ({
-  initializeTelemetry: vi.fn(),
-  setCrashPhase: vi.fn(),
-  shutdownTelemetry: vi.fn(),
-  track: vi.fn(),
-  setTelemetryContext: vi.fn(),
-  withTelemetryContext: vi.fn(() => ({ track: vi.fn() })),
-}));
+vi.mock('@moonshot-ai/kimi-telemetry', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@moonshot-ai/kimi-telemetry')>();
+  return {
+    // Keep the real `shouldEnableTelemetry` so the tests exercise the actual
+    // KIMI_DISABLE_TELEMETRY semantics; only the side-effecting entry points
+    // are stubbed.
+    ...actual,
+    initializeTelemetry: mocks.initializeTelemetry,
+    setCrashPhase: mocks.setCrashPhase,
+    setTelemetryContext: mocks.setTelemetryContext,
+    setTelemetryModel: mocks.setTelemetryModel,
+    shutdownTelemetry: mocks.shutdownTelemetry,
+    track: vi.fn(),
+    withTelemetryContext: vi.fn(() => ({ track: vi.fn() })),
+  };
+});
 
 interface FakeScope {
   readonly id: string;
@@ -139,6 +171,7 @@ function makeFakeHarness() {
   // emits a streaming assistant delta before completing.
   const eventListeners = new Set<(event: DomainEvent) => void>();
   const profileState: { profileName: string | undefined } = { profileName: undefined };
+  const trustState = { trusted: true };
 
   const agentServices = new Map<unknown, unknown>([
     [
@@ -251,6 +284,15 @@ function makeFakeHarness() {
     ],
     [IOAuthToolkit, { getCachedAccessToken: vi.fn(async () => undefined) }],
     [IFileSystemStorageService, {}],
+    [IHostFileSystem, {}],
+    [
+      IWorkspaceInstanceManager,
+      {
+        getOrCreate: vi.fn(async () => ({
+          program: { trust: { get: vi.fn(async () => trustState.trusted) } },
+        })),
+      },
+    ],
     [
       ITelemetryService,
       (() => {
@@ -267,13 +309,21 @@ function makeFakeHarness() {
     ],
   ]);
   const app = fakeScope('app', appServices);
-  return { app, agent, session, agentServices, appServices, profileState };
+  return { app, agent, session, agentServices, appServices, profileState, trustState };
 }
 
 describe('runV2Print', () => {
   beforeEach(() => {
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '1');
     vi.stubEnv('KIMI_MODEL_OUTPUT_FORMAT', '');
+    // Pin the telemetry kill-switch to "unset" so the host environment cannot
+    // flip the default telemetry-on path these tests exercise.
+    vi.stubEnv('KIMI_DISABLE_TELEMETRY', '');
+    // `vi.clearAllMocks` keeps implementations, so re-pin the default here.
+    mocks.loadMcpServersDetailed.mockImplementation(async () => ({
+      servers: {},
+      origins: {},
+    }));
   });
 
   afterEach(() => {
@@ -479,6 +529,7 @@ describe('runV2Print', () => {
     // Version banner is first, then the rendered assistant output.
     expect(stderr.write).toHaveBeenNthCalledWith(1, 'hakimi version 1.2.3-test\n');
     expect(stdout.text()).toContain('hello world');
+    expect(stderr.text()).not.toContain('background policy failed');
     expect(app.dispose).toHaveBeenCalled();
   });
 
@@ -689,5 +740,195 @@ describe('runV2Print', () => {
     };
     expect(profile.bind).not.toHaveBeenCalled();
     expect(profile.setModel).toHaveBeenCalledWith('new-model');
+  });
+
+  it('warns on stderr when workspace trust skips project-level MCP servers', async () => {
+    const stdout = writer();
+    const stderr = writer();
+    const { app, agent, trustState } = makeFakeHarness();
+    trustState.trusted = false;
+    mocks.loadMcpServersDetailed.mockResolvedValue({
+      servers: {
+        fs: { transport: 'stdio', command: 'node', args: ['server.js'] },
+        api: { transport: 'http', url: 'https://example.com/mcp' },
+      },
+      origins: {
+        fs: '/tmp/project/.mcp.json',
+        api: '/tmp/project/.kimi-code/mcp.json',
+      },
+    });
+
+    mocks.bootstrap.mockReturnValue({ app });
+    mocks.ensureMainAgent.mockResolvedValue(agent);
+
+    await runV2Print(opts() as never, '1.2.3-test', { stdout, stderr });
+
+    expect(stderr.text()).toContain(
+      'Warning: this folder is not trusted; skipped 2 project-level MCP servers: ' +
+        'api (http: https://example.com/mcp), fs (stdio: node server.js).',
+    );
+    expect(stderr.text()).toContain('"Trust this folder"');
+    // The warning is advisory only — the run itself is unaffected.
+    expect(stdout.text()).toContain('hello world');
+  });
+
+  it('does not read mcp.json for the trust warning when the folder is trusted', async () => {
+    const stdout = writer();
+    const stderr = writer();
+    const { app, agent } = makeFakeHarness();
+
+    mocks.bootstrap.mockReturnValue({ app });
+    mocks.ensureMainAgent.mockResolvedValue(agent);
+
+    await runV2Print(opts() as never, '1.2.3-test', { stdout, stderr });
+
+    expect(mocks.loadMcpServersDetailed).not.toHaveBeenCalled();
+    expect(stderr.text()).not.toContain('not trusted');
+  });
+
+  it('stays silent when untrusted but no project-level MCP servers are declared', async () => {
+    const stdout = writer();
+    const stderr = writer();
+    const { app, agent, trustState } = makeFakeHarness();
+    trustState.trusted = false;
+
+    mocks.bootstrap.mockReturnValue({ app });
+    mocks.ensureMainAgent.mockResolvedValue(agent);
+
+    await runV2Print(opts() as never, '1.2.3-test', { stdout, stderr });
+
+    expect(mocks.loadMcpServersDetailed).toHaveBeenCalled();
+    expect(stderr.text()).not.toContain('not trusted');
+  });
+
+  it('warns for a project server that overrides a same-named user server', async () => {
+    const stdout = writer();
+    const stderr = writer();
+    const { app, agent, trustState } = makeFakeHarness();
+    trustState.trusted = false;
+    mocks.loadMcpServersDetailed.mockResolvedValue({
+      servers: {
+        github: { transport: 'stdio', command: './project-github' },
+        toString: { transport: 'http', url: 'https://example.com/mcp' },
+      },
+      origins: {
+        github: '/tmp/project/.mcp.json',
+        toString: '/tmp/project/.kimi-code/mcp.json',
+      },
+    });
+
+    mocks.bootstrap.mockReturnValue({ app });
+    mocks.ensureMainAgent.mockResolvedValue(agent);
+
+    await runV2Print(opts() as never, '1.2.3-test', { stdout, stderr });
+
+    expect(stderr.text()).toContain('github (stdio: ./project-github)');
+    expect(stderr.text()).toContain('toString (http: https://example.com/mcp)');
+  });
+
+  it('still runs when the trust-gated MCP probe fails', async () => {
+    const stdout = writer();
+    const stderr = writer();
+    const { app, agent, appServices, trustState } = makeFakeHarness();
+    trustState.trusted = false;
+    const workspaces = appServices.get(IWorkspaceInstanceManager) as {
+      getOrCreate: ReturnType<typeof vi.fn>;
+    };
+    workspaces.getOrCreate.mockRejectedValueOnce(new Error('trust store unavailable'));
+
+    mocks.bootstrap.mockReturnValue({ app });
+    mocks.ensureMainAgent.mockResolvedValue(agent);
+
+    await runV2Print(opts() as never, '1.2.3-test', { stdout, stderr });
+
+    expect(stdout.text()).toContain('hello world');
+  });
+
+  it('honors KIMI_DISABLE_TELEMETRY: no cloud appender and no v1 pipeline', async () => {
+    vi.stubEnv('KIMI_DISABLE_TELEMETRY', '1');
+    const stdout = writer();
+    const stderr = writer();
+    const { app, agent, appServices } = makeFakeHarness();
+
+    mocks.bootstrap.mockReturnValue({ app });
+    mocks.ensureMainAgent.mockResolvedValue(agent);
+
+    await runV2Print(opts() as never, '1.2.3-test', { stdout, stderr });
+
+    const telemetry = appServices.get(ITelemetryService) as {
+      setAppender: ReturnType<typeof vi.fn>;
+    };
+    expect(telemetry.setAppender).not.toHaveBeenCalled();
+    expect(mocks.initializeTelemetry).not.toHaveBeenCalled();
+    // The run itself is unaffected: the prompt still renders and cleanup runs.
+    expect(stdout.text()).toContain('hello world');
+    expect(app.dispose).toHaveBeenCalled();
+  });
+
+  it('initializes the v1 telemetry pipeline alongside the cloud appender', async () => {
+    const stdout = writer();
+    const stderr = writer();
+    const { app, agent, appServices } = makeFakeHarness();
+
+    mocks.bootstrap.mockReturnValue({ app });
+    mocks.ensureMainAgent.mockResolvedValue(agent);
+
+    await runV2Print(opts() as never, '1.2.3-test', { stdout, stderr });
+
+    const telemetry = appServices.get(ITelemetryService) as {
+      setAppender: ReturnType<typeof vi.fn>;
+    };
+    expect(telemetry.setAppender).toHaveBeenCalledTimes(1);
+    expect(mocks.initializeTelemetry).toHaveBeenCalledTimes(1);
+    expect(mocks.initializeTelemetry).toHaveBeenCalledWith({
+      homeDir: resolveKimiHome(),
+      deviceId: 'device-1',
+      appName: CLI_USER_AGENT_PRODUCT,
+      version: '1.2.3-test',
+      uiMode: 'print',
+      model: 'k2',
+      getAccessToken: expect.any(Function),
+    });
+    // The resolved session id is synced onto the v1 client so crash events and
+    // system metrics carry it; the sink model is reconciled too (same value
+    // here, since the fresh session uses the configured default).
+    expect(mocks.setTelemetryContext).toHaveBeenCalledWith({ sessionId: 'ses_v2' });
+    expect(mocks.setTelemetryModel).toHaveBeenCalledWith('k2');
+    expect(mocks.setCrashPhase).toHaveBeenCalledWith('runtime');
+    expect(mocks.setCrashPhase).toHaveBeenCalledWith('shutdown');
+    expect(mocks.shutdownTelemetry).toHaveBeenCalledWith({
+      timeoutMs: CLI_SHUTDOWN_TIMEOUT_MS,
+    });
+  });
+
+  it('reconciles the v1 sink model with the resumed session model', async () => {
+    const stdout = writer();
+    const stderr = writer();
+    const { app, agent, appServices, agentServices } = makeFakeHarness();
+
+    // The resumed session's stored model differs from the configured default.
+    const profile = agentServices.get(IAgentProfileService) as { getModel: () => string };
+    profile.getModel = () => 'resumed-model';
+    const index = appServices.get(ISessionIndex) as { get: ReturnType<typeof vi.fn> };
+    index.get.mockResolvedValue({ id: 'ses_1', cwd: process.cwd() });
+
+    mocks.bootstrap.mockReturnValue({ app });
+    mocks.ensureMainAgent.mockResolvedValue(agent);
+
+    await runV2Print(opts({ session: 'ses_1' }) as never, '1.2.3-test', { stdout, stderr });
+
+    // The v1 pipeline was initialized up front with the best-known model, so
+    // crash events during session resolution still reach a sink...
+    expect(mocks.initializeTelemetry).toHaveBeenCalledTimes(1);
+    expect(mocks.initializeTelemetry).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'k2' }),
+    );
+    // ...and the sink's model was reconciled to the resumed session's real
+    // model only after the session resolved.
+    expect(mocks.setTelemetryModel).toHaveBeenCalledWith('resumed-model');
+    const initOrder = mocks.initializeTelemetry.mock.invocationCallOrder[0];
+    const reconcileOrder = mocks.setTelemetryModel.mock.invocationCallOrder[0];
+    expect(initOrder).toBeDefined();
+    expect(reconcileOrder).toBeGreaterThan(initOrder!);
   });
 });

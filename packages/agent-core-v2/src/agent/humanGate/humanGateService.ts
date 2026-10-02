@@ -3,8 +3,8 @@
  *
  * Adapts the existing tool-approval broker to the common Human Gate contract,
  * preserving the broker's cancellation, telemetry, and permission-rule
- * behavior. Durable Research and Plan state remains owned by their domains.
- * Bound at Agent scope.
+ * behavior. Durable domain state remains owned by its respective domain. Bound
+ * at Agent scope.
  */
 
 import { Service } from '#/_base/di/service';

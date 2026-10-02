@@ -245,6 +245,7 @@ PTY 终端接口，仅 loopback 绑定时挂载。
 | `GET /api/v1/workspaces/{workspace_id}/trust` | 读取信任状态 |
 | `POST /api/v1/workspaces/{workspace_id}/trust` | 授予信任 |
 | `POST /api/v1/workspaces/{workspace_id}/untrust` | 撤销信任 |
+| `POST /api/v1/workspaces/{workspace_id}/add-dir` | 添加附加目录 |
 
 ### 文件系统
 

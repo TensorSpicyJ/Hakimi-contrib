@@ -201,10 +201,12 @@ function projectSharedSkills(skills: readonly SkillSummary[]): readonly unknown[
   return skills
     .filter((skill) => !NON_PARITY_SKILL_NAMES.has(skill.name))
     .map((skill) => {
-      if (skill.name !== 'check-kimi-code-docs') return skill;
+      if (skill.source !== 'builtin' || ![
+        'check-kimi-code-docs', 'custom-theme', 'import-from-cc-codex', 'update-config',
+      ].includes(skill.name)) return skill;
       const projected: Record<string, unknown> = { ...skill };
       delete projected['description'];
-      delete projected['disableModelInvocation'];
+      if (skill.name === 'check-kimi-code-docs') delete projected['disableModelInvocation'];
       return projected;
     });
 }
@@ -390,6 +392,10 @@ function projectGoalSnapshot(snapshot: GoalSnapshot | null): unknown {
   delete projected['goalId'];
   delete projected['wallClockMs'];
   delete projected['continuation'];
+  if (projected['terminalReason'] === 'Paused after agent resume' ||
+      projected['terminalReason'] === 'Paused after agent closed') {
+    projected['terminalReason'] = 'Paused after agent lifecycle boundary';
+  }
   return projected;
 }
 
@@ -5130,25 +5136,21 @@ describe('v1↔v2 residual surface parity', () => {
         pair.v1.withInteractiveAgent(v1ChildId, () => pair.v1.getContext({ sessionId })),
         pair.v2.withInteractiveAgent(v2ChildId, () => pair.v2.getContext({ sessionId })),
       ]);
-      // Inheritance gap, pinned: v1's btw child inherits through the
-      // model-facing `project()`, which strips every message's `origin`,
-      // while v2's fork appends the canonical messages verbatim (origin
-      // kept). The message CONTENT is identical on both — compare with the
-      // origins projected away.
+      // Compare inherited content across the origin-projection difference.
+      // The v1 reminder forbids tools; v2 permits read-only file inspection.
       const stripOrigins = (context: { readonly history: readonly unknown[] }): unknown =>
         JSON.parse(
           JSON.stringify(context.history, (key, value: unknown) =>
             key === 'origin' ? undefined : value,
           ),
         );
-      // Both engines materialize the side-question reminder while forking:
-      // v2 appends it at the fork event point (a past-tense one-off fact),
-      // so the inherited contexts are already identical right after fork.
       expect(v1Context.history).toHaveLength(2);
       expect(v2Context.history).toHaveLength(2);
-      expect(stripOrigins(v2Context)).toEqual(stripOrigins(v1Context));
-      // Non-vacuous: the inherited import plus the side-question reminder
-      // (byte-identical template on both engines).
+      expect(stripOrigins({ history: v2Context.history.slice(0, -1) })).toEqual(
+        stripOrigins({ history: v1Context.history.slice(0, -1) }),
+      );
+      expect(JSON.stringify(v1Context.history.at(-1))).toContain('Do not call any tools');
+      expect(JSON.stringify(v2Context.history.at(-1))).toContain('Read, Grep, and Glob');
       const v1History = v1Context.history;
       expect(v1History.length).toBeGreaterThanOrEqual(2);
       const reminder = v1History.at(-1);

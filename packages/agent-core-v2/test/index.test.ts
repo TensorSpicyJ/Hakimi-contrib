@@ -86,6 +86,7 @@ const V2_RECORD_TYPES: ReadonlySet<string> = new Set([
   'interruptionReminder.recorded',
   'plugin.session_start',
   'runtime.set_binding',
+  'turn.step.interrupted',
   'turn.ended',
   'token_counting.measured',
   'token_counting.truncated',

@@ -178,8 +178,8 @@ describe('events / display re-exports', () => {
         },
         continuation: {
           state: 'held',
-          owner: 'research',
-          reason: 'A research checkpoint is pending commit.',
+          owner: 'test-participant',
+          reason: 'A continuation participant is holding the goal.',
         },
       },
       change: { kind: 'continuation' },
@@ -188,8 +188,8 @@ describe('events / display re-exports', () => {
       snapshot: {
         continuation: {
           state: 'held',
-          owner: 'research',
-          reason: 'A research checkpoint is pending commit.',
+          owner: 'test-participant',
+          reason: 'A continuation participant is holding the goal.',
         },
       },
       change: { kind: 'continuation' },

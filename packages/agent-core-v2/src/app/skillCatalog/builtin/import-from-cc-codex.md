@@ -1,13 +1,13 @@
 ---
 name: import-from-cc-codex
-description: Import Claude Code and Codex instructions, skills, and MCP settings into Kimi Code.
+description: Import Claude Code and Codex instructions, skills, and MCP settings into Hakimi.
 disable-model-invocation: true
 ---
 
 # Import from Claude Code and Codex
 
 The user invoked `/import-from-cc-codex` (or `/skill:import-from-cc-codex`).
-Help them migrate selected local Claude Code and Codex assets into Kimi Code.
+Help them migrate selected local Claude Code and Codex assets into Hakimi.
 This skill is intentionally conservative: it imports only instructions, skills,
 and MCP server declarations from `.claude` / `.codex` surfaces, with a user
 preview before any write.
@@ -23,8 +23,8 @@ preview before any write.
 - Do **not** run or install anything from the source directories.
 - Do **not** write anything until the user has chosen what to migrate, reviewed
   the final preview, and explicitly confirmed applying it.
-- Only write under Kimi Code targets:
-  - User-global: `$KIMI_CODE_HOME` if set, otherwise `~/.kimi-code`.
+- Only write under Hakimi targets:
+  - User-global: `<data-root>`, resolved below using `HAKIMI_HOME` → `KIMI_CODE_HOME` → `~/.hakimi`.
   - Project instructions/skills: `<project root>/.kimi-code`, where the project
     root is the nearest parent directory containing `.git`; if no `.git` exists,
     use the current working directory.
@@ -53,8 +53,17 @@ If the user dismisses or refuses the question, stop.
 
 ### 2. Scan only the chosen categories
 
-Resolve paths explicitly; `~` is the real OS home, and Kimi home follows
-`$KIMI_CODE_HOME` before `~/.kimi-code`.
+Resolve paths explicitly; `~` is the real OS home. Use an explicit data path
+supplied by the host when present. Otherwise resolve Hakimi's `<data-root>`
+using `HAKIMI_HOME` → `KIMI_CODE_HOME` → `~/.hakimi`:
+
+```bash
+printf '%s\n' "${HAKIMI_HOME-${KIMI_CODE_HOME-$HOME/.hakimi}}"
+```
+
+Keep that root for every user-global target; do not change environment variables
+or move existing Hakimi data to resolve it. Project-local `.kimi-code` targets
+below remain supported and are independent of the user-global data root.
 
 User-level sources:
 
@@ -103,8 +112,7 @@ source and target paths.
 
 Map user-level instruction sources to:
 
-- `$KIMI_CODE_HOME/AGENTS.md`, or `~/.kimi-code/AGENTS.md` if the env var is not
-  set.
+- `<data-root>/AGENTS.md`.
 
 Map project-level instruction sources to:
 
@@ -132,7 +140,7 @@ and cannot be read as UTF-8 text, stop before writing and report the blocker.
 
 Map user-level skill sources to:
 
-- `$KIMI_CODE_HOME/skills/`, or `~/.kimi-code/skills/` if the env var is not set.
+- `<data-root>/skills/`.
 
 Map project-level skill sources to:
 
@@ -222,8 +230,7 @@ Codex MCP:
 
 For each MCP candidate, choose the target scope in the preview:
 
-- User-level source -> user-global MCP target (`$KIMI_CODE_HOME/mcp.json` or
-  `~/.kimi-code/mcp.json`).
+- User-level source -> user-global MCP target (`<data-root>/mcp.json`).
 - Project-level source -> project-local Kimi MCP target (`<cwd>/.kimi-code/mcp.json`). If `<cwd>` is not the project root, call this out in the preview so the user understands when Kimi will load it.
 
 Warn that stdio MCP entries spawn commands at session start, and the user should

@@ -883,7 +883,8 @@ describe('DaemonKimiWebApi config and provider usage', () => {
     const [url, init] = vi.mocked(fetch).mock.calls[0]!;
     expect(url).toBe('http://daemon.test/api/v1/config/subagent-preset/auto');
     expect(init?.method).toBe('POST');
-    expect(JSON.parse(String(init?.body))).toEqual(sessionId ? { session_id: sessionId } : {});
+    expect(typeof init?.body).toBe('string');
+    expect(JSON.parse(init?.body as string)).toEqual(sessionId ? { session_id: sessionId } : {});
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 

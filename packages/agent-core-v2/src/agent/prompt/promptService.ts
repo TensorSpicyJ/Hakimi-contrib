@@ -43,6 +43,7 @@ import { ErrorCodes, Error2, isError2 } from '#/errors';
 import { OrderedHookSlot } from '#/hooks';
 import { IWireService } from '#/wire/wire';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
@@ -106,6 +107,7 @@ export class AgentPromptService implements IAgentPromptService {
     @IEventService private readonly eventService: IEventService,
     @ISessionContext private readonly sessionContext: ISessionContext,
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
+    @IAgentProfileService private readonly profile: IAgentProfileService,
   ) {
     this.states.register(promptLaunchingKey);
     toolExecutor.hooks.onDidExecuteTool.register('prompt-service-delivery', async (ctx, next) => {
@@ -253,7 +255,7 @@ export class AgentPromptService implements IAgentPromptService {
     const { message: rerouted, captions } = this.extractCompressionCaptions(message);
     const request = new SteerStepRequest(rerouted, captions, this.reminders, (materialized) => {
       this.wire.dispatch(steerTurn({ input: materialized.content, origin: materialized.origin ?? USER_PROMPT_ORIGIN }));
-    }, () => {}, 'activeOrNewTurn');
+    }, () => {}, 'activeOrNewTurn', this.profile.getProviderType());
     return (await this.loop.enqueue(request).assigned).turn;
   }
 
@@ -277,7 +279,11 @@ export class AgentPromptService implements IAgentPromptService {
         item.completionDeferred.resolve({ promptId: item.id, result: undefined, state: 'blocked' });
         this.publishCompleted(item.id, 'blocked'); return;
       }
-      const turn = (await this.loop.enqueue(new PromptStepRequest(message, captions, this.reminders)).assigned).turn;
+      const turn = (
+        await this.loop.enqueue(
+          new PromptStepRequest(message, captions, this.reminders, this.profile.getProviderType()),
+        ).assigned
+      ).turn;
       if (turn === undefined) { this.pending.unshift(item); return; }
       item.state = 'running'; item.launchedDeferred.resolve(turn); this.active = Object.assign(item, { turn });
       void turn.result.then((result) => this.settle(item, result));

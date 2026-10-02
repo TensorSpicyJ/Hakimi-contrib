@@ -45,8 +45,8 @@ import { registerPluginsRoutes } from './plugins';
 import { registerPromptsRoutes } from './prompts';
 import { registerProviderUsageRoutes } from './providerUsage';
 import { registerQuestionsRoutes } from './questions';
-import { registerResearchRoutes } from './research';
 import { registerRuntimeRoutes } from './runtime';
+import { registerResearchRoutes } from './research';
 import { registerSearchRoutes } from './search';
 import { registerSessionExportRoute } from './sessionExport';
 import { registerSessionsRoutes } from './sessions';
@@ -161,13 +161,11 @@ export async function registerApiV1Routes(
       registerSessionsRoutes(
         apiV1 as unknown as Parameters<typeof registerSessionsRoutes>[0],
         core,
+        { sessionEventCursor: (sessionId) => opts.broadcaster.getCursor(sessionId) },
         { remoteSessionId: opts.remoteAccess?.sessionId },
       );
-      registerResearchRoutes(
-        apiV1 as unknown as Parameters<typeof registerResearchRoutes>[0],
-        core,
-      );
       registerRuntimeRoutes(apiV1 as unknown as Parameters<typeof registerRuntimeRoutes>[0], core);
+      registerResearchRoutes(apiV1 as unknown as Parameters<typeof registerResearchRoutes>[0], core);
       registerSessionExportRoute(
         apiV1 as unknown as Parameters<typeof registerSessionExportRoute>[0],
         core,

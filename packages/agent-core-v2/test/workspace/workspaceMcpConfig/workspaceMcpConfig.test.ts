@@ -55,6 +55,7 @@ describe('WorkspaceMcpConfigService', () => {
   let homeDir: string;
   let disposables: DisposableStore;
   let watchFires: Map<string, Emitter<HostFsChange>>;
+  let watchedPaths: string[];
   let pluginServers: Record<string, McpServerConfig>;
   let pluginReloads: Emitter<ReloadSummary>;
   let trusted: boolean;
@@ -67,6 +68,7 @@ describe('WorkspaceMcpConfigService', () => {
     await mkdir(join(cwd, '.git'));
     disposables = new DisposableStore();
     watchFires = new Map();
+    watchedPaths = [];
     pluginServers = {};
     pluginReloads = new Emitter<ReloadSummary>();
     trusted = true;
@@ -87,6 +89,7 @@ describe('WorkspaceMcpConfigService', () => {
     return {
       _serviceBrand: undefined,
       watch: (path: string): IHostFsWatchHandle => {
+        watchedPaths.push(path);
         let emitter = watchFires.get(path);
         if (emitter === undefined) {
           emitter = new Emitter<HostFsChange>();
@@ -135,6 +138,19 @@ describe('WorkspaceMcpConfigService', () => {
     await writeFile(file, JSON.stringify({ mcpServers: servers }), 'utf8');
     return file;
   }
+
+  it('watches the three MCP candidate files directly', async () => {
+    const service = createService();
+    await service.ready;
+    await vi.waitFor(() => expect(watchedPaths).toHaveLength(3));
+
+    expect(watchedPaths).toEqual([
+      join(homeDir, 'mcp.json'),
+      join(cwd, '.mcp.json'),
+      join(cwd, '.kimi-code', 'mcp.json'),
+    ]);
+    expect(watchedPaths).not.toContain(cwd);
+  });
 
   it('merges file and plugin servers in the initial resolve (file wins name collisions)', async () => {
     await writeProjectConfig({ shared: stdioConfig('file-version'), fileOnly: stdioConfig('file') });
@@ -217,7 +233,7 @@ describe('WorkspaceMcpConfigService', () => {
     expect(service.servers()).toEqual({ alpha: stdioConfig('alpha') });
 
     await writeProjectConfig({ beta: stdioConfig('beta') });
-    watchFires.get(cwd)?.fire({ path: file, action: 'modified', kind: 'file' });
+    watchFires.get(file)?.fire({ path: file, action: 'modified', kind: 'file' });
 
     await vi.waitFor(
       () => {
@@ -238,7 +254,7 @@ describe('WorkspaceMcpConfigService', () => {
     expect(service.servers()).toEqual({ shared: stdioConfig('file-version') });
 
     await writeProjectConfig({});
-    watchFires.get(cwd)?.fire({ path: file, action: 'modified', kind: 'file' });
+    watchFires.get(file)?.fire({ path: file, action: 'modified', kind: 'file' });
 
     await vi.waitFor(
       () => {

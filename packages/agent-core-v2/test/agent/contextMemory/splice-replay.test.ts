@@ -36,6 +36,7 @@ import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { IWireService } from '#/wire/wire';
 import { AGENT_WIRE_RECORD_KEY, type WireRecord } from '#/wire/record';
+import { buildCompactionContinuationText } from '#/agent/contextMemory/compactionHandoff';
 
 import { registerTestAgentWire, restoreTestAgentWire, testWireScope } from '../../wire/stubs';
 
@@ -358,10 +359,18 @@ describe('AgentContextMemoryService (wire-backed)', () => {
     );
 
     const model = replay.wire.getModel(ContextModel) as readonly ContextMessage[];
-    expect(model.map((message) => message.role)).toEqual(['user', 'user', 'user']);
-    expect(model.map(textOf)).toEqual(['old user', 'recent user', 'model-facing summary']);
+    expect(model.map((message) => message.role)).toEqual(['user', 'user', 'user', 'user']);
+    expect(model.map(textOf)).toEqual([
+      'old user',
+      'recent user',
+      'model-facing summary',
+      buildCompactionContinuationText(),
+    ]);
     expect(model[2]).toMatchObject({
       origin: { kind: 'compaction_summary' },
+    });
+    expect(model[3]).toMatchObject({
+      origin: { kind: 'injection', variant: 'compaction_continuation' },
     });
   });
 
@@ -388,7 +397,12 @@ describe('AgentContextMemoryService (wire-backed)', () => {
     );
 
     const model = replay.wire.getModel(ContextModel) as readonly ContextMessage[];
-    expect(model.map(textOf)).toEqual(['old user', 'recent user', 'OLD SUMMARY']);
+    expect(model.map(textOf)).toEqual([
+      'old user',
+      'recent user',
+      'OLD SUMMARY',
+      buildCompactionContinuationText(),
+    ]);
     expect(model[2]).toMatchObject({
       role: 'user',
       origin: { kind: 'compaction_summary' },

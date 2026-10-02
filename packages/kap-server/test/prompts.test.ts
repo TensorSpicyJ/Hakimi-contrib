@@ -39,6 +39,7 @@ type PromptContentPart =
   | {
       type: 'image';
       source: { kind: 'base64'; media_type: string; data: string };
+      name?: string;
     };
 
 const PROMPT_TOML = [
@@ -441,7 +442,11 @@ describe('server-v2 /api/v1 prompts', () => {
     const submitted = await call<PromptItemWire>('POST', `/api/v1/sessions/${id}/prompts`, {
       content: [
         { type: 'text', text: 'what happens in this video?' },
-        { type: 'video', source: { kind: 'file', file_id: uploaded.data.id } },
+        {
+          type: 'video',
+          name: 'customer-export.mp4',
+          source: { kind: 'file', file_id: uploaded.data.id },
+        },
       ],
     });
     expect(submitted.body.code).toBe(0);
@@ -456,6 +461,7 @@ describe('server-v2 /api/v1 prompts', () => {
     expect(content[0]).toEqual({ type: 'text', text: 'what happens in this video?' });
     expect(content[1]).toEqual({
       type: 'video',
+      name: 'customer-export.mp4',
       source: { kind: 'file', file_id: uploaded.data.id },
     });
 
@@ -482,7 +488,11 @@ describe('server-v2 /api/v1 prompts', () => {
     expect(uploaded.data.size).toBe(bigPng.length);
 
     const submitted = await call<PromptItemWire>('POST', `/api/v1/sessions/${id}/prompts`, {
-      content: [{ type: 'image', source: { kind: 'file', file_id: uploaded.data.id } }],
+      content: [{
+        type: 'image',
+        name: 'customer-photo.png',
+        source: { kind: 'file', file_id: uploaded.data.id },
+      }],
     });
     expect(submitted.body.code).toBe(0);
 
@@ -501,6 +511,7 @@ describe('server-v2 /api/v1 prompts', () => {
     if (image?.type !== 'image' || image.source.kind !== 'base64') {
       throw new Error('expected resolved base64 image');
     }
+    expect(image.name).toBe('customer-photo.png');
     expect(image.source.media_type).toBe('image/png');
     expect(pngDimensions(Buffer.from(image.source.data, 'base64'))).toEqual({
       width: 2000,

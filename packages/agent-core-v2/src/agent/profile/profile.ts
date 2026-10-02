@@ -123,6 +123,7 @@ export interface ProfileModelContext {
   readonly thinkingLevel: ThinkingEffort;
   readonly reservedContextSize: number | undefined;
   readonly compactionTriggerRatio: number | undefined;
+  readonly compactionMaxAttempts: number | undefined;
 }
 
 export interface ProfileSetModelResult {
@@ -158,6 +159,7 @@ export interface IAgentProfileService {
   resolveModelContext(): ProfileModelContext;
   resolveRequestParams(): ModelRequestParams;
   getModelCapabilities(): ModelCapability;
+  getProviderType(): string | undefined;
   getMaxOutputSize(): number | undefined;
   hasModel(): boolean;
   isRunnable(): boolean;

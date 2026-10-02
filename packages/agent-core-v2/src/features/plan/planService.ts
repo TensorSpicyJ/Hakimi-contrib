@@ -9,7 +9,7 @@
  * (`agentCtx.scope()`, i.e. the homeDir-relative
  * `sessions/<ws>/<sid>/agents/<agentId>` root) with the key
  * `plan/<id>/v<N>.md`, and dispatches a reference-only `plan.revision` op
- * carrying the homeDir-relative path, sha256 and byte length. N comes from
+ * carrying that agent-relative key, sha256 and byte length. N comes from
  * the Model's replayed per-id `revisionCount`, starting at 1. Also carries
  * the plan-mode Harness constraints as an `onBeforeExecuteTool` veto
  * listener: while a plan is active, Write/Edit/apply_patch calls targeting only the
@@ -18,9 +18,8 @@
  * CronDelete/StartSession call is vetoed with a `toolApproval.formatDenyMessage`-
  * formatted reason, and an `ExitPlanMode` call outside `auto` mode defers
  * to a cold `waitUntil` factory running the `exitPlanModeReview` through the
- * shared `humanGate` transport. Plan mode is a short-lived, nestable overlay:
- * it may be active alongside Research Mode, does not mutate Research or AITP
- * state, and participates in the Goal continuation seam through
+ * shared `humanGate` transport. Plan mode is a short-lived, nestable overlay
+ * that participates in the Goal continuation seam through
  * `GoalContinuationParticipantContribution` (hold while active, abstain
  * otherwise) — Goal remains the sole continuation owner. Bound at Agent scope
  * — contributed into every Agent scope by `PlanFeature` (`features/plan/planFeature`).
@@ -310,7 +309,7 @@ export class AgentPlanService extends Service implements IAgentPlanService {
       planRevision({
         id,
         version,
-        path: `${scope}/${key}`,
+        key,
         sha256: createHash('sha256').update(bytes).digest('hex'),
         bytes: bytes.byteLength,
       }),

@@ -215,11 +215,13 @@ export function toAppMessageContent(wire: WireMessageContent): AppMessageContent
       return {
         type: 'image',
         source: toAppImageSource(wire.source),
+        name: wire.name,
       };
     case 'video':
       return {
         type: 'video',
         source: toAppImageSource(wire.source),
+        name: wire.name,
       };
     case 'file':
       return {
@@ -288,7 +290,7 @@ function toWireMessageContent(app: AppMessageContent): WireMessageContent {
       } else {
         wireSrc = { kind: 'url', url: src.url, id: src.id };
       }
-      return { type: app.type, source: wireSrc };
+      return { type: app.type, name: app.name, source: wireSrc };
     }
     case 'file':
       return {

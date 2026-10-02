@@ -82,6 +82,13 @@ export class EditorKeyboardController {
       host.handleUserInput(text);
     };
 
+    editor.onEmptyLeft = () => {
+      if (!host.engineV2) return false;
+      const busy = host.state.appState.streamingPhase !== 'idle' || host.state.appState.isCompacting;
+      host.handleUserInput(busy ? '/research agents' : '/research');
+      return true;
+    };
+
     editor.onChange = (text: string) => {
       if (this.pendingExit) this.clearPendingExit();
       host.updateEditorBorderHighlight(text);

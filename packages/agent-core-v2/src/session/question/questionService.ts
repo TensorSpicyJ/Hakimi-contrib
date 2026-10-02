@@ -15,7 +15,10 @@ import { randomUUID } from 'node:crypto';
 import { LifecycleScope } from '#/app/scopes';
 
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
-import { ISessionInteractionService } from '#/session/interaction/interaction';
+import {
+  isInteractionCancellation,
+  ISessionInteractionService,
+} from '#/session/interaction/interaction';
 
 import {
   type QuestionRequest,
@@ -28,14 +31,24 @@ export class SessionQuestionService implements ISessionQuestionService {
 
   constructor(@ISessionInteractionService private readonly interaction: ISessionInteractionService) {}
 
-  request(req: QuestionRequest, options?: { signal?: AbortSignal; agentId?: string }): Promise<QuestionResult> {
+  request(
+    req: QuestionRequest,
+    options?: { signal?: AbortSignal; agentId?: string; detached?: boolean },
+  ): Promise<QuestionResult> {
     const id = requestId(req);
-    const pending = this.interaction.request<QuestionRequest, QuestionResult>({
-      id,
-      kind: 'question',
-      payload: req,
-      origin: { turnId: req.turnId, agentId: options?.agentId },
-    });
+    const pending = this.interaction
+      .request<QuestionRequest, unknown>({
+        id,
+        kind: 'question',
+        payload: req,
+        origin: {
+          turnId: options?.detached === true ? undefined : req.turnId,
+          agentId: options?.agentId,
+        },
+      })
+      .then((response) =>
+        isInteractionCancellation(response) ? null : (response as QuestionResult),
+      );
 
     const signal = options?.signal;
     if (signal !== undefined) {

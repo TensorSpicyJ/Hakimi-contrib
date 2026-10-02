@@ -14,7 +14,7 @@ The following keys are always available in the input box:
 | `Esc` | Close a popup / cancel completion / interrupt streaming output or context compaction |
 | `Ctrl-C` | Interrupt the current streaming output, or clear the input box |
 | `Ctrl-D` | Exit Hakimi when the input box is empty |
-| `Ctrl-T` | Expand or collapse the standalone todo list when it is truncated outside Research Mode |
+| `Ctrl-T` | Expand or collapse the standalone todo list when it is truncated |
 
 Pressing `Ctrl-C` **during streaming** cancels immediately — no second confirmation needed.
 
@@ -39,6 +39,7 @@ Type `!` in an empty input box to enter shell mode and run terminal commands dir
 | `Ctrl-V` | Paste an image or video from the clipboard (Unix / macOS) |
 | `Alt-V` | Paste an image or video from the clipboard (Windows) |
 | `Ctrl--` | Undo |
+| `←` in an empty prompt | Open the research topic directory while idle, or inspect agent tasks during streaming (v2) |
 | `Esc` `Esc` | Open the undo selector (double-press while idle) |
 
 Pressing `Ctrl-G` opens an external editor, selected according to the following priority:
@@ -67,9 +68,9 @@ Pressing `Ctrl-S` causes the model to see your message at the next interruptible
 
 | Shortcut | Function |
 | --- | --- |
-| `Ctrl-O` | Expand or collapse tool output, compaction summaries, and the Research Board |
+| `Ctrl-O` | Expand or collapse tool output and compaction summaries |
 
-When collapsed tool call results exist in the history, press `Ctrl-O` to toggle between collapsed and expanded views. In Research Mode, the same shortcut expands or collapses the Research Board in the Todo slot, including its Research Line summary and Actions projection. After compaction, the same shortcut shows or hides the compaction summary in the compaction block.
+When collapsed tool call results exist in the history, press `Ctrl-O` to toggle between collapsed and expanded views. After compaction, the same shortcut shows or hides the compaction summary in the compaction block.
 
 ## Approval Panel
 

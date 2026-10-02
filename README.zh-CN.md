@@ -65,6 +65,8 @@ Hakimi Web 会在 Research Mode 变化后刷新当前会话的 `/` Skill 菜单�
 
 目标上游是官方 [AITP 插件 1.1.0](https://github.com/bhjia-phys/AITP-Research-Protocol/tree/0f6dc4cdea09106a46d53cf6355b09a924d8e21b)，插件 id `aitp`，manifest build `1.1.0+codex.20260914182315`，来源是下载的源码归档，不是 Git checkout 或 release tag。其四个核心 Skill——`aitp-memory`、`aitp-research`、`aitp-writing`、`aitp-distill`——仍是协议依据；Hakimi 不复制其内容，也不自动批准或发布方法。该插件已作为 managed plugin 安装到本地 Hakimi home。**AITP 1.1.0 没有 CLI、没有账本、没有 session hook**：记忆就是用宿主既有工具读写的普通 Markdown 与 TeX，因此没有 `aitp --help` 可核验，也没有账本可写。
 
+2026 年 10 月 2 日的最新源码复核使用 [AITP revision `7b5df43`](https://github.com/bhjia-phys/AITP-Research-Protocol/tree/7b5df435bc16b9806557d09fc242dc18a5d66019)，manifest build 为 `1.1.0+codex.20260927155546`。已确认纯 Skill 契约和 `docs/hakimi/` 目录的缺席；本次没有更新单独安装的插件。详见 [兼容性复核](docs/aitp/compatibility-matrix.md#aitp-source-recheck-20261002)。
+
 已实现的后端生产依赖图不再挂载 host ResearchService、Line/Question/Action 管理、Research Plan、checkpoint/loop/maintenance/distillation 机制、Research Goal veto、native adapter 或八个 `aitp_*` wrappers。历史记录通过原始会话日志或会话 export 只读查阅，不再提供结构化 Research history API 或 Manager。旧研究管理及推进 mutation 不再支持，不提供第二套 legacy 执行模式。已有 AITP 记录保留，不自动迁移或 backfill，也不恢复旧 CLI 去读取它们。
 
 普通 Goal、Plan 和权限行为不变。取消 host Research veto 后，普通文件工具没有额外保证阻止直接访问课题的记忆文件：官方 Skill 的文件约定是协议规则，不是 OS 级隔离。一次无模型 smoke 确认进入模式后只暴露官方四个 Skill，且不写记忆或知识文件；这是单个 fixture，不是科学结果，也不代表普遍模型适配。使用方式和剩余收口项见[研究模式指南](docs/zh/guides/research-mode.md)与[部署记录](docs/aitp/TRACKING.md#aitp-plugin-1-1-0-20260915)。

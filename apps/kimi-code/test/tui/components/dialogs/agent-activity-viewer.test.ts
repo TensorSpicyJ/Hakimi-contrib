@@ -221,13 +221,11 @@ describe('AgentActivityViewer', () => {
     expect(text).toContain('Found 3 call sites.');
   });
 
-  it('closes on q and escape', () => {
+  it.each(['q', '\u001B', '\u001B[D'])('returns to the agent directory on %j', (key) => {
     const onClose = vi.fn();
     const viewer = makeViewer({ record: record(), onClose });
-    viewer.handleInput('q');
+    viewer.handleInput(key);
     expect(onClose).toHaveBeenCalledTimes(1);
-    viewer.handleInput('\u001B');
-    expect(onClose).toHaveBeenCalledTimes(2);
   });
 });
 

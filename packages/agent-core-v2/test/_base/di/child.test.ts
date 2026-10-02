@@ -14,6 +14,40 @@ import { InstantiationService } from '#/_base/di/instantiationService';
 import { Disposable, type IDisposable } from '#/_base/di/lifecycle';
 import { ServiceCollection } from '#/_base/di/serviceCollection';
 
+function collectReachable(root: unknown, cap = 200_000): Set<unknown> {
+  const seen = new Set<unknown>();
+  const queue: unknown[] = [root];
+  while (queue.length > 0 && seen.size < cap) {
+    const value = queue.shift()!;
+    if (value === null || (typeof value !== 'object' && typeof value !== 'function')) {
+      continue;
+    }
+    if (seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    if (value instanceof Map) {
+      for (const [key, entry] of value) {
+        queue.push(key, entry);
+      }
+      continue;
+    }
+    if (value instanceof Set) {
+      for (const entry of value) {
+        queue.push(entry);
+      }
+      continue;
+    }
+    if (typeof value === 'function') {
+      continue;
+    }
+    for (const key of Object.keys(value)) {
+      queue.push((value as Record<string, unknown>)[key]);
+    }
+  }
+  return seen;
+}
+
 interface ILogger {
   log(msg: string): void;
   name: string;
@@ -350,6 +384,93 @@ describe('InstantiationService.createChild', () => {
     expect(parent.invokeFunction((a) => a.get(IB).value)).toBe(1);
     expect(() => child.invokeFunction((a) => a.get(IB))).toThrow(/disposed/);
 
+    parent.dispose();
+  });
+
+  it('releases a retired service-backed edge node', async () => {
+    interface IParentSvc {
+      tag: string;
+    }
+    interface IChildSvc {
+      tag: string;
+    }
+    const IParentSvc = createDecorator<IParentSvc>('retire-edge-parent');
+    const IChildSvc = createDecorator<IChildSvc>('retire-edge-child');
+    class ParentSvc implements IParentSvc {
+      tag = 'parent';
+    }
+    class ChildSvc implements IChildSvc {
+      tag = 'child';
+      constructor(@IParentSvc readonly parent: IParentSvc) {}
+    }
+
+    const parent = new InstantiationService(
+      new ServiceCollection([IParentSvc, new SyncDescriptor(ParentSvc)]),
+    );
+    const child = parent.createChild(
+      new ServiceCollection([IChildSvc, new SyncDescriptor(ChildSvc)]),
+    ) as InstantiationService;
+    parent.invokeFunction((accessor) => accessor.get(IParentSvc));
+    const childInstance = child.invokeFunction((accessor) => accessor.get(IChildSvc));
+    child.fiberHost.recordInstanceEdge(childInstance, IChildSvc);
+
+    expect(
+      parent.cascadeTree.graph.edges().some((edge) => edge.consumer.token === IChildSvc),
+    ).toBe(true);
+
+    child.unprovide(IChildSvc);
+    await child.cascade.whenIdle();
+
+    expect(
+      parent.cascadeTree.graph.edges().some((edge) => edge.consumer.token === IChildSvc),
+    ).toBe(false);
+    expect(collectReachable(parent).has(childInstance)).toBe(false);
+    parent.dispose();
+  });
+
+  it('detaches disposed child scopes and their anonymous edge nodes', () => {
+    interface IParentSvc {
+      tag: string;
+    }
+    interface IChildSvc {
+      tag: string;
+    }
+    const IParentSvc = createDecorator<IParentSvc>('detach-scope-parent');
+    const IChildSvc = createDecorator<IChildSvc>('detach-scope-child');
+    class ParentSvc implements IParentSvc {
+      tag = 'parent';
+    }
+    class ChildSvc implements IChildSvc {
+      tag = 'child';
+      constructor(@IParentSvc readonly parent: IParentSvc) {}
+    }
+
+    const parent = new InstantiationService(
+      new ServiceCollection([IParentSvc, new SyncDescriptor(ParentSvc)]),
+    );
+    const child = parent.createChild(
+      new ServiceCollection([IChildSvc, new SyncDescriptor(ChildSvc)]),
+    ) as InstantiationService;
+    parent.invokeFunction((accessor) => accessor.get(IParentSvc));
+    const childInstance = child.invokeFunction((accessor) => accessor.get(IChildSvc));
+    const anonymousUnitNode = { marker: 'anonymous-unit' };
+    child.fiberHost.recordInstanceEdge(anonymousUnitNode, IChildSvc);
+    const graph = parent.cascadeTree.graph;
+
+    expect(graph.edges().length).toBeGreaterThan(0);
+    expect(parent.cascadeTree.seqOf(child)).toBeGreaterThanOrEqual(0);
+
+    child.dispose();
+
+    for (const edge of graph.edges()) {
+      expect(edge.consumer.scope).not.toBe(child);
+      expect(edge.dependency.scope).not.toBe(child);
+    }
+    expect(parent.cascadeTree.seqOf(child)).toBe(-1);
+    const reachable = collectReachable(parent);
+    expect(reachable.has(child)).toBe(false);
+    expect(reachable.has(childInstance)).toBe(false);
+    expect(reachable.has(anonymousUnitNode)).toBe(false);
     parent.dispose();
   });
 });

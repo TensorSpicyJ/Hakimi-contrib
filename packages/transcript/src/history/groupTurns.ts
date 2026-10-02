@@ -42,7 +42,11 @@ export type HistoryMediaSource =
 export type HistoryContentPart =
   | { readonly type: 'text'; readonly text: string }
   | { readonly type: 'think'; readonly think: string }
-  | { readonly type: 'image' | 'video' | 'audio'; readonly source: HistoryMediaSource }
+  | {
+      readonly type: 'image' | 'video' | 'audio';
+      readonly source: HistoryMediaSource;
+      readonly name?: string;
+    }
   | {
       readonly type: 'file';
       readonly file_id: string;
@@ -121,8 +125,10 @@ export function groupMessagesIntoSnapshot(
       if (part.type === 'image' || part.type === 'video' || part.type === 'audio') {
         if (!('source' in part) || part.source === undefined) continue;
         const source = part.source as HistoryMediaSource;
+        const name = 'name' in part && typeof part.name === 'string' ? part.name : undefined;
         const entity: TranscriptAttachment = {
           attachmentId: `att_${attachments.length + 1}`,
+          name,
           mediaType:
             source.kind === 'base64' ? source.media_type : `${part.type}/*`,
           source:

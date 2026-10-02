@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { MODEL_CROSS_REDUCERS } from '#/wire/model';
-import { TurnModel, cancelTurn, endTurn, promptTurn } from '#/agent/loop/turnOps';
+import { TurnModel, cancelTurn, endTurn, interruptStep, promptTurn } from '#/agent/loop/turnOps';
 
 function foldLoopEvent(s: import('#/agent/loop/turnOps').TurnModelState, turnId: string) {
   const entries = MODEL_CROSS_REDUCERS.get('context.append_loop_event') ?? [];
@@ -44,5 +44,35 @@ describe('TurnModel lastEnded', () => {
 
   it('starts without a stored outcome', () => {
     expect(TurnModel.initial().lastEnded).toBeUndefined();
+  });
+});
+
+describe('turn.step.interrupted', () => {
+  it('keeps the turn clock and projects the durable record onto the bus event', () => {
+    const state = TurnModel.initial();
+    const payload = {
+      turnId: 1,
+      step: 2,
+      stepId: 'step-uuid',
+      reason: 'aborted',
+      message: 'boom',
+    };
+    expect(interruptStep.apply(state, payload)).toBe(state);
+    expect(interruptStep.toEvent?.(payload, state)).toEqual({
+      type: 'turn.step.interrupted',
+      turnId: 1,
+      step: 2,
+      stepId: 'step-uuid',
+      reason: 'aborted',
+      message: 'boom',
+    });
+  });
+
+  it('accepts a record without stepId or message', () => {
+    expect(interruptStep.schema.parse({ turnId: 0, step: 1, reason: 'max_steps' })).toEqual({
+      turnId: 0,
+      step: 1,
+      reason: 'max_steps',
+    });
   });
 });

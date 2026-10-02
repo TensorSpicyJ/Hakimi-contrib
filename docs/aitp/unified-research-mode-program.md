@@ -674,24 +674,24 @@ runner, artifact schema, or platform service.
 
 ### S9 closure evidence (2026-09-01)
 
-S9 used the initialized `/home/bhjia/physics/GW_librpa` workspace and the
-existing immutable ABACUS job-1097 packet. The source checkout was re-verified
-at dirty HEAD `f20aeb9e562ac66dcd59617ea4ceb07cffabe8b2`; no source file,
+S9 used an initialized research workspace and an
+existing immutable local calculation packet. The source checkout was re-verified
+at its recorded dirty revision; no source file,
 remote host, scheduler, MPI process, or ABACUS executable was mutated or run.
 The bounded local verifier checked all nine `MANIFEST.sha256` members and
 independently reproduced the 313-row union counts: 203 `PASS_ALL`, 59
 `MERGE_PASS_PARENT_NONPASS`, 28 `INHERITED_BOTH`, 16 `INHERITED_SOC`, and 7
 `ENVIRONMENT_REPRODUCED_ALL`, with 22 manual-evidence rows and zero blocking
 classes. This revalidates only the local packet and does not transfer evidence
-from checkpoint `7ef8506a8` to current HEAD or strengthen physical claims.
+from an earlier recorded checkpoint to current HEAD or strengthen physical claims.
 
 The researcher's instruction that reusable knowledge require real validation
 was kept separate from the agent/tool result. A wrong expected checkpoint
 exited 2 and wrote no result; the correct run created a deterministic report;
 the identical retry returned `unchanged`. AITP scoped pre-check was clean with
 71 errors and 201 warnings explicitly outside scope. Atomic 0.9.0 save under
-Topic `gw-librpa` and exact workstream `hakimi-s9-abacus-union-audit` created
-`entry-a071eb42792548f685520d4492615a63`; canonical `show` and scoped
+the recorded Topic and exact workstream created
+an Entry whose private identifier is omitted; canonical `show` and scoped
 post-check passed, and the identical save retry returned `already_saved`.
 
 The Entry carries one low-trust
@@ -757,8 +757,8 @@ timeout. Research wire tests shown in those runs passed, and the Research-only
 SDK RPC subset passed 13/13. These failures remain non-green and were not
 silently converted into Program evidence.
 
-The immutable S10 summary is
-`/home/bhjia/physics/GW_librpa/.scratch/hakimi-s10-unified-research-mode-20260901/S10_VERIFICATION.md`.
+The immutable S10 summary remains in the private local verification notes;
+its filesystem location is omitted from this public record.
 No ABACUS, MPI, SSH, scheduler, or remote action ran. No AITP runtime, CLI,
 schema, contract, fixture, Skill rule, or human-decision semantic changed in
 S10. The Program-owned changesets now express CLI patch and SDK major exactly;

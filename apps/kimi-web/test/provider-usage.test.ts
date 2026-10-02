@@ -60,7 +60,7 @@ describe('provider usage presentation helpers', () => {
   it('handles missing and invalid reset timestamps explicitly', () => {
     expect(formatProviderUsageReset(undefined, 'en-US')).toBeNull();
     expect(formatProviderUsageReset('not-a-date', 'en-US')).toBe('not-a-date');
-    expect(formatProviderUsageReset('2030-01-01T00:00:00Z', 'en-US')).toContain('2030');
+    expect(formatProviderUsageReset('2030-06-15T12:00:00Z', 'en-US')).toContain('2030');
   });
 
   it('formats currency values from whole cents', () => {

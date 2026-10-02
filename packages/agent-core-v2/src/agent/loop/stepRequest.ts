@@ -22,6 +22,7 @@ export type StepRequestState = 'pending' | 'materialized' | 'aborted';
 
 export type StepRequestAdmission =
   | 'newTurn'
+  | 'nextTurn'
   | 'activeOrNewTurn'
   | 'activeOrNextTurn'
   | 'activeTurnOnly';

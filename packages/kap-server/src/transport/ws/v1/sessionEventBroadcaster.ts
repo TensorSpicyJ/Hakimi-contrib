@@ -776,6 +776,9 @@ export class SessionEventBroadcaster {
     if (this.closed) return;
     this.closed = true;
     this.coreEventSubscription.dispose();
+    await Promise.all(
+      [...this.pendingStates.values()].map((pending) => pending.catch(() => undefined)),
+    );
     for (const [sessionId, state] of this.sessions) {
       await disposeSessionState(state);
       // Transcript bindings die with the session stream (its store
@@ -843,7 +846,8 @@ export class SessionEventBroadcaster {
     return state;
   }
 
-  private ensureGlobalState(): Promise<SessionState> {
+  private ensureGlobalState(): Promise<SessionState | undefined> {
+    if (this.closed) return Promise.resolve(undefined);
     const existing = this.sessions.get(GLOBAL_SESSION_ID);
     if (existing !== undefined) return Promise.resolve(existing);
     let pending = this.pendingStates.get(GLOBAL_SESSION_ID);
@@ -855,14 +859,18 @@ export class SessionEventBroadcaster {
       });
       this.pendingStates.set(GLOBAL_SESSION_ID, pending);
     }
-    return pending as Promise<SessionState>;
+    return pending;
   }
 
-  private async createGlobalState(): Promise<SessionState> {
+  private async createGlobalState(): Promise<SessionState | undefined> {
     const journal = await SessionEventJournal.open(
       sessionJournalPath(this.opts.eventsDir, GLOBAL_SESSION_ID),
       this.opts.logger,
     );
+    if (this.closed) {
+      await journal.close();
+      return undefined;
+    }
     const state: SessionState = {
       sessionId: GLOBAL_SESSION_ID,
       journal,
@@ -1057,6 +1065,7 @@ export class SessionEventBroadcaster {
 
   private async dispatchGlobal(event: Event): Promise<void> {
     const state = await this.ensureGlobalState();
+    if (state === undefined) return;
     state.queue = state.queue
       .then(() => this.dispatch(state, event, isVolatileEventType(event.type)))
       .catch((error: unknown) => this.logDispatchDropped(state.sessionId, event.type, error));
@@ -1207,9 +1216,6 @@ export class SessionEventBroadcaster {
     const state = this.sessions.get(sessionId);
     if (state === undefined) return;
 
-    // The persisted Research world-clock op uses this Agent-bus fact only as
-    // an in-process post-apply signal. It is not part of the public v1 event
-    // contract and must consume neither a replay sequence nor journal space.
     if (event.type === 'research.revision_advanced') return;
 
     // Map the native v2 activity state to the legacy v1 `agent.status.updated`
@@ -1517,9 +1523,9 @@ function isAgentLifecycleEvent(type: string): boolean {
  * `filter`:
  *   - `filter === undefined` → receive every agent (legacy session-grained
  *     behavior);
- *   - global events (session/workspace/config) and agent lifecycle events
- *     (`agent.created` / `agent.disposed`) are not per-agent stream content
- *     and always pass;
+ *   - global events (session/workspace/config), agent lifecycle events
+ *     (`agent.created` / `agent.disposed`), and session interactions always
+ *     pass so selecting an agent cannot hide a pending approval or question;
  *   - events without a string `agentId` (should not happen on the v1 wire,
  *     where the broadcaster stamps every event) pass defensively rather than
  *     being dropped;
@@ -1529,6 +1535,9 @@ function matchesAgentFilter(envelope: EventEnvelope, filter: AgentFilter): boole
   if (filter === undefined) return true;
   if (isGlobalEvent(envelope.type)) return true;
   if (isAgentLifecycleEvent(envelope.type)) return true;
+  if (envelope.type.startsWith('event.approval.') || envelope.type.startsWith('event.question.')) {
+    return true;
+  }
   const payload = envelope.payload;
   const agentId =
     typeof payload === 'object' && payload !== null

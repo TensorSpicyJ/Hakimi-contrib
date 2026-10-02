@@ -19,6 +19,10 @@ export const MISSIONS_INDEX = `${COMMS_DIR}/MISSIONS.md`;
 export const TOWER_NAME = 'tower';
 export const BROADCAST_NAME = 'all';
 
+export function isReservedTowerAgentName(name: string): boolean {
+  return name === TOWER_NAME || name === BROADCAST_NAME;
+}
+
 /** Local YYYYMMDD, used at the start of inbox/finding file names. */
 export function dateStamp(now = new Date()): string {
   const y = now.getFullYear();

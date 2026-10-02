@@ -10,7 +10,10 @@
  * agent tool implements. Also owns the `ToolAccesses`
  * resource-access declarations an execution emits so the host scheduler can
  * run non-conflicting calls concurrently (together with their conflict
- * semantics), and the `isMcpToolName` name predicate. The `stopTurn` /
+ * semantics), the `DEFAULT_TOOL_RESULT_MAX_CHARS` text-result cap above which
+ * `toolResultTruncation` spills a result to disk (producers that size their own
+ * output, such as the Glob page budget, must stay within it to keep their
+ * notices inline), and the `isMcpToolName` name predicate. The `stopTurn` /
  * `stopBatchAfterThis` fields are internal loop-control hints stripped
  * before persistence. No scoped service.
  */
@@ -21,6 +24,8 @@ import type { LLMRequestTrace } from '#/kosong/contract/requestTrace';
 import type { ToolInputDisplay } from '@moonshot-ai/protocol';
 
 export type ExecutableToolOutput = string | ContentPart[];
+
+export const DEFAULT_TOOL_RESULT_MAX_CHARS = 50_000;
 
 export type ToolDeliveryKind = 'steer';
 
@@ -41,6 +46,7 @@ export interface ExecutableToolSuccessResult {
   readonly isError?: false | undefined;
   readonly stopTurn?: boolean | undefined;
   readonly truncated?: boolean | undefined;
+  readonly spillExempt?: true | undefined;
   readonly note?: string;
   readonly delivery?: ToolDelivery | undefined;
 }
@@ -50,6 +56,7 @@ export interface ExecutableToolErrorResult {
   readonly isError: true;
   readonly stopTurn?: boolean | undefined;
   readonly truncated?: boolean | undefined;
+  readonly spillExempt?: true | undefined;
   readonly note?: string;
   readonly delivery?: ToolDelivery | undefined;
 }

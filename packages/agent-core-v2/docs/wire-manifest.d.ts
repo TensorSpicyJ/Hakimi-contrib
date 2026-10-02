@@ -21,7 +21,7 @@
 // owning model offloads inline media to blob storage), cross-reducers
 // (foreign models that also reduce this record on dispatch and replay).
 
-// Index (100 record types)
+// Index (101 record types)
 //   aitp_mode.enter                         aitpMode                    persisted  src/features/aitpResearch/aitpResearchOps.ts
 //   aitp_mode.exit                          aitpMode                    persisted  src/features/aitpResearch/aitpResearchOps.ts
 //   aitp_mode.set_line                      aitpMode                    persisted  src/features/aitpResearch/aitpResearchOps.ts
@@ -121,6 +121,7 @@
 //   turn.ended                              turn                        persisted  src/agent/loop/turnOps.ts
 //   turn.prompt                             turn                        persisted  src/agent/loop/turnOps.ts
 //   turn.steer                              turn                        persisted  src/agent/loop/turnOps.ts
+//   turn.step.interrupted                   turn                        persisted  src/agent/loop/turnOps.ts
 //   usage.record                            usage                       persisted  src/agent/usage/usageOps.ts
 
 /**
@@ -591,7 +592,7 @@ interface PlanRevisionPayload {
   _name: 'plan.revision';
   id: string;
   version: number;
-  path: string;
+  key: string;
   sha256: string;
   bytes: number;
 }
@@ -1571,6 +1572,19 @@ interface TurnSteerPayload {
 }
 
 /**
+ * model: turn · persisted · toEvent
+ * owner: src/agent/loop/turnOps.ts
+ */
+interface TurnStepInterruptedPayload {
+  _name: 'turn.step.interrupted';
+  turnId: number;
+  step: number;
+  stepId?: string;
+  reason: string;
+  message?: string;
+}
+
+/**
  * model: usage · persisted
  * owner: src/agent/usage/usageOps.ts
  */
@@ -1689,5 +1703,6 @@ interface WirePayloadMap {
   "turn.ended": TurnEndedPayload;
   "turn.prompt": TurnPromptPayload;
   "turn.steer": TurnSteerPayload;
+  "turn.step.interrupted": TurnStepInterruptedPayload;
   "usage.record": UsageRecordPayload;
 }

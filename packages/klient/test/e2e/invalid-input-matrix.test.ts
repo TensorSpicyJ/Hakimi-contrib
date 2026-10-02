@@ -93,7 +93,7 @@ const M_GOOGLE = 'matrix-google';
 
 const KIMI_PROVIDER = 'matrix-kimi-provider';
 
-const IMAGE_BAD_MIME_URL = 'data:image/bmp;base64,QUJD'; // bmp is outside every base's allowlist
+const IMAGE_BAD_MIME_URL = 'data:image/tiff;base64,QUJD'; // tiff is outside every provider's allowlist (incl. kimi's declared extras)
 const IMAGE_BAD_BASE64_URL = 'data:image/png;base64,%%%not-base64%%%';
 const VIDEO_HTTP_URL = 'https://example.com/clip.mp4';
 const VIDEO_BAD_MIME_URL = 'data:video/x-ms-wmv;base64,QUJD';
@@ -520,9 +520,14 @@ describe('l1: klient input validation', () => {
 
     // klient's zod schema allows an empty array; the engine's prompt service
     // only appends non-empty user messages, so the request leaves with the
-    // system prompt alone. The turn still completes.
+    // system prompt alone. The turn still completes. (The default-on
+    // research integration injects a step-head reminder as a separate user
+    // message; it is not conversation content, so filter it out.)
     expect(requests).toHaveLength(1);
-    const messages = openAiMessages(0);
+    const messages = openAiMessages(0).filter(
+      (message) =>
+        !(typeof message['content'] === 'string' && message['content'].includes('<system-reminder>')),
+    );
     expect(messages.every((message) => message['role'] === 'system')).toBe(true);
     expect(ctx.payloads('prompt.completed')[0]?.['reason']).toBe('completed');
   }, 30_000);
@@ -535,15 +540,17 @@ describe('l1: klient input validation', () => {
 describe('image blocks with invalid data', () => {
   it('a data-URL image with an unaccepted mime is replaced at prompt ingestion on EVERY provider (l2)', async () => {
     // PromptStepRequest gates image parts through gateImageFormatParts before
-    // the turn starts: image/bmp never reaches any provider's conversion
+    // the turn starts: image/tiff never reaches any provider's conversion
     // layer — it becomes a text notice, the request goes out without the
     // image, and the turn completes. This is the engine's "session
-    // poisoning" defense and is provider-independent.
+    // poisoning" defense and is provider-independent. (kimi declares bmp /
+    // heic / heif as accepted, so those mimes pass the gate there by design;
+    // the probe uses a mime outside every provider's allowlist.)
     const cases = [
-      { label: 'bmp-openai', model: M_OPENAI, reply: OK_OPENAI },
-      { label: 'bmp-kimi', model: M_KIMI, reply: OK_OPENAI },
-      { label: 'bmp-anthropic', model: M_ANTHROPIC, reply: OK_ANTHROPIC },
-      { label: 'bmp-google', model: M_GOOGLE, reply: OK_GOOGLE },
+      { label: 'tiff-openai', model: M_OPENAI, reply: OK_OPENAI },
+      { label: 'tiff-kimi', model: M_KIMI, reply: OK_OPENAI },
+      { label: 'tiff-anthropic', model: M_ANTHROPIC, reply: OK_ANTHROPIC },
+      { label: 'tiff-google', model: M_GOOGLE, reply: OK_GOOGLE },
     ] as const;
     for (const { label, model, reply } of cases) {
       const ctx = await newCase(model, label);
@@ -554,8 +561,8 @@ describe('image blocks with invalid data', () => {
       ]);
       expect(requests, label).toHaveLength(1);
       const wireText = JSON.stringify(requests[0]?.json);
-      expect(wireText, label).toContain('unsupported image format image/bmp');
-      expect(wireText, label).not.toContain('image/bmp;base64');
+      expect(wireText, label).toContain('unsupported image format image/tiff');
+      expect(wireText, label).not.toContain('image/tiff;base64');
       expect(ctx.payloads('prompt.completed')[0]?.['reason'], label).toBe('completed');
     }
   }, 60_000);
@@ -586,8 +593,13 @@ describe('image blocks with invalid data', () => {
 
     expect(requests).toHaveLength(2);
     // Ingestion accepts the declared mime (png) without validating the
-    // payload; the OpenAI base forwards the data URL verbatim.
-    const firstContent = openAiMessages(0).at(-1)?.['content'] as unknown[];
+    // payload; the OpenAI base forwards the data URL verbatim. (The
+    // default-on research integration appends a step-head reminder string
+    // after the prompt message, so locate the prompt by its array content
+    // rather than by position.)
+    const firstContent = openAiMessages(0)
+      .filter((message) => Array.isArray(message['content']))
+      .at(-1)?.['content'] as unknown[];
     expect(firstContent).toContainEqual({
       type: 'image_url',
       image_url: { url: IMAGE_BAD_BASE64_URL },
@@ -595,7 +607,9 @@ describe('image blocks with invalid data', () => {
     // The 400 + "invalid image" body classifies as an image-format error, so
     // llmRequester resends with the media stripped to a placeholder — and the
     // turn succeeds.
-    const secondContent = openAiMessages(1).at(-1)?.['content'] as unknown[];
+    const secondContent = openAiMessages(1)
+      .filter((message) => Array.isArray(message['content']))
+      .at(-1)?.['content'] as unknown[];
     expect(secondContent.some((part) => (part as { type?: string }).type === 'image_url')).toBe(
       false,
     );
@@ -613,12 +627,18 @@ describe('image blocks with invalid data', () => {
     ]);
 
     expect(requests).toHaveLength(2);
-    const firstContent = openAiMessages(0).at(-1)?.['content'] as unknown[];
+    // Research reminders are appended after the prompt messages; locate the
+    // prompt content by its array shape.
+    const firstContent = openAiMessages(0)
+      .filter((message) => Array.isArray(message['content']))
+      .at(-1)?.['content'] as unknown[];
     expect(firstContent).toContainEqual({
       type: 'image_url',
       image_url: { url: IMAGE_BAD_BASE64_URL },
     });
-    const secondContent = openAiMessages(1).at(-1)?.['content'] as unknown[];
+    const secondContent = openAiMessages(1)
+      .filter((message) => Array.isArray(message['content']))
+      .at(-1)?.['content'] as unknown[];
     expect(secondContent.some((part) => (part as { type?: string }).type === 'image_url')).toBe(
       false,
     );
@@ -1006,14 +1026,20 @@ describe('tool exchange structure', () => {
 
     expect(requests).toHaveLength(2);
     const userMessages = openAiMessages(1).filter((message) => message['role'] === 'user');
+    // Research-mode reminders are injected at the step head and appended at
+    // the request end; strip them so the structural assertion below is about
+    // the interruption reminder only.
+    const coreMessages = userMessages.filter(
+      (message) => !String(message['content']).includes('Research mode uses'),
+    );
     // A deliberate user cancel injects an interruption reminder between the
     // aborted turn's prompt and the next user message, so the two prompts no
     // longer merge into one wire message.
-    expect(userMessages).toHaveLength(3);
-    expect(String(userMessages[0]?.['content'])).toContain('first message');
-    expect(String(userMessages[1]?.['content'])).toContain('<system-reminder>');
-    expect(String(userMessages[1]?.['content'])).toContain('interrupted by the user');
-    expect(String(userMessages[2]?.['content'])).toContain('second message');
+    expect(coreMessages).toHaveLength(3);
+    expect(String(coreMessages[0]?.['content'])).toContain('first message');
+    expect(String(coreMessages[1]?.['content'])).toContain('<system-reminder>');
+    expect(String(coreMessages[1]?.['content'])).toContain('interrupted by the user');
+    expect(String(coreMessages[2]?.['content'])).toContain('second message');
     expect(ctx.payloads('prompt.completed')[0]?.['reason']).toBe('completed');
   }, 60_000);
 });

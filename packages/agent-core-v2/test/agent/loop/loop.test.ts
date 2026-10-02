@@ -1430,7 +1430,7 @@ describe('interruption reminder', () => {
     expect(interruptionReminders()).toHaveLength(0);
   });
 
-  it('preserves partial thinking on user cancel', async () => {
+  it('drops unsigned thinking but keeps signed thinking on user cancel', async () => {
     ctx.mockNextResponse({ type: 'think', think: 'pondering' }, { type: 'text', text: 'answer' });
     const subscription = ctx.get(IEventBus).subscribe('thinking.delta', () => {
       loop.cancel();
@@ -1439,13 +1439,33 @@ describe('interruption reminder', () => {
     await expect(turn.result).resolves.toMatchObject({ type: 'cancelled' });
     subscription.dispose();
 
+    const thinkParts = ctx
+      .contextData()
+      .history.flatMap((message) => message.content)
+      .filter((part) => part.type === 'think');
+    expect(thinkParts).toEqual([]);
+    expect(interruptionReminders()).toHaveLength(1);
+
+    ctx.mockNextResponse(
+      { type: 'think', think: 'seg', encrypted: 'sig' },
+      { type: 'text', text: 'partial answer' },
+    );
+    const second = ctx.get(IEventBus).subscribe('assistant.delta', () => {
+      loop.cancel();
+    });
+    const secondTurn = (await loop.enqueue(nextTurnMessage('Again')).assigned).turn;
+    await expect(secondTurn.result).resolves.toMatchObject({ type: 'cancelled' });
+    second.dispose();
+
     expect(ctx.contextData().history).toContainEqual({
       role: 'assistant',
-      content: [{ type: 'think', think: 'pondering' }],
+      content: [
+        { type: 'think', think: 'seg', encrypted: 'sig' },
+        { type: 'text', text: 'partial answer' },
+      ],
       toolCalls: [],
       partial: true,
     });
-    expect(interruptionReminders()).toHaveLength(1);
   });
 
   it('records no partial content when the stream only produced whitespace', async () => {
@@ -1652,6 +1672,21 @@ describe('aborted step tool execution', () => {
         reason: 'aborted',
         message: 'Tool execution timed out',
       });
+      // The interrupt is durable: the same payload lands in the wire journal so
+      // a cold rebuild can restore the step's terminal state.
+      expect(ctx.allEvents).toContainEqual(
+        expect.objectContaining({
+          type: '[wire]',
+          event: 'turn.step.interrupted',
+          args: expect.objectContaining({
+            turnId: 1,
+            step: 2,
+            stepId: expect.any(String),
+            reason: 'aborted',
+            message: 'Tool execution timed out',
+          }),
+        }),
+      );
     } finally {
       subscription.dispose();
       await ctx.dispose();

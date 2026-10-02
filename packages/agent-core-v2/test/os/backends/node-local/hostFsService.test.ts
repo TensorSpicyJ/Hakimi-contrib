@@ -18,6 +18,19 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+describe('HostFileSystem temporary directories', () => {
+  it('creates a private directory and removes it idempotently', async () => {
+    const temporary = await fs.createTempDirectory('kimi-hostfs-test-');
+
+    expect((await fs.stat(temporary.path)).isDirectory).toBe(true);
+    await fs.writeText(join(temporary.path, 'file.txt'), 'temporary');
+    await temporary.dispose();
+    await temporary.dispose();
+
+    await expect(fs.stat(temporary.path)).rejects.toThrow();
+  });
+});
+
 describe('HostFileSystem stat / lstat', () => {
   it('stat follows a symlink to a regular file while lstat stats the link', async () => {
     const target = join(dir, 'target.txt');

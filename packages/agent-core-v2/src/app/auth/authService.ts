@@ -680,6 +680,7 @@ export class AuthSummaryService implements IAuthSummaryService {
 
   async ensureReady(modelOverride?: string): Promise<void> {
     await this.config.reload();
+    await Promise.all([this.providerService.ready, this.modelService.ready]);
     const providers = this.providerService.list();
     const models = this.modelService.list();
     const modelId = modelOverride ?? this.modelService.getDefaultModel();

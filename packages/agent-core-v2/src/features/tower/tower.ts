@@ -28,12 +28,22 @@ export const TOWER_TOOL_NAMES = [
  */
 export const TOWER_WORKER_PROFILE = 'tower-worker';
 
+/**
+ * Tower workers/reviewers are pinned to `auto` at spawn: the session-wide
+ * permission-mode broadcast skips them, and a subagent rebuilt for resume must
+ * not be synced to the caller's mode either.
+ */
+export function hasPinnedPermissionMode(profileName: string | undefined): boolean {
+  return profileName === TOWER_WORKER_PROFILE;
+}
+
 export interface IAgentTowerService {
   readonly _serviceBrand: undefined;
 
   readonly isActive: boolean;
   enter(): void;
   exit(): void;
+  notifyInbox(input: { readonly from: string; readonly to: string; readonly subject: string }): void;
 }
 
 export const IAgentTowerService = createDecorator<IAgentTowerService>('agentTowerService');

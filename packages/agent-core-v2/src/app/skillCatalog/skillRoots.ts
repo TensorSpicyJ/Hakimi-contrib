@@ -65,6 +65,16 @@ export async function projectSkillRootCandidates(
   };
 }
 
+export async function existingSkillWatchRoot(candidate: string): Promise<string> {
+  let current = candidate;
+  while (!(await isDir(current))) {
+    const parent = path.dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+  return current;
+}
+
 export async function configuredRoots(
   dirs: readonly string[],
   workDir: string,

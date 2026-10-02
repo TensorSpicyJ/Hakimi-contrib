@@ -15,8 +15,6 @@ export default {
   planDesc: 'Have the agent make a plan before changing files',
   planOn: 'on',
   planOff: 'off',
-  planTooltip: 'Toggle plan mode (research before editing)',
-  // Mode selector (Plan / Goal / Swarm / Research)
   modesLabel: 'Mode',
   goalLabel: 'Goal',
   goalDesc: 'Track one objective until it is complete',

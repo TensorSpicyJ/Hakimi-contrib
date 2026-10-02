@@ -35,6 +35,7 @@
  * idiom as `HistoryMessage` in `groupTurns`).
  */
 
+import { stepId } from '../model/ids';
 import type { TranscriptInteraction } from '../model/interaction';
 import type { TranscriptItem, TranscriptMarker, TranscriptTaskRef } from '../model/item';
 import type {
@@ -45,7 +46,7 @@ import type {
 } from '../model/meta';
 import type { TranscriptTask } from '../model/task';
 import type { TodoItem, TranscriptTodo } from '../model/todo';
-import type { TranscriptTurn } from '../model/turn';
+import type { TranscriptStep, TranscriptTurn } from '../model/turn';
 import type { AgentTranscriptSnapshot } from '../ops/operation';
 import { goalMarkerFromMutation, readGoalMutation } from './goalMarker';
 
@@ -106,6 +107,7 @@ interface InteractionResolvedPayload {
 interface PlanRevisionPayload {
   readonly id?: unknown;
   readonly version?: unknown;
+  readonly key?: unknown;
   readonly path?: unknown;
   readonly sha256?: unknown;
   readonly bytes?: unknown;
@@ -117,6 +119,14 @@ interface TurnEndedPayload {
   readonly reason?: unknown;
   readonly error?: unknown;
   readonly durationMs?: unknown;
+}
+
+/** `turn.step.interrupted` payload (the loop's durable step-interrupt record). */
+interface TurnStepInterruptedPayload {
+  readonly turnId?: unknown;
+  readonly step?: unknown;
+  readonly reason?: unknown;
+  readonly message?: unknown;
 }
 
 /** `turn.prompt` / `turn.cancel` payloads (the loop's turn-clock records). */
@@ -264,14 +274,62 @@ function readTodoItems(raw: unknown): TodoItem[] {
   return items;
 }
 
+/**
+ * Apply the durable `turn.step.interrupted` records of one turn to its step
+ * list: patch the steps the base tree already carries, and synthesize the
+ * step when the context tree has none for that ordinal (the interrupt landed
+ * before the step's first message was appended).
+ */
+function patchInterruptedSteps(
+  item: TranscriptTurn,
+  interrupted: ReadonlyMap<number, HistoryWireRecord> | undefined,
+): TranscriptStep[] {
+  if (interrupted === undefined) return item.steps;
+  const hitOrdinals = new Set<number>();
+  const patched = item.steps.map((step): TranscriptStep => {
+    const hit = interrupted.get(step.ordinal);
+    if (hit === undefined) return step;
+    const payload = hit as TurnStepInterruptedPayload;
+    if (typeof payload.reason !== 'string') return step;
+    hitOrdinals.add(step.ordinal);
+    return {
+      ...step,
+      state: 'interrupted',
+      endedAt: recordTimeIso(hit) ?? step.endedAt,
+      endReason: payload.reason,
+      endMessage: typeof payload.message === 'string' ? payload.message : undefined,
+    };
+  });
+  for (const [stepOrdinal, hit] of interrupted) {
+    if (hitOrdinals.has(stepOrdinal)) continue;
+    const payload = hit as TurnStepInterruptedPayload;
+    if (typeof payload.reason !== 'string') continue;
+    patched.push({
+      kind: 'step',
+      stepId: stepId(item.turnId, stepOrdinal),
+      turnId: item.turnId,
+      ordinal: stepOrdinal,
+      state: 'interrupted',
+      frames: [],
+      endedAt: recordTimeIso(hit),
+      endReason: payload.reason,
+      endMessage: typeof payload.message === 'string' ? payload.message : undefined,
+    });
+  }
+  return patched.toSorted((a, b) => a.ordinal - b.ordinal);
+}
+
 export function foldWireRecordFacts(
   records: Iterable<HistoryWireRecord>,
   base: AgentTranscriptSnapshot,
+  options?: { readonly resolvePlanRevisionKey?: (key: string) => string },
 ): AgentTranscriptSnapshot {
   const tasks = new Map<string, TranscriptTask>();
   const interactions = new Map<string, TranscriptInteraction>();
   /** Latest `turn.ended` record per engine turn id (last-wins). */
   const endedTurns = new Map<number, HistoryWireRecord>();
+  /** Latest `turn.step.interrupted` record per engine turn id, keyed by step ordinal. */
+  const interruptedSteps = new Map<number, Map<number, HistoryWireRecord>>();
   /**
    * Turn-clock replay (mirrors the loop's TurnModel): engine turn ids are
    * assigned to `turn.prompt` records in order, skipping queued-then-
@@ -455,13 +513,27 @@ export function foldWireRecordFacts(
         const payload = record as PlanRevisionPayload;
         // A revision is submitted while plan mode is active; it refines the
         // badge with the offloaded plan file reference, and the exit/cancel
-        // record still clears the badge afterwards (the marker stays).
+        // record still clears the badge afterwards (the marker stays). Newer
+        // records carry the agent-relative `key`, resolved against the
+        // current agent scope by the caller; older journals carry the
+        // resolved homeDir-relative `path` directly.
+        const path =
+          typeof payload.key === 'string'
+            ? (options?.resolvePlanRevisionKey?.(payload.key) ?? payload.key)
+            : typeof payload.path === 'string'
+              ? payload.path
+              : undefined;
         planActive = true;
         planRevision = {
-          reviewPath: typeof payload.path === 'string' ? payload.path : undefined,
+          reviewPath: path,
           version: typeof payload.version === 'number' ? payload.version : undefined,
         };
-        pushMarker('plan.revision', record);
+        if (path === undefined) {
+          pushMarker('plan.revision', record);
+        } else {
+          const { key: _key, ...rest } = record;
+          pushMarker('plan.revision', { ...rest, path });
+        }
         break;
       }
       case 'swarm_mode.enter': {
@@ -544,6 +616,23 @@ export function foldWireRecordFacts(
         if (typeof payload.turnId === 'number') endedTurns.set(payload.turnId, record);
         break;
       }
+      case 'turn.step.interrupted': {
+        const payload = record as TurnStepInterruptedPayload;
+        if (
+          typeof payload.turnId !== 'number' ||
+          typeof payload.step !== 'number' ||
+          typeof payload.reason !== 'string'
+        ) {
+          break;
+        }
+        let steps = interruptedSteps.get(payload.turnId);
+        if (steps === undefined) {
+          steps = new Map();
+          interruptedSteps.set(payload.turnId, steps);
+        }
+        steps.set(payload.step, record);
+        break;
+      }
       case 'turn.prompt': {
         skipCancelledTurnIds();
         const turnId = nextTurnId;
@@ -564,31 +653,45 @@ export function foldWireRecordFacts(
     }
   }
 
-  // `turn.ended` records rewrite the matching base turn items. An engine
-  // turn id maps to the grouping ordinal `id - (hidden ids below it)`:
+  // `turn.ended` / `turn.step.interrupted` records rewrite the matching base
+  // turn items. An engine turn id maps to the grouping ordinal
+  // `id - (hidden ids below it)`:
   // hidden turns (retry turns, queued-then-cancelled reservations) consume
   // an engine id without opening a visible item. Their own end records map
   // nowhere and are dropped; ids with no matching item are ignored (e.g.
   // turns compacted out of the message history). One residual gap,
   // accepted: a turn that ends between `turn.prompt` and its first context
   // message leaves no message trace and still shifts the ordinals behind it.
-  const endedByOrdinal = new Map<number, HistoryWireRecord>();
-  for (const [turnId, record] of endedTurns) {
-    if (hiddenTurnIds.has(turnId)) continue;
+  const visibleOrdinal = (turnId: number): number | undefined => {
+    if (hiddenTurnIds.has(turnId)) return undefined;
     let hidden = 0;
     for (const id of hiddenTurnIds) if (id < turnId) hidden += 1;
-    endedByOrdinal.set(turnId - hidden, record);
+    return turnId - hidden;
+  };
+  const endedByOrdinal = new Map<number, HistoryWireRecord>();
+  for (const [turnId, record] of endedTurns) {
+    const ordinal = visibleOrdinal(turnId);
+    if (ordinal !== undefined) endedByOrdinal.set(ordinal, record);
+  }
+  const interruptedByOrdinal = new Map<number, Map<number, HistoryWireRecord>>();
+  for (const [turnId, steps] of interruptedSteps) {
+    const ordinal = visibleOrdinal(turnId);
+    if (ordinal !== undefined) interruptedByOrdinal.set(ordinal, steps);
   }
 
   const items =
-    endedByOrdinal.size > 0
+    endedByOrdinal.size > 0 || interruptedByOrdinal.size > 0
       ? base.items.map((item) => {
           if (item.kind !== 'turn') return item;
           const record = endedByOrdinal.get(item.ordinal);
-          if (record === undefined) return item;
+          const interrupted = interruptedByOrdinal.get(item.ordinal);
+          if (record === undefined && interrupted === undefined) return item;
+          const steps = patchInterruptedSteps(item, interrupted);
+          if (record === undefined) return { ...item, steps };
           const payload = record as TurnEndedPayload;
           return {
             ...item,
+            steps,
             state: mapTurnEndReason(payload.reason) ?? item.state,
             endedAt: recordTimeIso(record) ?? item.endedAt,
             durationMs:

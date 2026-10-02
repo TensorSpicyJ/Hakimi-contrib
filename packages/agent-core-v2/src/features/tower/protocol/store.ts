@@ -16,7 +16,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdir, open, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import picomatch from 'picomatch';
@@ -29,9 +29,12 @@ import {
   diffNameOnly,
   hasAnyCommit,
   isInsideRepo,
+  isRegisteredWorktree,
   isWorktreeDirty,
   mergeNoFf,
+  tryGit,
   worktreeAdd,
+  worktreeAddNewBranch,
   worktreeRemove,
 } from './git';
 import {
@@ -46,6 +49,7 @@ import {
   STATE_FILE,
   TOWER_NAME,
   WORKTREES_DIR,
+  isReservedTowerAgentName,
   dateDash,
   findingFileName,
   inboxFileName,
@@ -71,6 +75,24 @@ export class TowerProtocolError extends Error {
     super(message);
     this.name = 'TowerProtocolError';
   }
+}
+
+function isOpenMission(mission: Pick<TowerMission, 'status'>): boolean {
+  return mission.status !== 'merged';
+}
+
+function missionNumber(id: string): number {
+  const value = Number.parseInt(id.replace(/^M/, ''), 10);
+  return Number.isNaN(value) ? 0 : value;
+}
+
+export function resolveMissionByBranch(
+  state: TowerState,
+  branch: string,
+): TowerMission | undefined {
+  return state.missions
+    .filter((mission) => mission.branch === branch && isOpenMission(mission))
+    .sort((a, b) => missionNumber(b.id) - missionNumber(a.id))[0];
 }
 
 export interface TowerInitResult {
@@ -309,9 +331,17 @@ export class TowerStore {
   // Roster
   // ---------------------------------------------------------------------
 
+  resolveAgent(state: TowerState, agentId: string): TowerRosterEntry | undefined {
+    let resolved: TowerRosterEntry | undefined;
+    for (const agent of state.roster.agents) {
+      if (agent.agentId === agentId) resolved = agent;
+    }
+    return resolved;
+  }
+
   resolveCallerName(state: TowerState, agentId: string): string {
     if (agentId === 'main') return TOWER_NAME;
-    const entry = state.roster.agents.find((agent) => agent.agentId === agentId);
+    const entry = this.resolveAgent(state, agentId);
     if (entry === undefined) {
       throw new TowerProtocolError(
         `agent "${agentId}" is not a tower participant — only spawned workers/reviewers and the tower can use tower tools`,
@@ -334,6 +364,21 @@ export class TowerStore {
 
   async registerAgent(entry: TowerRosterEntry): Promise<void> {
     const state = await this.load();
+    if (entry.name.trim().length === 0 || entry.name.trim() !== entry.name) {
+      throw new TowerProtocolError(
+        `tower agent name "${entry.name}" must not be blank or carry surrounding whitespace`,
+      );
+    }
+    if (isReservedTowerAgentName(entry.name)) {
+      throw new TowerProtocolError(
+        `tower agent name "${entry.name}" is reserved by the tower protocol — pick a different name`,
+      );
+    }
+    for (let index = state.roster.agents.length - 1; index >= 0; index -= 1) {
+      if (state.roster.agents[index]!.agentId === entry.agentId) {
+        state.roster.agents.splice(index, 1);
+      }
+    }
     if (this.findAgent(state, entry.name) !== undefined) {
       throw new TowerProtocolError(`tower agent name "${entry.name}" is already registered`);
     }
@@ -380,10 +425,25 @@ export class TowerStore {
         }
       }
     }
+    const takenBranches = new Map(state.missions.map((mission) => [mission.branch, mission]));
+    for (const mission of missions) {
+      const existing = takenBranches.get(mission.branch);
+      if (existing !== undefined) {
+        throw new TowerProtocolError(
+          `mission ${mission.id} branch "${mission.branch}" is already used by ${existing.id} (${existing.status}) "${existing.title}" — change the title so its slug differs`,
+        );
+      }
+      if (await branchExists(this.repoRoot, mission.branch)) {
+        throw new TowerProtocolError(
+          `mission ${mission.id} branch "${mission.branch}" already exists in git but is not owned by any tower mission — change the title so its slug differs, or delete/rename the stale branch`,
+        );
+      }
+      takenBranches.set(mission.branch, mission);
+    }
     // Merged missions are history, not reservations: their scopes stay on
     // record but must not block new missions from taking the same paths.
     this.assertScopesDisjoint([
-      ...state.missions.filter((m) => m.status !== 'merged'),
+      ...state.missions.filter(isOpenMission),
       ...missions,
     ]);
 
@@ -559,9 +619,9 @@ export class TowerStore {
       to,
       subject: input.subject,
       sent_at: new Date().toISOString(),
-      ...(input.scope !== undefined ? { scope: input.scope } : {}),
-      ...(input.action !== undefined ? { action: input.action } : {}),
-      ...(input.consentRef !== undefined ? { consent_ref: input.consentRef } : {}),
+      scope: input.scope,
+      action: input.action,
+      consent_ref: input.consentRef,
     });
     const content = `${frontmatter}\n\n${input.body.trim()}\n`;
     const baseName = inboxFileName({ from: callerName, to, subject: input.subject });
@@ -675,8 +735,8 @@ export class TowerStore {
 
   async submitReview(callerName: string, input: TowerReviewInput): Promise<string> {
     const state = await this.load();
+    const caller = callerName === TOWER_NAME ? undefined : this.findAgent(state, callerName);
     if (callerName !== TOWER_NAME) {
-      const caller = this.findAgent(state, callerName);
       if (caller?.kind !== 'reviewer' || caller.reviewTarget !== input.target) {
         throw new TowerProtocolError(
           `agent "${callerName}" is not an assigned reviewer for "${input.target}"`,
@@ -697,16 +757,20 @@ export class TowerStore {
     const existing = await this.reviewsFor(input.target);
     const myRounds = existing.filter((r) => r.reviewer === callerName).length;
     const round = myRounds + 1;
+    const seq = await this.nextReviewSeq();
     const reviewedCommit = await branchTip(this.repoRoot, input.target);
+    const mission = caller === undefined ? resolveMissionByBranch(state, input.target)?.id : caller.reviewMissionId;
 
     const frontmatter = renderFrontmatter({
       date: dateDash(),
       reviewer: callerName,
       target: input.target,
       round: String(round),
+      seq: String(seq),
       status: input.status,
       merge: input.merge,
       reviewed_commit: reviewedCommit,
+      mission,
     });
     const checks = (input.checks ?? []).map((c) => `- [x] ${c}`).join('\n');
     const content = [
@@ -757,6 +821,8 @@ export class TowerStore {
       const { fields } = parseFrontmatter(text);
       const round = Number.parseInt(fields['round'] ?? '', 10);
       if (Number.isNaN(round)) continue;
+      const seq = Number.parseInt(fields['seq'] ?? '', 10);
+      const { mtimeMs } = await stat(this.abs(rel));
       reviews.push({
         reviewer: fields['reviewer'] ?? 'unknown',
         target: fields['target'] ?? target,
@@ -766,15 +832,44 @@ export class TowerStore {
         reviewedCommit: fields['reviewed_commit'] ?? '',
         date: fields['date'] ?? '',
         file: rel,
+        mtimeMs,
+        seq: Number.isNaN(seq) ? undefined : seq,
+        mission: fields['mission'],
       });
     }
-    reviews.sort((a, b) => a.round - b.round);
+    reviews.sort(
+      (a, b) =>
+        (a.seq ?? -1) - (b.seq ?? -1) ||
+        a.mtimeMs - b.mtimeMs ||
+        a.round - b.round ||
+        a.file.localeCompare(b.file),
+    );
     return reviews;
   }
 
   async latestReview(target: string): Promise<TowerReviewInfo | undefined> {
     const reviews = await this.reviewsFor(target);
     return reviews.at(-1);
+  }
+
+  private async nextReviewSeq(): Promise<number> {
+    let max = 0;
+    let files: string[];
+    try {
+      files = await readdir(this.abs(REVIEWS_DIR));
+    } catch {
+      return 1;
+    }
+    for (const file of files.filter((entry) => entry.startsWith('review-') && entry.endsWith('.md'))) {
+      try {
+        const text = await readFile(this.abs(join(REVIEWS_DIR, file)), 'utf8');
+        const seq = Number.parseInt(parseFrontmatter(text).fields['seq'] ?? '', 10);
+        if (!Number.isNaN(seq)) max = Math.max(max, seq);
+      } catch {
+        // A concurrent review write/removal must not block another reviewer.
+      }
+    }
+    return max + 1;
   }
 
   // ---------------------------------------------------------------------
@@ -789,16 +884,22 @@ export class TowerStore {
     readonly noop?: boolean;
   }> {
     const state = await this.load();
-    const mission = state.missions.find((m) => m.branch === branch);
-    if (mission === undefined) {
-      throw new TowerProtocolError(`no tower mission owns branch "${branch}"`);
-    }
     // A blocked merge is a decision with a reason — it belongs in the
     // activity log just as much as a successful one.
     const block = async (reason: string, message: string): Promise<TowerProtocolError> => {
       await this.appendLog(TOWER_NAME, 'merge.blocked', { branch, reason });
       return new TowerProtocolError(message);
     };
+    const mission = resolveMissionByBranch(state, branch);
+    if (mission === undefined) {
+      const closed = state.missions.some((entry) => entry.branch === branch);
+      throw await block(
+        closed ? 'branch-owned-by-closed-missions' : 'unknown-branch',
+        closed
+          ? `merge blocked: branch "${branch}" belongs only to closed missions`
+          : `no tower mission owns branch "${branch}"`,
+      );
+    }
 
     const unmergedDeps = mission.deps.filter((dep) => {
       const depMission = state.missions.find((m) => m.id === dep);
@@ -831,7 +932,21 @@ export class TowerStore {
       return { mergeCommit: tip, conflictsWith: [], noop: true };
     }
 
-    const review = await this.latestReview(branch);
+    const reviews = await this.reviewsFor(branch);
+    const siblings = state.missions.filter((entry) => entry.branch === branch && entry.id !== mission.id);
+    const stamped = reviews.filter((review) => review.mission === mission.id);
+    const legacy = reviews.filter((review) => review.mission === undefined);
+    if (siblings.length > 0 && stamped.length === 0 && legacy.length > 0) {
+      throw await block(
+        'review-mission-mismatch',
+        `merge blocked: "${branch}" is shared by multiple mission records and its legacy review is not mission-stamped — re-review ${mission.id}`,
+      );
+    }
+    const candidates =
+      siblings.length > 0
+        ? reviews.filter((review) => review.mission === mission.id)
+        : reviews.filter((review) => review.mission === mission.id || review.mission === undefined);
+    const review = candidates.at(-1);
     if (review === undefined) {
       throw await block(
         'no-review',
@@ -919,7 +1034,27 @@ export class TowerStore {
 
   async addWorktree(worktree: string, branch: string, base: string): Promise<string> {
     const rel = join(WORKTREES_DIR, worktree);
-    await worktreeAdd(this.repoRoot, this.abs(rel), branch, base);
+    const path = this.abs(rel);
+    if (await branchExists(this.repoRoot, branch)) {
+      const state = await this.load();
+      const mission = state.missions.find((entry) => entry.worktree === worktree && entry.branch === branch);
+      const checkedOut = await tryGit(path, ['rev-parse', '--abbrev-ref', 'HEAD']);
+      const plannedRegistered =
+        (await isRegisteredWorktree(this.repoRoot, path)) && checkedOut === branch;
+      if (mission?.owner === undefined && !plannedRegistered) {
+        throw new TowerProtocolError(`branch "${branch}" exists but is not an owned or registered worktree checked out on that branch`);
+      }
+      await worktreeAdd(this.repoRoot, path, branch);
+    } else {
+      try {
+        await worktreeAddNewBranch(this.repoRoot, path, branch, base);
+      } catch (error) {
+        if (await branchExists(this.repoRoot, branch)) {
+          throw new TowerProtocolError(`branch "${branch}" appeared during worktree creation and is not owned by this mission`);
+        }
+        throw error;
+      }
+    }
     await this.appendLog(TOWER_NAME, 'worktree.add', { worktree, branch, base });
     return rel;
   }
@@ -930,6 +1065,11 @@ export class TowerStore {
     for (const mission of state.missions) {
       const rel = join(WORKTREES_DIR, mission.worktree);
       const absPath = this.abs(rel);
+      if (!(await isRegisteredWorktree(this.repoRoot, absPath))) {
+        report.push(`already removed ${rel}`);
+        await this.appendLog(TOWER_NAME, 'worktree.remove.skipped', { worktree: mission.worktree });
+        continue;
+      }
       if (await isWorktreeDirty(absPath)) {
         if (options.force !== true) {
           report.push(`kept ${rel} (uncommitted changes — rerun with force to remove)`);

@@ -12,19 +12,18 @@
  *                values too large to buffer in memory.
  *   - `append` → `open('a')` + write + `fh.sync()` (when `durable`), plus a
  *                one-time directory fsync per scope.
- *   - `watch`  → chokidar on the parent directory, filtered to the exact key and
- *                debounced, so it survives atomic-replace renames and observes a
- *                file that does not exist yet at subscription time.
+ *   - `watch`  → `node:fs.watch` on the parent directory, filtered to the exact
+ *                key and debounced, so it survives atomic-replace renames and
+ *                observes a file that does not exist yet at subscription time.
  *
  * It uses raw `node:fs` rather than `kaos`: the storage kernel needs direct
  * control over append offsets, fsync, atomic rename and streaming, which the
  * agent-execution-environment abstraction does not expose.
  */
 
-import { createReadStream, mkdirSync } from 'node:fs';
-import { mkdir, open, readFile, readdir, unlink } from 'node:fs/promises';
-import { FSWatcher } from 'chokidar';
-import { dirname, join, normalize } from 'pathe';
+import { createReadStream, mkdirSync, watch as fsWatch } from 'node:fs';
+import { mkdir, open, readFile, readdir, stat, unlink } from 'node:fs/promises';
+import { basename, dirname, join } from 'pathe';
 
 import { DisposableStore, combinedDisposable, toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { Emitter, type Event } from '#/_base/event';
@@ -41,6 +40,23 @@ import { toStorageIoError } from '#/persistence/interface/storage';
 
 const WATCH_DEBOUNCE_MS = 150;
 
+export interface FileStorageWatcher {
+  close(): void;
+  on(event: 'error', listener: (error: NodeJS.ErrnoException) => void): this;
+}
+
+export interface FileStorageWatchRuntime {
+  watch(
+    path: string,
+    options: { readonly persistent: false },
+    listener: (eventType: string, filename: string | Buffer | null) => void,
+  ): FileStorageWatcher;
+}
+
+const NODE_FILE_STORAGE_WATCH_RUNTIME: FileStorageWatchRuntime = {
+  watch: (path, options, listener) => fsWatch(path, options, listener),
+};
+
 function isEnoent(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
@@ -54,6 +70,7 @@ export class FileStorageService implements IFileSystemStorageService {
     private readonly baseDir: string,
     private readonly dirMode?: number,
     private readonly fileMode?: number,
+    private readonly watchRuntime: FileStorageWatchRuntime = NODE_FILE_STORAGE_WATCH_RUNTIME,
   ) {}
 
   async read(scope: string, key: string): Promise<Uint8Array | undefined> {
@@ -106,12 +123,13 @@ export class FileStorageService implements IFileSystemStorageService {
     scope: string,
     key: string,
     source: AsyncIterable<Uint8Array>,
-    _options: StorageWriteOptions = {},
+    options: StorageWriteOptions = {},
   ): Promise<void> {
     const filePath = this.path(scope, key);
     try {
+      options.signal?.throwIfAborted();
       await mkdir(dirname(filePath), { recursive: true, mode: this.dirMode });
-      await atomicWriteStream(filePath, source, this.fileMode);
+      await atomicWriteStream(filePath, source, this.fileMode, options.signal);
       await this.syncDirOnce(dirname(filePath));
     } catch (error) {
       throw toStorageIoError(error, { path: filePath, op: 'write' });
@@ -167,13 +185,37 @@ export class FileStorageService implements IFileSystemStorageService {
     }
   }
 
+  async size(scope: string, key: string): Promise<number | undefined> {
+    const filePath = this.path(scope, key);
+    try {
+      return (await stat(filePath)).size;
+    } catch (error) {
+      if (isEnoent(error)) return undefined;
+      throw toStorageIoError(error, { path: filePath, op: 'stat' });
+    }
+  }
+
+  pathFor(scope: string, key: string): string {
+    return this.path(scope, key);
+  }
+
+  async mtime(scope: string, key: string): Promise<number | undefined> {
+    const filePath = this.path(scope, key);
+    try {
+      return (await stat(filePath)).mtimeMs;
+    } catch (error) {
+      if (isEnoent(error)) return undefined;
+      throw toStorageIoError(error, { path: filePath, op: 'stat' });
+    }
+  }
+
   watch(scope: string, key: string): Event<void> {
     const target = this.path(scope, key);
     const dir = dirname(target);
-    const normalizedTarget = normalize(target);
+    const targetName = basename(target);
     const emitter = new Emitter<void>();
 
-    let watcher: FSWatcher | undefined;
+    let watcher: FileStorageWatcher | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let refCount = 0;
 
@@ -182,21 +224,32 @@ export class FileStorageService implements IFileSystemStorageService {
       timer = setTimeout(() => emitter.fire(), WATCH_DEBOUNCE_MS);
     };
 
+    const closeWatcher = (candidate: FileStorageWatcher | undefined): void => {
+      candidate?.close();
+      if (watcher === candidate) watcher = undefined;
+    };
+
+    const onWatchError = (candidate: FileStorageWatcher, error: NodeJS.ErrnoException): void => {
+      if (watcher !== candidate) return;
+      closeWatcher(candidate);
+      if (error.code !== 'ENOSPC') onUnexpectedError(error);
+    };
+
     const arm = (): void => {
       try {
         mkdirSync(dir, { recursive: true, mode: this.dirMode });
-        watcher = new FSWatcher({
-          ignoreInitial: true,
-          awaitWriteFinish: false,
-          depth: 0,
-        });
-        watcher.on('all', (_event, changedPath) => {
-          if (normalize(changedPath) === normalizedTarget) schedule();
-        });
-        watcher.on('error', (error: unknown) => onUnexpectedError(error));
-        watcher.add(dir);
       } catch (error) {
         onUnexpectedError(error);
+        return;
+      }
+      try {
+        const candidate = this.watchRuntime.watch(dir, { persistent: false }, (_eventType, filename) => {
+          if (filename === null || basename(filename.toString()) === targetName) schedule();
+        });
+        watcher = candidate;
+        candidate.on('error', (error) => onWatchError(candidate, error));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOSPC') onUnexpectedError(error);
       }
     };
 
@@ -205,9 +258,7 @@ export class FileStorageService implements IFileSystemStorageService {
         clearTimeout(timer);
         timer = undefined;
       }
-      const closeResult = watcher?.close();
-      if (closeResult !== undefined) void closeResult.catch(() => undefined);
-      watcher = undefined;
+      closeWatcher(watcher);
     };
 
     return (listener, thisArg, disposables) => {

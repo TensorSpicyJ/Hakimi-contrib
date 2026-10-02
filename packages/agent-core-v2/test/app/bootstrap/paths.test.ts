@@ -9,19 +9,25 @@ import { ensureKimiHome, resolveConfigPath, resolveKimiHome } from '#/app/bootst
 describe('bootstrap path helpers', () => {
   describe('resolveKimiHome', () => {
     it('uses explicit homeDir when provided', () => {
-      expect(resolveKimiHome('/tmp/kimi', { HAKIMI_HOME: '/hakimi', KIMI_CODE_HOME: '/legacy' })).toBe('/tmp/kimi');
+      expect(resolveKimiHome('/tmp/hakimi', {
+        HAKIMI_HOME: '/env/hakimi',
+        KIMI_CODE_HOME: '/env/kimi',
+      })).toBe('/tmp/hakimi');
+    });
+
+    it('prefers HAKIMI_HOME when both environment overrides are set', () => {
+      expect(resolveKimiHome(undefined, {
+        HAKIMI_HOME: '/env/hakimi',
+        KIMI_CODE_HOME: '/env/kimi',
+      })).toBe('/env/hakimi');
     });
 
     it('falls back to KIMI_CODE_HOME env', () => {
       expect(resolveKimiHome(undefined, { KIMI_CODE_HOME: '/env/kimi' })).toBe('/env/kimi');
     });
 
-    it('prefers HAKIMI_HOME to the legacy home override', () => {
-      expect(resolveKimiHome(undefined, { HAKIMI_HOME: '/hakimi', KIMI_CODE_HOME: '/legacy' })).toBe('/hakimi');
-    });
-
-    it('uses the Hakimi home by default without discovering or merging legacy data', () => {
-      expect(resolveKimiHome(undefined, {}, '/user')).toBe('/user/.hakimi');
+    it('defaults to the Hakimi directory when no override is set', () => {
+      expect(resolveKimiHome(undefined, {}, '/users/example')).toBe('/users/example/.hakimi');
     });
   });
 

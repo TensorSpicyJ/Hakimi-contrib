@@ -24,6 +24,8 @@
  * user writes, and reported as warning diagnostics (the deprecated value is
  * NOT applied, and the file is never rewritten); env-var renames declared via a binding's
  * `deprecatedEnv` still resolve as a fallback, likewise with a warning.
+ * Sections also contribute their own load-time diagnostics over the raw
+ * on-disk section through `collectDiagnostics`, refreshed the same way.
  * Diagnostics changes are published through `onDidChangeDiagnostics`.
  * Multi-section replacements evaluate factories inside the target write
  * transition and commit User-layer raw/TOML state only after storage succeeds.
@@ -44,10 +46,7 @@ import { Emitter, type Event } from '#/_base/event';
 import { BugIndicatingError, onUnexpectedError } from '#/errors';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { ILogService } from '#/_base/log/log';
-import {
-  IAtomicTomlDocumentStore,
-  type IAtomicDocumentStore,
-} from '#/persistence/interface/atomicDocumentStore';
+import { IAtomicTomlDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 
 import {
   type AnyEnvBindings,
@@ -81,7 +80,6 @@ import {
   collectKeyDeprecations,
   collectSectionDeprecations,
 } from './deprecations';
-import { migrateThinkingEffortMaxToHigh } from './migrations';
 import {
   applySectionToToml,
   camelToSnake,
@@ -90,6 +88,7 @@ import {
   TomlError,
   transformTomlData,
 } from './toml';
+import { planConfigWriteback } from './tomlWriteback';
 
 const CONFIG_SCOPE = '';
 
@@ -190,6 +189,7 @@ function isSameSection(
     existing.toToml === options.toToml &&
     deepEqual(existing.defaultValue, options.defaultValue) &&
     deepEqual(existing.deprecations, options.deprecations) &&
+    existing.collectDiagnostics === options.collectDiagnostics &&
     deepEqual(existing.deprecation, options.deprecation)
   );
 }
@@ -288,6 +288,7 @@ export class ConfigRegistry extends Disposable implements IConfigRegistry {
       fromToml: options.fromToml,
       toToml: options.toToml,
       deprecations: options.deprecations,
+      collectDiagnostics: options.collectDiagnostics,
       deprecation: options.deprecation,
     });
     this._onDidRegisterSection.fire({ domain });
@@ -361,19 +362,14 @@ export class ConfigService extends Disposable implements IConfigService {
     @IConfigRegistry private readonly registry: IConfigRegistry,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @ILogService private readonly log: ILogService,
-    @IAtomicTomlDocumentStore private readonly documentStore: IAtomicDocumentStore,
+    @IAtomicTomlDocumentStore private readonly documentStore: IAtomicTomlDocumentStore,
   ) {
     super();
     this.configKey = this.bootstrap.configKey;
     this._register(this.registry.onDidRegisterSection((e) => this.revalidateDomain(e.domain)));
     this._register(this.registry.onDidUnregisterSection((e) => this.devalidateDomain(e.domain)));
     this._register(this.registry.onDidRegisterOverlay(() => this.reapplyOverlays()));
-    const { configKey } = this;
-    const { homeDir } = this.bootstrap;
-    this.ready = (async () => {
-      await migrateThinkingEffortMaxToHigh(this.documentStore, configKey, homeDir);
-      await this.load('load');
-    })();
+    this.ready = this.load('load');
     this._register(
       this.documentStore.watch(CONFIG_SCOPE, this.configKey)(() => {
         void this.reload();
@@ -438,6 +434,13 @@ export class ConfigService extends Disposable implements IConfigService {
       ...collectKeyDeprecations(rawSnake, this.registry.listSections()),
       ...collectSectionDeprecations(rawSnake, this.registry.listSections()),
     ];
+    // Section-owned load-time diagnostics come from the same on-disk document,
+    // so they are refreshed (and therefore replaceable) in the same pass.
+    for (const section of this.registry.listSections()) {
+      if (section.collectDiagnostics === undefined) continue;
+      const rawSection = rawSnake[camelToSnake(section.domain)];
+      this.rawDeprecationDiagnostics.push(...section.collectDiagnostics(rawSection));
+    }
     for (const diagnostic of this.rawDeprecationDiagnostics) {
       this.pushDiagnostic(diagnostic);
     }
@@ -607,9 +610,9 @@ export class ConfigService extends Disposable implements IConfigService {
       this.log.warn('config load failed', { error: describeUnknownError(error) });
     }
     const nextRawSnake = cloneRecord(fileData);
-    // Key- and section-deprecation warnings derive from the on-disk document,
-    // so refresh them before the unchanged-file early return — a no-op reload
-    // must not drop them.
+    // Key-, section-deprecation, and section-owned load-time warnings derive
+    // from the on-disk document, so refresh them before the unchanged-file
+    // early return — a no-op reload must not drop them.
     this.replaceRawDeprecationDiagnostics(nextRawSnake);
     if (source !== 'load' && JSON.stringify(nextRawSnake) === JSON.stringify(this.rawSnake)) {
       // The file is unchanged, so values and change events stay as they are —
@@ -824,11 +827,28 @@ export class ConfigService extends Disposable implements IConfigService {
     domains: readonly string[],
     raw: ResolvedConfig = this.raw,
   ): Promise<void> {
+    const onDiskText = await this.documentStore.getText(CONFIG_SCOPE, this.configKey);
     const stagedSnake = cloneRecord(this.rawSnake);
     for (const domain of domains) {
       applySectionToToml(stagedSnake, domain, raw[domain], this.registry);
     }
-    await this.documentStore.set(CONFIG_SCOPE, this.configKey, stagedSnake);
+    const plannedText = onDiskText === undefined ? undefined : planConfigWriteback(
+      onDiskText,
+      domains.map((domain) => {
+        const snakeKey = camelToSnake(domain);
+        return {
+          snakeKey,
+          previousValue: this.rawSnake[snakeKey],
+          nextValue: stagedSnake[snakeKey],
+        };
+      }),
+      stagedSnake,
+    );
+    if (plannedText === undefined) {
+      await this.documentStore.set(CONFIG_SCOPE, this.configKey, stagedSnake);
+    } else if (plannedText !== onDiskText) {
+      await this.documentStore.setText(CONFIG_SCOPE, this.configKey, plannedText);
+    }
     this.rawSnake = stagedSnake;
   }
 }

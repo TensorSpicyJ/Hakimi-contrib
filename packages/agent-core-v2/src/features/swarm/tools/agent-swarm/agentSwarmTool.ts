@@ -168,6 +168,7 @@ export class AgentSwarmTool implements IAgentSwarmTool {
           route: 'swarm',
           profileName,
           modelPreference: targetProfile.modelPreference,
+          modelRouteFallbacks: targetProfile.modelRouteFallbacks,
           caller: {
             modelAlias: own.modelAlias,
             thinkingLevel: own.thinkingLevel,

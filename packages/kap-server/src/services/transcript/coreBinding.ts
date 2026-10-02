@@ -21,6 +21,7 @@
 import {
   IAgentLifecycleService,
   IAgentActivityView,
+  IAgentScopeContext,
   IEventBus,
   ISessionMetadata,
   ISessionInteractionService,
@@ -147,6 +148,11 @@ export function bindSessionTranscript(
           const turn = view?.state().turn;
           return turn === undefined || `t${turn.turnId}` !== turnId ? undefined : turn.step;
         },
+        // `plan.revision` records carry the agent-relative blob key; resolve
+        // it against the live agent scope so a forked session shows its own
+        // plan path (the handle resolves lazily, same as `stepOrdinal`).
+        resolvePlanRevisionKey: (key) =>
+          agents.get(agentId)?.accessor.get(IAgentScopeContext).scope(key) ?? key,
       });
       projectors.set(agentId, projector);
     }

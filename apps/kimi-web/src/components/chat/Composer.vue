@@ -73,7 +73,6 @@ const props = withDefaults(defineProps<{
 }>(), {
   running: false,
   starting: false,
-  researchEnabled: false,
   queued: () => [],
   searchFiles: undefined,
   uploadImage: undefined,
@@ -221,7 +220,6 @@ const {
   textareaRef,
   autosize,
   skills: () => props.skills,
-  researchEnabled: () => props.researchEnabled,
   emitCommand: (cmd) => emit('command', cmd),
   historyPush: (entry) => history.push(entry),
   clearDraft: finalizeSubmissionDraft,
@@ -373,13 +371,8 @@ function handleSubmit(): void {
   // resolves to its prefixed menu entry (`/skill:deploy`), mirroring the TUI.
   if (trimmed) {
     const parsed = parseSlash(trimmed);
-    // Keep a hand-typed `/research` on the command path even when Research is
-    // unavailable and hidden from the menu; App owns the backend guard and must
-    // never send it as a normal prompt.
     const known = parsed
-      ? parsed.cmd === '/research' || buildSlashItems(props.skills, {
-          researchEnabled: props.researchEnabled,
-        }).some(
+      ? buildSlashItems(props.skills).some(
           (item) => item.name === parsed.cmd || item.name === `/${SKILL_COMMAND_PREFIX}${parsed.cmd.slice(1)}`,
         )
       : false;
@@ -760,7 +753,7 @@ const modesMenuRef = ref<HTMLElement | null>(null);
 // it); these coords anchor it just above the pill, computed on open.
 const modesMenuStyle = ref<Record<string, string>>({});
 const anyModeActive = computed(
-  () => planOn.value || swarmOn.value || goalArmed.value || researchActive.value,
+  () => planOn.value || swarmOn.value || goalArmed.value,
 );
 function closeModes(): void {
   modesOpen.value = false;
@@ -803,7 +796,6 @@ const MODE_DESC_KEYS = [
   'status.planDesc',
   'status.swarmDesc',
   'status.goalDesc',
-  'status.researchDesc',
 ] as const;
 
 const menuMeasureRef = ref<HTMLElement | null>(null);
@@ -1086,7 +1078,7 @@ function selectModel(modelId: string): void {
             </button>
           </div>
 
-          <!-- Modes selector (plan / goal / swarm / research) — replaces the plan pill. -->
+          <!-- Modes selector (plan / goal / swarm) — replaces the plan pill. -->
           <div
             v-if="status"
             ref="modesRef"
@@ -1106,7 +1098,6 @@ function selectModel(modelId: string): void {
               <span v-if="planOn" class="mode-tag">{{ t('status.planLabel') }}</span>
               <span v-if="swarmOn" class="mode-tag">{{ t('status.swarmLabel') }}</span>
               <span v-if="goalArmed" class="mode-tag">{{ t('status.goalLabel') }}</span>
-              <span v-if="researchActive" class="mode-tag">{{ t('status.researchLabel') }}</span>
             </button>
 
             <div
@@ -2050,7 +2041,7 @@ function selectModel(modelId: string): void {
   line-height: var(--leading-normal);
 }
 
-/* Modes selector (plan / goal / swarm / research) — replaces the old plan
+/* Modes selector (plan / goal / swarm) — replaces the old plan
    pill + badges. z-index lifts the whole control (incl. its upward-opening
    popover) above the composer input row, which otherwise paints over it. */
 .modes { position: relative; display: inline-flex; z-index: var(--z-sticky); }

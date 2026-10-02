@@ -8,6 +8,62 @@
       "localTrackingRef": "refs/remotes/upstream/main",
       "localTrackingCommit": "44a6c70e66762ea9e122f8dceae16dc759086a7c",
       "scope": "Recent upstream commits and Tower selective-adoption review"
+    },
+    {
+      "checkedAt": "2026-09-12",
+      "upstreamRef": "refs/heads/main",
+      "upstreamCommit": "ee2cac102b835fcd7adb3d4b9bc3d62b0b71cdfd",
+      "localTrackingRef": "refs/remotes/upstream/main",
+      "localTrackingCommit": "ee2cac102b835fcd7adb3d4b9bc3d62b0b71cdfd",
+      "scope": "165 upstream commits (2026-08-29..2026-09-12, kimi-code 0.36-0.42) selective-adoption review"
+    },
+    {
+      "checkedAt": "2026-09-15",
+      "upstreamRef": "refs/heads/main",
+      "upstreamCommit": "486dcd26c76f2854fc351515a45d8f0fc2d31ed6",
+      "localTrackingRef": "refs/remotes/upstream/main",
+      "localTrackingCommit": "ee2cac102b835fcd7adb3d4b9bc3d62b0b71cdfd",
+      "scope": "Tower reliability selective-adoption review (content reviewed through 4f45efdbfe49348ebb6080a7b7d1e0076c7cb957; target 2da4aa23b)"
+    },
+    {
+      "checkedAt": "2026-09-15",
+      "upstreamRef": "refs/heads/main",
+      "upstreamCommit": "75ac010bcb2050338444455de8328492d152c919",
+      "localTrackingRef": "refs/remotes/upstream/main",
+      "localTrackingCommit": "75ac010bcb2050338444455de8328492d152c919",
+      "scope": "Selective v2 and pi-tui review through upstream 0.43.1: adopted scope cleanup, Swarm interruption, Tower roster, compaction-budget, deleted-search-source, and @ completion-ordering fixes; deferred event-bus sharding, rendering rebaseline, quota payload, native clipboard, and other changes requiring incompatible architecture or a full fork rebaseline"
+    },
+    {
+      "checkedAt": "2026-09-15",
+      "upstreamRef": "refs/heads/main",
+      "upstreamCommit": "a7bdabbe82a089cd8631f6d613c252d96cbab639",
+      "localTrackingRef": "refs/remotes/upstream/main",
+      "localTrackingCommit": "a7bdabbe82a089cd8631f6d613c252d96cbab639",
+      "scope": "Selective v2 and pi-tui review through upstream 0.43.1 follow-up: adopted scope cleanup, Swarm interruption, Tower roster, compaction-budget, deleted-search-source, and @ completion-ordering fixes; deferred managed-provider feedback-survey gating, event-bus sharding, rendering rebaseline, quota payload, native clipboard, and other changes requiring upstream-specific services, incompatible architecture, or a full fork rebaseline"
+    },
+    {
+      "checkedAt": "2026-09-15",
+      "upstreamRef": "refs/heads/main",
+      "upstreamCommit": "5653c739b9c0dbafd1e4b3d36edeb0fe44ec71f4",
+      "localTrackingRef": "refs/remotes/upstream/main",
+      "localTrackingCommit": "5653c739b9c0dbafd1e4b3d36edeb0fe44ec71f4",
+      "scope": "8 upstream commits after a7bdabbe: adopted diff-fence palette and sessionless /usage and /status handling; separately repaired the local ACP temporary-directory contract and retained prior Swarm rendering batching/cache adoption; deferred WebBridge branding, human-layer/stage renames, full subagent-scope LRU/terminal protocol rewrite, and the provider-aware image file-reference/media pipeline"
+    },
+    {
+      "checkedAt": "2026-09-17",
+      "upstreamRef": "refs/heads/main",
+      "upstreamCommit": "00bd3c226872b4e8e6bb7424ac75dc0510c7b274",
+      "localTrackingRef": "refs/remotes/upstream/main",
+      "localTrackingCommit": "00bd3c226872b4e8e6bb7424ac75dc0510c7b274",
+      "scope": "21 upstream commits after 5653c739b: reviewed media-name typing, steer/transcript ordering, Tower transcript state, abort handling, Windows watch paths, skill scopes, MCP OAuth 401 recovery, TUI completion, desktop, Mermaid, telemetry and release artifacts; no new code adopted in this audit because the candidate fixes either cross the local v2/kap-server transcript boundary, overlap active local media/watch/skill work, are platform-specific, or are new product features. Keep f4e582216 abort containment, 9c5e9b486 Windows watch normalization, b4d0b8a38 stale @ completion, and 31f1b6824 MCP 401 recovery as separately testable follow-up candidates."
+    },
+    {
+      "checkedAt": "2026-09-28",
+      "upstreamRef": "refs/heads/main",
+      "upstreamCommit": "a940f2ff049ed57abce68c59526de7a6628a4112",
+      "localTrackingRef": "refs/remotes/upstream/main",
+      "localTrackingCommit": "a940f2ff049ed57abce68c59526de7a6628a4112",
+      "scope": "65 commits after 00bd3c226, with the remote tip verified by git ls-remote: selectively adopted c1047a6bb to keep print mode alive during cron-triggered turns and 2cedfaf12 to deliver session approvals/questions across agent filters with requesting-agent identity. Adapted the latter to Hakimi's session-scoped interaction origin contract. Reviewed Tower protocol/lifecycle changes (f7012aa23, 09af3b483) as research orchestration references; did not import mandatory Git mission/review/merge rules or ASCII-only titles. Deferred compaction/config-cache/OAuth/swarm-persistence changes that overlap active core work or require broader lifecycle migration. The large-wire cache fix (6a214b85e) does not apply to this checkout's uncached transcript reader. Omitted upstream-specific telemetry, managed-provider, desktop, branding, release and generated-web changes. Targeted broadcaster, approval, question and print suites passed (147 tests)."
     }
   ]
 }

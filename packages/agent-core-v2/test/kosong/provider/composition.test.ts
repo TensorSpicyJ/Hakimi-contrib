@@ -73,7 +73,7 @@ import {
   isRetryableGenerateError,
 } from '#/kosong/contract/errors';
 import { generate } from '#/kosong/contract/generate';
-import type { Message } from '#/kosong/contract/message';
+import { mergeInPlace, type Message } from '#/kosong/contract/message';
 import type { Tool } from '#/kosong/contract/tool';
 import type {
   ChatProvider,
@@ -300,6 +300,12 @@ describe('resolveAdapterIdentity', () => {
   it('resolves the (kimi, anthropic) pair registration: only its own traits', () => {
     const identity = registry.resolveAdapterIdentity('anthropic', 'kimi');
     expect(identity.baseId).toBe('anthropic');
+    expect(identity.traits).toHaveLength(2);
+  });
+
+  it('resolves the (kimi, openai_responses) pair registration: its traits plus the trailing synthetic trait', () => {
+    const identity = registry.resolveAdapterIdentity('openai_responses', 'kimi');
+    expect(identity.baseId).toBe('openai_responses');
     expect(identity.traits).toHaveLength(2);
   });
 
@@ -550,11 +556,14 @@ describe('kimi provider definitions', () => {
   it('registers one definition per transport, with shared vendor-level facts', () => {
     const native = getProviderDefinition('kimi', 'openai');
     const anthropic = getProviderDefinition('kimi', 'anthropic');
+    const responses = getProviderDefinition('kimi', 'openai_responses');
     expect(native?.baseProtocol).toBe('openai');
     expect(native?.traits).toHaveLength(1);
     expect(anthropic?.baseProtocol).toBe('anthropic');
     expect(anthropic?.traits).toHaveLength(1);
-    for (const definition of [native, anthropic]) {
+    expect(responses?.baseProtocol).toBe('openai_responses');
+    expect(responses?.traits).toHaveLength(1);
+    for (const definition of [native, anthropic, responses]) {
       expect(definition?.endpoint).toEqual({
         apiKeyEnv: 'KIMI_API_KEY',
         baseUrlEnv: 'KIMI_BASE_URL',
@@ -562,12 +571,24 @@ describe('kimi provider definitions', () => {
       });
       expect(definition?.hostHeaders).toBe('full');
       expect(definition?.modelSource).toBe('oauth-catalog');
+      expect(definition?.imageCapabilities).toEqual({
+        acceptedMimes: [
+          'image/png',
+          'image/jpeg',
+          'image/gif',
+          'image/webp',
+          'image/bmp',
+          'image/heic',
+          'image/heif',
+        ],
+        inlineByteBudget: 5 * 1024 * 1024,
+      });
     }
   });
 
   it('answers id-level queries and reports unregistered pairs', () => {
     expect(getProviderDefinition('kimi')?.baseProtocol).toBe('openai');
-    expect(getProviderDefinitions('kimi')).toHaveLength(2);
+    expect(getProviderDefinitions('kimi')).toHaveLength(3);
     expect(hasProviderDefinition('kimi')).toBe(true);
     expect(hasProviderDefinition('no-such-vendor')).toBe(false);
     expect(getProviderDefinition('kimi', 'google-genai')).toBeUndefined();
@@ -603,6 +624,12 @@ const THINK_HISTORY: Message[] = [
 
 async function drain(stream: StreamedMessage): Promise<void> {
   for await (const part of stream) void part;
+}
+
+async function collect(stream: StreamedMessage): Promise<unknown[]> {
+  const parts: unknown[] = [];
+  for await (const part of stream) parts.push(part);
+  return parts;
 }
 
 function sdkClient(provider: ChatProvider): unknown {
@@ -1365,7 +1392,12 @@ describe('reasoning dialect (behavior probes)', () => {
               choices: [
                 {
                   index: 0,
-                  message: { role: 'assistant', content: 'ok', reasoning: 'hmm' },
+                  message: {
+                    role: 'assistant',
+                    content: 'ok',
+                    reasoning: 'hmm',
+                    reasoning_details: [{ type: 'summary', summary: 'ignored' }],
+                  },
                   finish_reason: 'stop',
                 },
               ],
@@ -1385,6 +1417,108 @@ describe('reasoning dialect (behavior probes)', () => {
 
     const messages = captured[1]?.['messages'] as Array<Record<string, unknown>>;
     expect(messages[0]).toMatchObject({ custom_key: 'earlier reasoning' });
+  });
+
+  it('parses indexed reasoning_details on the Chat Completions stream', async () => {
+    const provider = new OpenAILegacyChatProvider({
+      model: 'gpt-4.1',
+      apiKey: 'sk-probe',
+    });
+    const client = sdkClient(provider) as { chat: { completions: { create: unknown } } };
+    client.chat.completions.create = vi.fn().mockImplementation(() => {
+      async function* chunks(): AsyncIterable<unknown> {
+        yield {
+          id: 'chatcmpl-probe',
+          choices: [
+            {
+              index: 0,
+              delta: {
+                reasoning_details: [{ index: 0, type: 'summary', summary: 'first' }],
+              },
+            },
+          ],
+        };
+        yield {
+          id: 'chatcmpl-probe',
+          choices: [
+            {
+              index: 0,
+              delta: {
+                reasoning_details: [
+                  { index: 0, summary: ' continuation' },
+                  { index: 1, type: 'summary', summary: 'second' },
+                ],
+              },
+            },
+          ],
+        };
+        yield {
+          id: 'chatcmpl-probe',
+          choices: [
+            {
+              index: 0,
+              delta: {
+                reasoning_details: [{ index: 2, type: 'encrypted', encrypted: 'cipher' }],
+              },
+            },
+          ],
+        };
+        yield {
+          id: 'chatcmpl-probe',
+          choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }],
+        };
+      }
+      return {
+        withResponse: () =>
+          Promise.resolve({ data: chunks(), response: { headers: new Headers() } }),
+      };
+    });
+
+    await expect(collect(await provider.generate('', [], PROBE_HISTORY))).resolves.toEqual([
+      { type: 'think', think: 'first', detailsIndex: 0 },
+      { type: 'think', think: ' continuation', detailsIndex: 0 },
+      { type: 'think', think: 'second', detailsIndex: 1 },
+      { type: 'think', think: '', encrypted: 'cipher', detailsIndex: 2 },
+      { type: 'text', text: 'ok' },
+    ]);
+
+    const first = { type: 'think' as const, think: 'first', detailsIndex: 0 };
+    const second = { type: 'think' as const, think: 'second', detailsIndex: 1 };
+    expect(mergeInPlace(first, second)).toBe(false);
+    expect(first.think).toBe('first');
+  });
+
+  it('restores indexed reasoning_details and a reasoning_content fallback in history', async () => {
+    const provider = new OpenAILegacyChatProvider({
+      model: 'gpt-4.1',
+      apiKey: 'sk-probe',
+      stream: false,
+    });
+    const history: Message[] = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'think', think: 'first', detailsIndex: 0 },
+          { type: 'think', think: 'second', detailsIndex: 1 },
+          { type: 'think', think: '', encrypted: 'cipher', detailsIndex: 2 },
+        ],
+        toolCalls: [],
+      },
+      { role: 'user', content: [{ type: 'text', text: 'Hi' }], toolCalls: [] },
+    ];
+
+    const body = await captureOpenAIBody(provider, undefined, history);
+    const messages = body['messages'] as Array<Record<string, unknown>>;
+    expect(messages[0]).toEqual({
+      role: 'assistant',
+      content: '',
+      reasoning_details: [
+        { type: 'summary', summary: 'first' },
+        { type: 'summary', summary: 'second' },
+        { type: 'encrypted', encrypted: 'cipher' },
+      ],
+      reasoning_content: 'firstsecond',
+    });
   });
 });
 

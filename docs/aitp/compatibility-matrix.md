@@ -1,5 +1,9 @@
 # Hakimi × AITP compatibility matrix and decisions
 
+## 2026-10-02 official source recheck {#aitp-source-recheck-20261002}
+
+A clean read-only checkout of the official AITP repository is at `7b5df435bc16b9806557d09fc242dc18a5d66019`; its Kimi manifest names plugin `aitp`, build `1.1.0+codex.20260927155546`, with `./skills/` discovery. The memory, research, writing and distillation Skills continue to use linked research notes and ordinary host tools. Additional human-collaboration Skills and domain methods belong to the upstream plugin. No CLI, ledger runtime, session hook or `docs/hakimi/` handoff directory is supplied. This recheck changes neither the upstream tree nor the installed plugin and adds no native Research executor or bundled Skill copy to Hakimi.
+
 ## 2026-09-22 AITP Skills remain available across mode changes {#aitp-skill-availability-20260922}
 
 Official AITP Skills are available whenever the enabled plugin supplies them, with Research Mode on or off. The mode controls lightweight research guidance; it does not hide Skills or invalidate their current listing. AITP Skills stay outside the frozen initial system prompt and enter through the existing dynamic listing, which still reflects catalog availability. The visibility contribution reports no hidden reason. Regression coverage now matches this contract instead of expecting mode toggles to hide Skills or emit visibility changes.
@@ -313,11 +317,11 @@ Node SDK、klient、TUI 与 Web 同步；AITP runtime/CLI/schema/adapter contrac
 未变，H6b 仍 **planned，unavailable**。
 
 **Hakimi 侧更新（2026-09-01，Unified Research Mode S9）：** 在已初始化的
-GW/LibRPA AITP workspace 中只读复核真实 ABACUS job-1097 packet，9 个
+研究工作区中只读复核本地计算验证包，9 个
 manifest members 与 313-row class summary 一致，且用 wrong-expectation
 zero-output failure、correct recovery、byte-identical no-op retry 验证 bounded
 action。AITP 0.9 atomic save 在新 exact workstream 下创建
-`entry-a071eb42792548f685520d4492615a63`；pre/post scoped check clean、retry
+一条已保存记录（具体标识省略）；pre/post scoped check clean、retry
 `already_saved`，同时明确 scope 外仍有 71 errors/201 warnings。一个新的
 method-observation 经 external Skill review 后因无 trigger/no card 而 no-op。
 real-derived fixture 在 protocol、REST、WebSocket、Node SDK、klient、TUI、Web

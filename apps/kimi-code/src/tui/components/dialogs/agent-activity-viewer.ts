@@ -99,7 +99,7 @@ export class AgentActivityViewer extends Container implements Focusable {
     const visible = this.viewableRows();
     const k = printableChar(data);
 
-    if (matchesKey(data, Key.escape) || k === 'q' || k === 'Q') {
+    if (matchesKey(data, Key.left) || matchesKey(data, Key.escape) || k === 'q' || k === 'Q') {
       this.props.onClose();
       return;
     }
@@ -374,7 +374,7 @@ export class AgentActivityViewer extends Container implements Focusable {
       `${key('PgUp/PgDn')} ${dim('page')}  ` +
       `${key('g/G')} ${dim('top/bot')}  ` +
       `${key('Ctrl+O')} ${dim(this.expanded ? 'collapse' : 'expand')}  ` +
-      `${key('Q/Esc')} ${dim('cancel')}`;
+      `${key('←/Q/Esc')} ${dim('cancel')}`;
     const left = ` ${keys}`;
     const leftW = visibleWidth(left);
     const rightW = visibleWidth(position);

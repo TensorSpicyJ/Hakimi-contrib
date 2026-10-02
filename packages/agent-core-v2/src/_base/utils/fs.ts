@@ -117,6 +117,7 @@ export async function atomicWriteStream(
   filePath: string,
   source: AsyncIterable<Uint8Array>,
   mode?: number,
+  signal?: AbortSignal,
 ): Promise<void> {
   const hex = randomBytes(4).toString('hex');
   const tmpPath = `${filePath}.tmp.${process.pid}.${hex}`;
@@ -125,10 +126,12 @@ export async function atomicWriteStream(
     const fh = await open(tmpPath, 'w', mode);
     try {
       for await (const chunk of source) {
+        signal?.throwIfAborted();
         if (chunk.byteLength > 0) {
           await fh.writeFile(chunk);
         }
       }
+      signal?.throwIfAborted();
       await fh.sync();
     } finally {
       await fh.close();

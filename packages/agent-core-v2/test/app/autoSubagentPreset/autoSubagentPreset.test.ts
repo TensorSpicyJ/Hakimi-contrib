@@ -980,7 +980,8 @@ describe('AutoSubagentPresetService', () => {
     const services = disposables.add(new TestInstantiationService());
     services.stub(ILogService, ix.get(ILogService));
     services.stub(IBootstrapService, stubBootstrap('/tmp/auto-preset-config'));
-    services.stub(IFileSystemStorageService, new InMemoryStorageService());
+    const storage = new InMemoryStorageService();
+    services.stub(IFileSystemStorageService, storage);
     services.set(IAtomicTomlDocumentStore, new SyncDescriptor(TomlAtomicDocumentStore));
     services.set(IConfigRegistry, new SyncDescriptor(ConfigRegistry));
     services.set(IConfigService, new SyncDescriptor(ConfigService));
@@ -1035,6 +1036,7 @@ describe('AutoSubagentPresetService', () => {
     }
     return {
       config: realConfig,
+      storage,
       evaluator: services.get(IAutoSubagentPresetService),
       store: services.get(IAtomicTomlDocumentStore),
       catalog: services.get(IModelCatalog),
@@ -1112,9 +1114,9 @@ describe('AutoSubagentPresetService', () => {
         clockNow = Date.parse(start);
         const entered = deferred<void>();
         const release = deferred<void>();
-        const save = rig.store.set.bind(rig.store);
+        const save = rig.store.setText.bind(rig.store);
         let writes = 0;
-        vi.spyOn(rig.store, 'set').mockImplementation(async (...args) => {
+        vi.spyOn(rig.store, 'setText').mockImplementation(async (...args) => {
           if (++writes === 1) { entered.resolve(); await release.promise; }
           await save(...args);
         });
@@ -1160,9 +1162,9 @@ describe('AutoSubagentPresetService', () => {
         const offPeak = Date.parse('2026-09-18T00:59:59Z');
         const peak = Date.parse('2026-09-18T01:00:00Z');
         clockNow = offPeak;
-        const save = rig.store.set.bind(rig.store);
+        const save = rig.store.setText.bind(rig.store);
         let writes = 0;
-        vi.spyOn(rig.store, 'set').mockImplementation(async (...args) => {
+        vi.spyOn(rig.store, 'setText').mockImplementation(async (...args) => {
           clockNow = ++writes % 2 === 1 ? peak : offPeak;
           await save(...args);
         });
@@ -1175,9 +1177,9 @@ describe('AutoSubagentPresetService', () => {
       it('refuses dispatch when the corrective storage write fails without announcing the intermediate winner', async () => {
         const rig = await peakRig();
         clockNow = Date.parse('2026-09-18T00:59:59Z');
-        const save = rig.store.set.bind(rig.store);
+        const save = rig.store.setText.bind(rig.store);
         let writes = 0;
-        vi.spyOn(rig.store, 'set').mockImplementation(async (...args) => {
+        vi.spyOn(rig.store, 'setText').mockImplementation(async (...args) => {
           if (++writes === 2) throw new Error('synthetic correction write failure');
           clockNow = Date.parse('2026-09-18T01:00:00Z');
           await save(...args);
@@ -1768,8 +1770,8 @@ describe('AutoSubagentPresetService', () => {
         const kimi = subscriptionQuota('kimiP', 88, 12 * HOUR);
         setQuota('kimiP', { ...kimi, limits: [kimi.limits[0]!, { ...kimi.limits[1]!, resetAt: new Date(clockNow + 1_000).toISOString() }] });
         setQuota('codexP', subscriptionQuota('codexP', 35, 5 * 24 * HOUR));
-        const save = rig.store.set.bind(rig.store);
-        vi.spyOn(rig.store, 'set').mockImplementation(async (scope, key, value) => {
+        const save = rig.store.setText.bind(rig.store);
+        vi.spyOn(rig.store, 'setText').mockImplementation(async (scope, key, value) => {
           clockNow += 2_000;
           await save(scope, key, value);
         });
@@ -1880,11 +1882,11 @@ describe('AutoSubagentPresetService', () => {
 
   describe('automatic selection with real configuration storage', () => {
     it('merges gates with queued user flags and routing changes instead of replacing a stale snapshot', async () => {
-      const { config: realConfig, evaluator, store } = await realConfigRig();
+      const { config: realConfig, evaluator, store, storage } = await realConfigRig();
       const entered = deferred<void>();
       const release = deferred<void>();
-      const save = store.set.bind(store);
-      vi.spyOn(store, 'set').mockImplementationOnce(async (...args) => {
+      const save = storage.write.bind(storage);
+      vi.spyOn(storage, 'write').mockImplementationOnce(async (...args) => {
         entered.resolve();
         await release.promise;
         await save(...args);
@@ -1918,13 +1920,13 @@ describe('AutoSubagentPresetService', () => {
     });
 
     it('merges the latest Memory overlay after the user-layer write finishes', async () => {
-      const { config: realConfig, evaluator, store } = await realConfigRig();
+      const { config: realConfig, evaluator, storage } = await realConfigRig();
       await realConfig.set('experimental', { other_flag: false }, ConfigTarget.Memory);
       await realConfig.set(SUBAGENT_SECTION, { autoPreset: { enabled: false, manualLock: true } }, ConfigTarget.Memory);
       const entered = deferred<void>();
       const release = deferred<void>();
-      const save = store.set.bind(store);
-      vi.spyOn(store, 'set').mockImplementationOnce(async (...args) => {
+      const save = storage.write.bind(storage);
+      vi.spyOn(storage, 'write').mockImplementationOnce(async (...args) => {
         entered.resolve();
         await release.promise;
         await save(...args);
@@ -1948,9 +1950,9 @@ describe('AutoSubagentPresetService', () => {
     });
 
     it('does not revive failed automatic-mode writes on the next unrelated save', async () => {
-      const { config: realConfig, evaluator, store } = await realConfigRig();
+      const { config: realConfig, evaluator, store, storage } = await realConfigRig();
       const before = await store.get('', 'config.toml');
-      vi.spyOn(store, 'set').mockRejectedValueOnce(new Error('storage unavailable'));
+      vi.spyOn(storage, 'write').mockRejectedValueOnce(new Error('storage unavailable'));
       expect((await evaluator.selectAutomatically(REQUEST, CTX)).reasonCode).toBe('evaluation_failed');
       expect(await store.get('', 'config.toml')).toEqual(before);
       expect(realConfig.inspect('experimental').userValue).toEqual({ other_flag: false, auto_subagent_preset: false });

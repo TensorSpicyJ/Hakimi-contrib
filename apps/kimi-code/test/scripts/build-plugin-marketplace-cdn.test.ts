@@ -1,6 +1,8 @@
+import { execFileSync } from 'node:child_process';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -41,6 +43,31 @@ describe('buildPluginMarketplaceCdn', () => {
     const marketplace = JSON.parse(await readFile(join(outDir, 'marketplace.json'), 'utf8'));
     expect(marketplace.plugins).toHaveLength(1);
     expect(marketplace.plugins[0].id).toBe('listed-plugin');
+  });
+
+  it('accepts pnpm argument separators before build options', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kimi-plugin-cdn-cli-'));
+    tempRoots.push(root);
+    const pluginsRoot = join(root, 'plugins');
+    const outDir = join(root, 'out');
+    await writePlugin(pluginsRoot, 'listed-plugin');
+    await writePlugin(pluginsRoot, 'kimi-webbridge');
+    await writeFile(
+      join(pluginsRoot, 'marketplace.json'),
+      JSON.stringify({ plugins: [{ id: 'listed-plugin', source: './official/listed-plugin' }] }),
+      'utf8',
+    );
+
+    execFileSync(process.execPath, [
+      fileURLToPath(new URL('../../scripts/build-plugin-marketplace-cdn.mjs', import.meta.url)),
+      '--',
+      '--plugins-root',
+      pluginsRoot,
+      '--out-dir',
+      outDir,
+    ]);
+
+    await expect(access(join(outDir, 'marketplace.json'))).resolves.toBeUndefined();
   });
 });
 

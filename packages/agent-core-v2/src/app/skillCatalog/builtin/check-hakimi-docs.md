@@ -54,7 +54,6 @@ Fetch pages with **FetchURL**. The same relative paths apply — append the path
 | Interaction modes, input methods, YOLO mode, thinking mode | `guides/interaction.md` |
 | Sessions and context management | `guides/sessions.md` |
 | Goal mode and how to use it | `guides/goals.md` |
-| Experimental AITP-backed Research Mode, Research Board, and steering | `guides/research-mode.md` |
 | Using Hakimi in IDEs (VS Code extension) | `guides/ides.md` |
 | Local server and API usage | `guides/server.md` |
 | MCP (Model Context Protocol) setup | `customization/mcp.md` |

@@ -649,9 +649,15 @@ export class TranscriptService {
     const messages = [...reduceContextTranscript(records).entries];
     const base = groupMessagesIntoSnapshot(messages);
     // Second fold: tasks / interactions / todos / meta (goal, plan, swarm)
-    // come from the non-`context.*` records in the same journal.
+    // come from the non-`context.*` records in the same journal. `plan.revision`
+    // records carry the agent-relative blob key, resolved here against the
+    // agent's own session directory (a forked session must not inherit the
+    // source session's path).
     return {
-      snapshot: foldWireRecordFacts(records, base),
+      snapshot: foldWireRecordFacts(records, base, {
+        resolvePlanRevisionKey: (key) =>
+          join(SESSIONS_ROOT, summary.workspaceId, sessionId, AGENTS_DIR, agentId, key),
+      }),
       goalTouched: records.some((record) =>
         record.type === 'goal.create' ||
         record.type === 'goal.update' ||

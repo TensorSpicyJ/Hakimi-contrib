@@ -88,7 +88,11 @@ import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
 import { IModelCatalog } from '#/kosong/model/catalog';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
-import { isSubagentMeta, subagentLabels, subagentParentAgentId } from '#/session/agentLifecycle/subagentMetadata';
+import {
+  isSubagentMeta,
+  subagentLabels,
+  subagentParentAgentId,
+} from '#/session/agentLifecycle/subagentMetadata';
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
 import type { Runtime } from '#/runtime/runtime';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
@@ -296,6 +300,7 @@ export class SubagentTool implements ISubagentTool {
               route: 'agent',
               profileName: targetProfileName,
               modelPreference: targetProfile?.modelPreference,
+              modelRouteFallbacks: targetProfile?.modelRouteFallbacks,
               caller: { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
             },
             { sessionId: this.sessionContext.sessionId, signal: controller.signal },
@@ -346,6 +351,7 @@ export class SubagentTool implements ISubagentTool {
           route: 'agent',
           profileName: profile.name,
           modelPreference: profile.modelPreference,
+          modelRouteFallbacks: profile.modelRouteFallbacks,
           caller: {
             modelAlias: own.modelAlias,
             thinkingLevel: own.thinkingLevel,

@@ -27,6 +27,11 @@ export interface HostDirEntry {
   readonly isSymbolicLink?: boolean;
 }
 
+export interface HostTemporaryDirectory {
+  readonly path: string;
+  dispose(): Promise<void>;
+}
+
 export interface IHostFileSystem {
   readonly _serviceBrand: undefined;
 
@@ -47,6 +52,7 @@ export interface IHostFileSystem {
   lstat(path: string): Promise<HostFileStat>;
   readdir(path: string): Promise<readonly HostDirEntry[]>;
   mkdir(path: string, options?: { readonly recursive?: boolean }): Promise<void>;
+  createTempDirectory(prefix: string): Promise<HostTemporaryDirectory>;
   remove(path: string): Promise<void>;
   realpath(path: string): Promise<string>;
 }

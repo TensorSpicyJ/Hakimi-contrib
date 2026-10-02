@@ -23,6 +23,8 @@
  * (a hold skips the enqueue and leaves the goal active). A structured wait
  * lease can suspend continuations on background task terminal events without
  * charging active wall-clock time; it is persisted and wakes at most one turn.
+ * Its task notification wake guard buffers partial results for that lease
+ * without blocking unrelated notifications or explicit user turns.
  * Accounts live turn usage through `usage`, observes terminal goal tool results through
  * `toolExecutor`, appends one-time reminder events through `systemReminder`, reports
  * telemetry through `telemetry`, and checks main-agent eligibility through
@@ -40,7 +42,8 @@
  * `pendingContinuationGoals`, `goalTurnTargets`, `exhaustedTurnBudgetGoals`,
  * `liveWallClockStartedAt`, `resumeContinuation`) is registered into
  * `agentState` (`IAgentStateService`) and read/written through it; the
- * `pendingContinuation` promise lock and the `wallClockDeadline` disposable
+ * `pendingContinuation` promise lock, task notification construction barrier,
+ * and the `wallClockDeadline` disposable
  * slot stay plain fields. Bound at Agent scope.
  * Subagent instances reject every goal command and do not install goal
  * injection, accounting, budget, or continuation hooks.
@@ -49,7 +52,8 @@
 import { randomUUID } from 'node:crypto';
 
 import type { TurnEndedEvent, TurnStartedEvent } from '#/agent/loop/turnEvents';
-import { Disposable, MutableDisposable, type IDisposable } from '#/_base/di/lifecycle';
+import { MutableDisposable, type IDisposable } from '#/_base/di/lifecycle';
+import { Service } from '#/_base/di/service';
 import { isPromiseLike } from '#/_base/lifecycle/disposer';
 import { type CollectionView } from '#/_base/di/collection';
 import { LifecycleScope } from '#/app/scopes';
@@ -79,7 +83,7 @@ import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import type { BeforeToolExecuteEvent } from '#/agent/toolExecutor/toolHooks';
 import { IAgentUsageService, type UsageRecordedContext } from '#/agent/usage/usage';
-import { IAgentTaskService } from '#/agent/task/task';
+import { IAgentTaskService, AgentTaskNotificationWakeGuard } from '#/agent/task/task';
 import { TERMINAL_STATUSES } from '#/agent/task/types';
 import type { GoalBudgetProperties } from '#/app/telemetry/events';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
@@ -93,6 +97,7 @@ import {
 import { IWireService } from '#/wire/wire';
 import { defineModel } from '#/wire/model';
 import { IEventBus } from '#/app/event/eventBus';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 
 import { IAgentGoalService, type GoalReasonInput, type ResumeGoalInput, type WaitForTasksInput } from './goal';
 import { IGoalDeadlineScheduler } from './goalDeadlineScheduler';
@@ -310,8 +315,7 @@ export const goalResumeContinuationKey = defineState<ResumeContinuation | undefi
   () => undefined as ResumeContinuation | undefined,
 );
 
-// NOTE: stays Disposable — its own 'config' collides with the Fiber
-export class AgentGoalService extends Disposable implements IAgentGoalService {
+export class AgentGoalService extends Service implements IAgentGoalService {
   declare readonly _serviceBrand: undefined;
 
   private readonly wallClockDeadline = this._register(new MutableDisposable<IDisposable>());
@@ -322,6 +326,7 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
   private pendingContinuation?: PendingContinuation;
   private continuationGeneration = 0;
   private waitingWake?: WaitingWake;
+  private readonly pendingTaskNotifications = new Set<string>();
 
   constructor(
     @IWireService private readonly wire: IWireService,
@@ -335,10 +340,11 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     @IAgentToolApprovalService private readonly toolApproval: IAgentToolApprovalService,
     @IAgentPermissionModeService private readonly permissionMode: IAgentPermissionModeService,
     @IAgentUsageService usageService: IAgentUsageService,
-    @IConfigService private readonly config: IConfigService,
+    @IConfigService private readonly configService: IConfigService,
     @IGoalDeadlineScheduler private readonly deadlineScheduler: IGoalDeadlineScheduler,
     @IAgentScopeContext private readonly agentContext: IAgentScopeContext,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IAgentLifecycleService private readonly lifecycle: IAgentLifecycleService,
     @GoalCompletionGuardContribution private readonly completionGuards: CollectionView<GoalCompletionGuardContribution>,
     @GoalContinuationParticipantContribution
     private readonly continuationParticipants: CollectionView<GoalContinuationParticipantContribution>,
@@ -357,6 +363,15 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     this.states.register(goalLiveWallClockStartedAtKey);
     this.states.register(goalResumeContinuationKey);
     if (!this.isSupportedAgent) return;
+    const onWillClose = this.lifecycle.onWillClose;
+    if (onWillClose !== undefined) {
+      this._register(
+        onWillClose((handle) => {
+          if (handle.id !== this.agentContext.agentId) return;
+          void this.pauseActiveGoal({ reason: 'Paused after agent closed' });
+        }),
+      );
+    }
     this._register(
       this.eventBus.subscribe('task.terminated', ({ info }) => {
         if (this.wire.isRestoring()) return;
@@ -365,6 +380,21 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
         });
       }),
     );
+    this.provide(AgentTaskNotificationWakeGuard, {
+      prepare: (info) => {
+        if (this.goalState?.status !== 'active' || this.goalState.waitingFor?.taskIds.includes(info.taskId) !== true) {
+          return { deferTurn: false };
+        }
+        this.pendingTaskNotifications.add(info.taskId);
+        return {
+          deferTurn: true,
+          onScheduled: () => {
+            this.pendingTaskNotifications.delete(info.taskId);
+            if (this.waitingWake !== undefined) this.scheduleWaitingWake();
+          },
+        };
+      },
+    });
     for (const participant of this.continuationParticipants.items) {
       this.bindContinuationRetry(participant);
     }
@@ -639,7 +669,7 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     input: GoalReasonInput = {},
     actor: GoalActor = 'runtime',
   ): Promise<GoalSnapshot | null> {
-    this.assertSupportedAgent();
+    if (!this.isSupportedAgent) return null;
     const state = this.goalState;
     if (state === null || state.status !== 'active') return null;
     return this.applyLifecycle(state, 'paused', input.reason, actor);
@@ -1016,7 +1046,7 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     queueMicrotask(() => {
       if (this.waitingWake !== wake) return;
       wake.scheduled = false;
-      if (!this.canLaunchContinuation(wake.goalId, wake.generation)) {
+      if (!this.canLaunchContinuation(wake.goalId, wake.generation, true)) {
         if (
           this.continuationGeneration !== wake.generation ||
           !this.isActiveGoal(wake.goalId) ||
@@ -1120,7 +1150,7 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     ) {
       return false;
     }
-    const maxSteps = this.config.get<LoopControl>(LOOP_CONTROL_SECTION)?.maxStepsPerTurn;
+    const maxSteps = this.configService.get<LoopControl>(LOOP_CONTROL_SECTION)?.maxStepsPerTurn;
     if (
       ctx.finishReason === 'tool_calls' &&
       !this.budgetGraceTurns.has(ctx.turnId) &&
@@ -1146,7 +1176,7 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     const state = this.goalState;
     if (state !== null && state.goalId !== goalId) return;
     this.goalOutcomeContinuationTurns.add(ctx.turnId);
-    const maxSteps = this.config.get<LoopControl>(LOOP_CONTROL_SECTION)?.maxStepsPerTurn;
+    const maxSteps = this.configService.get<LoopControl>(LOOP_CONTROL_SECTION)?.maxStepsPerTurn;
     if (!hasStepBudgetRemaining(maxSteps, ctx.step)) return;
     this.loopService.enqueue(new ContinuationStepRequest());
   }
@@ -1465,14 +1495,17 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     };
   }
 
-  private canLaunchContinuation(goalId?: string, generation?: number): boolean {
+  private canLaunchContinuation(goalId?: string, generation?: number, consumePendingInputs = false): boolean {
     const state = this.goalState;
     if (state?.status !== 'active' || state.waitingFor !== undefined) return false;
     if (goalId !== undefined && state.goalId !== goalId) return false;
     if (generation !== undefined && this.continuationGeneration !== generation) return false;
     if (this.wire.isRestoring()) return false;
     if (this.liveTurnId !== undefined || this.pendingContinuation !== undefined) return false;
-    return this.isLoopReadyForContinuation();
+    if (!consumePendingInputs) return this.isLoopReadyForContinuation();
+    if (this.pendingTaskNotifications.size > 0) return false;
+    const status = this.loopService.status();
+    return status.state === 'idle' && status.pendingTurnIds.length === 0;
   }
 
   private isLoopReadyForContinuation(): boolean {
@@ -1690,9 +1723,6 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
         Math.max(0, this.deadlineScheduler.now() - this.liveWallClockStartedAt)
       );
     }
-    if (state.status === 'active' && state.wallClockResumedAt !== undefined) {
-      return state.wallClockMs + Math.max(0, Date.now() - state.wallClockResumedAt);
-    }
     return state.wallClockMs;
   }
 
@@ -1702,9 +1732,6 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
         state.wallClockMs +
         Math.max(0, this.deadlineScheduler.now() - this.liveWallClockStartedAt)
       );
-    }
-    if (state.status === 'active' && state.wallClockResumedAt !== undefined) {
-      return state.wallClockMs + Math.max(0, Date.now() - state.wallClockResumedAt);
     }
     return state.wallClockMs;
   }

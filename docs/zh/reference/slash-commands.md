@@ -56,7 +56,7 @@
 | `/swarm on\|off` | — | 开启或关闭 swarm mode，但不发送提示词。 | 是 |
 | `/swarm <task>` | — | 先开启 swarm mode，再把 `<task>` 作为普通提示词发送。如果该轮次正常完成，swarm mode 会自动关闭。若当前是 `manual` 权限模式，启动前会提示是否切换到 `auto` 或 `yolo`。 | 否 |
 | `/goal [...]` | — | 开始或管理目标模式 | 见下文 |
-| `/research [...]` | — | 控制 AITP Research Mode；命令默认可发现，模式初始为 inactive | 见下文 |
+| `/research [status\|agents\|back\|on\|off\|<note path>]` | — | 浏览 AITP 课题和 Agent、返回父课题或切换 [Research 模式](../guides/research-mode.md) | 状态和 Agent 随时可看；修改需空闲且无活动 Goal |
 
 ::: warning 注意
 `/yolo` 会跳过普通工具调用的审批确认，使用前请确保了解可能的风险。Plan 模式的退出审批不会被 `/yolo` 跳过；Plan 模式下的 `Bash` 也按 `/yolo` 的普通放行规则处理。

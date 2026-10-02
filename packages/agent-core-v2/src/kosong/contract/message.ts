@@ -55,12 +55,13 @@ export interface ThinkPart {
   type: 'think';
   think: string;
   encrypted?: string;
+  detailsIndex?: number;
   openaiResponses?: OpenAIResponsesPartMetadata;
 }
 
 export interface ImageURLPart {
   type: 'image_url';
-  imageUrl: { url: string; id?: string };
+  imageUrl: { url: string; id?: string; name?: string };
 }
 
 export interface AudioURLPart {
@@ -70,7 +71,7 @@ export interface AudioURLPart {
 
 export interface VideoURLPart {
   type: 'video_url';
-  videoUrl: { url: string; id?: string | undefined };
+  videoUrl: { url: string; id?: string | undefined; name?: string };
 }
 
 export type ContentPart = TextPart | ThinkPart | ImageURLPart | AudioURLPart | VideoURLPart;
@@ -199,6 +200,9 @@ export function mergeInPlace(target: StreamedMessagePart, source: StreamedMessag
       return false;
     }
     if (target.encrypted !== undefined) {
+      return false;
+    }
+    if (target.detailsIndex !== source.detailsIndex) {
       return false;
     }
     target.think += source.think;

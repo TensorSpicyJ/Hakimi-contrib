@@ -4,7 +4,8 @@
  * The persistence wrapper for kosong's provider/model registries and the
  * thinking / model-catalog preferences: declares every
  * kosong-owned section constant and its zod schema, plus the env bindings /
- * write-path strips and the snake_case ↔ camelCase TOML transforms. Where
+ * write-path strips, the snake_case ↔ camelCase TOML transforms, and the
+ * `[models]` load-time diagnostics for entries that cannot resolve. Where
  * kosong owns a pure type (`providers` / `models` / `thinking`), the schema
  * is re-derived from it and pinned by an `AssertExact` assertion (schema ≡
  * type at compile time); `modelCatalog` has no
@@ -23,6 +24,7 @@
 import { z } from 'zod';
 
 import {
+  type ConfigDiagnostic,
   type ConfigStripEnv,
   envBindings,
 } from '#/app/config/config';
@@ -219,6 +221,54 @@ type _AssertModelsSection = AssertExact<
   Equal<z.infer<typeof ModelsSectionSchema>, ModelsSection>
 >;
 
+const MODEL_OBJECT_FIELDS = new Set(
+  Object.entries(ModelRecordSchema.shape)
+    .filter(([, field]) => unwrapWrapperSchema(field as z.ZodTypeAny) instanceof z.ZodObject)
+    .map(([key]) => camelToSnake(key)),
+);
+
+function unwrapWrapperSchema(schema: z.ZodTypeAny): z.ZodTypeAny {
+  let current = schema;
+  while (
+    current instanceof z.ZodOptional ||
+    current instanceof z.ZodNullable ||
+    current instanceof z.ZodDefault
+  ) {
+    current = current.unwrap() as z.ZodTypeAny;
+  }
+  return current;
+}
+
+function collectMalformedModelEntries(rawModels: unknown): ConfigDiagnostic[] {
+  if (!isPlainObject(rawModels)) return [];
+  const diagnostics: ConfigDiagnostic[] = [];
+  for (const [alias, entry] of Object.entries(rawModels)) {
+    if (!isPlainObject(entry)) continue;
+    if (entry['model'] !== undefined || entry['name'] !== undefined) continue;
+    diagnostics.push({
+      domain: MODELS_SECTION,
+      severity: 'warning',
+      message: malformedModelMessage(alias, entry),
+    });
+  }
+  return diagnostics;
+}
+
+function malformedModelMessage(alias: string, entry: Record<string, unknown>): string {
+  const base = `[models] entry '${alias}' is missing the 'model' field and cannot be used as a model`;
+  const dottedAlias = dottedAliasSuffix(alias, entry);
+  if (dottedAlias === undefined) return `${base}.`;
+  return `${base}; if the alias contains dots, quote the table name (e.g. [models."${dottedAlias}"]).`;
+}
+
+function dottedAliasSuffix(alias: string, entry: Record<string, unknown>): string | undefined {
+  for (const [key, value] of Object.entries(entry)) {
+    if (MODEL_OBJECT_FIELDS.has(key) || !isPlainObject(value)) continue;
+    return dottedAliasSuffix(`${alias}.${key}`, value) ?? `${alias}.${key}`;
+  }
+  return undefined;
+}
+
 export const modelsFromToml = (rawSnake: unknown): unknown => {
   if (!isPlainObject(rawSnake)) return rawSnake;
   const out: Record<string, unknown> = {};
@@ -279,6 +329,7 @@ registerConfigSection(MODELS_SECTION, ModelsSectionSchema, {
   defaultValue: {},
   fromToml: modelsFromToml,
   toToml: modelsToToml,
+  collectDiagnostics: collectMalformedModelEntries,
 });
 
 

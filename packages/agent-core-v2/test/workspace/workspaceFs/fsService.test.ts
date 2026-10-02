@@ -201,6 +201,7 @@ function fakeFs(
       }
       dirSet.add(p);
     },
+    createTempDirectory: async () => ({ path: '/tmp/fake', dispose: async () => {} }),
     remove: async () => {},
     realpath: async (p) => {
       let current = p;

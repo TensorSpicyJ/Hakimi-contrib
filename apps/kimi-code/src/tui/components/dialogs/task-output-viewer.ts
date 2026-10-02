@@ -114,7 +114,7 @@ export class TaskOutputViewer extends Container implements Focusable {
     const visible = this.viewableRows();
     const k = printableChar(data);
 
-    if (matchesKey(data, Key.escape) || k === 'q' || k === 'Q') {
+    if ((this.props.info?.kind === 'agent' && matchesKey(data, Key.left)) || matchesKey(data, Key.escape) || k === 'q' || k === 'Q') {
       this.props.onClose();
       return;
     }
@@ -252,7 +252,7 @@ export class TaskOutputViewer extends Container implements Focusable {
       `${key('↑↓')} ${dim('line')}  ` +
       `${key('PgUp/PgDn/Ctrl+U/D')} ${dim('page')}  ` +
       `${key('g/G')} ${dim('top/bot')}  ` +
-      `${key('Q/Esc')} ${dim('cancel')}`;
+      `${key(this.props.info?.kind === 'agent' ? '←/Q/Esc' : 'Q/Esc')} ${dim('cancel')}`;
     const left = ` ${keys}`;
     const leftW = visibleWidth(left);
     const rightW = visibleWidth(position);

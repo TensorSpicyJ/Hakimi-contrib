@@ -40,22 +40,18 @@ tools exist and the user didn't name one, ask which.
 Config lives in three files; on key collision, later entries in this
 precedence order override earlier ones.
 
-The kimi-code runtime resolves the user-global directory as `KIMI_CODE_HOME`
-first, falling back to `~/.kimi-code`. Before touching the user-global file,
-resolve the actual directory with Bash so you don't read or write the wrong
-one. Check whether `KIMI_CODE_HOME` is set and fall back to `~/.kimi-code`
-when it is empty:
+Use an explicit data path supplied by the host when present. Otherwise Hakimi
+resolves the user-global directory as `HAKIMI_HOME` → `KIMI_CODE_HOME` →
+`~/.hakimi`. Resolve it before reading or writing:
 
 ```bash
-echo "$KIMI_CODE_HOME"
-echo "$HOME/.kimi-code"
+printf '%s\n' "${HAKIMI_HOME-${KIMI_CODE_HOME-$HOME/.hakimi}}"
 ```
 
-Use the first line when it is non-empty; otherwise use the second line. In the
-rest of this skill, `<KIMI_CODE_HOME>` means that resolved data root —
-**never assume `~/.kimi-code`**.
+In the rest of this skill, `<data-root>` means that resolved directory. Do not
+change environment variables or migrate existing files to resolve it.
 
-- User-global: `<KIMI_CODE_HOME>/mcp.json`. Use for servers you want
+- User-global: `<data-root>/mcp.json`. Use for servers you want
   everywhere.
 - Project-root: `<project root>/.mcp.json`, where project root is found
   by walking up from `<cwd>` to the nearest `.git`. Use for

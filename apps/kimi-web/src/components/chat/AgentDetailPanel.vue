@@ -9,10 +9,11 @@ import { computed, nextTick, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { AgentMember } from '../../types';
 import Badge from '../ui/Badge.vue';
+import Button from '../ui/Button.vue';
+import Icon from '../ui/Icon.vue';
 import PanelHeader from '../ui/PanelHeader.vue';
-import Tooltip from '../ui/Tooltip.vue';
 
-const props = defineProps<{ member: AgentMember }>();
+const props = defineProps<{ member: AgentMember; topicTitle?: string; workspaceRoot?: string }>();
 
 const emit = defineEmits<{
   close: [];
@@ -79,12 +80,6 @@ function foldCount(group: ProgressGroup): number {
   return group.output.length - OUTPUT_HEAD - OUTPUT_TAIL;
 }
 
-function phaseLabel(phase: AgentMember['phase']): string {
-  // Shares the swarm card's phase vocabulary (tools.swarm.phase*), which
-  // includes 'cancelled'.
-  return t(`tools.swarm.phase${phase[0]!.toUpperCase()}${phase.slice(1)}`);
-}
-
 const bodyEl = ref<HTMLElement | null>(null);
 watch(
   // Follow the bottom as either the tool progress or the live text grows, as
@@ -112,30 +107,25 @@ watch(
       wrap
       @close="emit('close')"
     >
-      <Tooltip v-if="member.subagentType" :text="`${t('tasks.role')}: ${member.subagentType}`">
-        <Badge variant="neutral" size="sm" class="ap-identity" :title="member.subagentType">
-          <span class="ap-identity-text">{{ t('tasks.role') }}: {{ member.subagentType }}</span>
-        </Badge>
-      </Tooltip>
-      <Tooltip v-if="member.model" :text="`${t('tasks.model')}: ${member.model}`">
-        <Badge variant="neutral" size="sm" class="ap-identity ap-model" :title="member.model">
-          <span class="ap-identity-text">{{ t('tasks.model') }}: {{ member.model }}</span>
-        </Badge>
-      </Tooltip>
-      <Badge variant="neutral" size="sm" class="ap-phase">{{ phaseLabel(member.phase) }}</Badge>
+      <Badge variant="neutral" size="sm" class="ap-phase">{{ t(`researchContext.phases.${member.phase}`) }}</Badge>
     </PanelHeader>
+    <div class="ap-context">
+      <Button variant="ghost" size="sm" @click="emit('close')"><Icon name="undo" size="sm" />{{ t('researchContext.backToAgent') }}</Button>
+      <span v-if="topicTitle" class="ap-topic"><span class="ap-context-label">{{ t('researchContext.currentTopic') }}</span> {{ topicTitle }}</span>
+      <span v-if="workspaceRoot" class="ap-directory"><span class="ap-context-label">{{ t('researchContext.sessionDirectory') }}</span> {{ workspaceRoot }}</span>
+    </div>
     <div ref="bodyEl" class="ap-body">
       <div v-if="member.suspendedReason" class="ap-reason">{{ member.suspendedReason }}</div>
       <div v-if="member.prompt" class="ap-field">
-        <span class="ap-field-label">Task</span>
+        <span class="ap-field-label">{{ t('researchContext.agentTask') }}</span>
         <div class="ap-field-body">{{ member.prompt }}</div>
       </div>
       <div v-if="liveText" class="ap-field">
-        <span class="ap-field-label">Output</span>
+        <span class="ap-field-label">{{ t('researchContext.agentOutput') }}</span>
         <div class="ap-field-body ap-live">{{ liveText }}</div>
       </div>
       <div v-if="progressGroups.length > 0" class="ap-field">
-        <span class="ap-field-label">Progress</span>
+        <span class="ap-field-label">{{ t('researchContext.agentProgress') }}</span>
         <div class="ap-field-body ap-progress">
           <div v-for="group in progressGroups" :key="group.key" class="ap-group">
             <div v-if="group.call" class="ap-call">
@@ -158,7 +148,7 @@ watch(
         </div>
       </div>
       <div v-if="member.summary" class="ap-field">
-        <span class="ap-field-label">Result</span>
+        <span class="ap-field-label">{{ t('researchContext.agentResult') }}</span>
         <div class="ap-field-body">{{ member.summary }}</div>
       </div>
     </div>
@@ -174,23 +164,10 @@ watch(
   background: var(--color-bg);
 }
 .ap-phase { flex: none; }
-.ap-identity {
-  flex: none;
-  min-width: 0;
-  max-width: 132px;
-  overflow: hidden;
-}
-.ap-model {
-  max-width: 176px;
-}
-.ap-identity-text {
-  display: block;
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.ap-context { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-line); }
+.ap-topic { font-size: var(--text-sm); color: var(--color-text); overflow-wrap: anywhere; }
+.ap-directory { font: var(--text-xs) var(--font-mono); color: var(--color-text-muted); overflow-wrap: anywhere; }
+.ap-context-label { color: var(--color-text-muted); font: var(--text-xs) var(--font-ui); }
 
 .ap-body {
   flex: 1;

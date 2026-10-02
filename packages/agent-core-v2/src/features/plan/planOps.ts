@@ -14,8 +14,8 @@
  * at read time, matching v1's `restoreEnter`.
  * Plan content is recorded separately: every ExitPlanMode submit snapshots
  * the plan file into blob storage and persists a `plan.revision` record
- * carrying only the reference (`{ id, version, path, sha256, bytes }`, `path`
- * homeDir-relative) — never the content. `revisionCount` tracks the latest
+ * carrying only the reference (`{ id, version, key, sha256, bytes }`, `key`
+ * agent-relative) — never the content. `revisionCount` tracks the latest
  * version per plan id so `recordRevision` can mint the next version
  * replay-consistently; it is kept across enter/exit so a re-entered plan id
  * continues its counter instead of overwriting earlier blobs. Each `apply`
@@ -91,7 +91,7 @@ export const planModeExit = PlanModel.defineOp('plan_mode.exit', {
 export interface PlanRevisionRecordedEvent {
   readonly id: string;
   readonly version: number;
-  readonly path: string;
+  readonly key: string;
   readonly sha256: string;
   readonly bytes: number;
 }
@@ -111,7 +111,7 @@ export const planRevision = PlanModel.defineOp('plan.revision', {
   schema: z.object({
     id: z.string(),
     version: z.number().int().positive(),
-    path: z.string(),
+    key: z.string(),
     sha256: z.string(),
     bytes: z.number(),
   }),
@@ -130,7 +130,7 @@ export const planRevision = PlanModel.defineOp('plan.revision', {
     type: 'plan.revision' as const,
     id: p.id,
     version: p.version,
-    path: p.path,
+    key: p.key,
     sha256: p.sha256,
     bytes: p.bytes,
   }),

@@ -8,6 +8,7 @@
 import {
   appendFile,
   lstat,
+  mkdtemp,
   open,
   readFile,
   readdir,
@@ -17,6 +18,8 @@ import {
   stat as nodeStat,
   writeFile,
 } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { decodeTextWithErrors, type TextDecodeErrors } from '#/_base/execEnv/decodeText';
@@ -240,6 +243,25 @@ export class HostFileSystem implements IHostFileSystem {
     } catch (error) {
       throw toHostFsError(error, { path, op: 'mkdir' });
     }
+  }
+
+  async createTempDirectory(prefix: string): Promise<{ readonly path: string; dispose(): Promise<void> }> {
+    const path = join(tmpdir(), prefix);
+    let directory: string;
+    try {
+      directory = await mkdtemp(path);
+    } catch (error) {
+      throw toHostFsError(error, { path, op: 'mkdtemp' });
+    }
+    let disposed = false;
+    return {
+      path: directory,
+      dispose: async () => {
+        if (disposed) return;
+        disposed = true;
+        await this.remove(directory);
+      },
+    };
   }
 
   async remove(path: string): Promise<void> {

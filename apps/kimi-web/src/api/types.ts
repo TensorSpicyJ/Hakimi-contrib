@@ -159,8 +159,8 @@ export type AppMessageContent =
       outputText?: string;
     }
   | { type: 'toolResult'; toolCallId: string; output: unknown; isError?: boolean }
-  | { type: 'image'; source: ImageSource }
-  | { type: 'video'; source: ImageSource }
+  | { type: 'image'; source: ImageSource; name?: string }
+  | { type: 'video'; source: ImageSource; name?: string }
   | { type: 'file'; fileId: string; name: string; mediaType: string; size: number }
   | { type: 'thinking'; thinking: string; signature?: string }
   | { type: 'unknown'; raw: unknown };

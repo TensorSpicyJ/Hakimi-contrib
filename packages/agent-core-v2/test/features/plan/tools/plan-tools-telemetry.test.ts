@@ -124,7 +124,7 @@ describe('EnterPlanModeTool telemetry', () => {
     });
   });
 
-  it('enters plan mode while Research Mode is active (Plan nests under Research)', async () => {
+  it('enters plan mode when it is inactive', async () => {
     const { telemetry } = recordingTelemetry();
     const planMode = planService({ status: null });
 

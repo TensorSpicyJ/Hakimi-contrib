@@ -4,7 +4,7 @@
  * Mirrors `packages/server/test/fs-watch.e2e.test.ts` (v1) so the wire contract
  * stays byte-compatible:
  *   1. subscribe `src` → create file → receive `event.fs.changed`
- *   2. burst > 500 changes / 200ms → `truncated` event
+ *   2. real filesystem burst over configured capacity → `truncated` event
  *   3. two clients, disjoint paths → no cross-delivery
  *   4. > 100 paths per connection → `42902 fs.watch_limit_exceeded`
  *   5. idempotent add of the same path
@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { IWorkspaceInstanceManager } from '@moonshot-ai/agent-core-v2';
+import { IRuntimeResolver, IWorkspaceInstanceManager } from '@moonshot-ai/agent-core-v2';
 import type { HostFsChange, IHostFsWatchService } from '@moonshot-ai/agent-core-v2/os/interface/hostFsWatch';
 import { FakeRuntime } from '@moonshot-ai/agent-core-v2/runtime/fakeRuntime';
 import type { RuntimeProviderRuntimeHandle } from '@moonshot-ai/agent-core-v2/runtime/runtimeUnitHost';
@@ -215,6 +215,55 @@ describe('WS fs watch (kap-server)', () => {
     conn.ws.close();
   });
 
+  it('shares one local workspace watcher across sessions while delivering both feeds', async () => {
+    const r = await boot();
+    const sidA = await createSession(r);
+    const sidB = await createSession(r);
+    const instance = r.core.accessor.get(IWorkspaceInstanceManager).findByRoot(workspace);
+    expect(instance).toBeDefined();
+    const local = r.core.accessor.get(IRuntimeResolver).inspect({
+      workspaceId: instance!.id,
+      runtimeId: 'local',
+    });
+    const watchSpy = vi.spyOn(local.watch!, 'watch');
+    const connA = await openConn(wsUrl(r));
+    const connB = await openConn(wsUrl(r));
+    try {
+      await helloAndSubscribe(connA, 'A', sidA);
+      await helloAndSubscribe(connB, 'B', sidB);
+
+      connA.ws.send(
+        JSON.stringify({
+          type: 'watch_fs_add',
+          id: 'wA',
+          payload: { session_id: sidA, runtime_id: 'local', paths: ['src'] },
+        }),
+      );
+      await receiveType(connA, 'ack', 1000);
+      connB.ws.send(
+        JSON.stringify({
+          type: 'watch_fs_add',
+          id: 'wB',
+          payload: { session_id: sidB, runtime_id: 'local', paths: ['docs'] },
+        }),
+      );
+      await receiveType(connB, 'ack', 1000);
+
+      expect(watchSpy).toHaveBeenCalledTimes(1);
+      await sleep(WATCH_SETTLE_MS);
+      writeFileSync(join(workspace, 'src', 'shared-a.ts'), 'a');
+      writeFileSync(join(workspace, 'docs', 'shared-b.md'), 'b');
+
+      const eventA = await receiveType(connA, 'event.fs.changed', 2000);
+      const eventB = await receiveType(connB, 'event.fs.changed', 2000);
+      expect((eventA.payload as { changes: Array<{ path: string }> }).changes.some((c) => c.path.startsWith('src/'))).toBe(true);
+      expect((eventB.payload as { changes: Array<{ path: string }> }).changes.some((c) => c.path.startsWith('docs/'))).toBe(true);
+    } finally {
+      connA.ws.close();
+      connB.ws.close();
+    }
+  });
+
   it('watch_fs_add without runtime_id defaults to the local runtime', async () => {
     const r = await boot();
     const sid = await createSession(r);
@@ -252,16 +301,18 @@ describe('WS fs watch (kap-server)', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'burst > 500 changes inside 200ms window → truncated:true',
+    'real filesystem burst over configured capacity → truncated:true',
     { timeout: 15000 },
     async () => {
-      // Chokidar cannot reliably deliver >500 events inside one 200ms window
-      // under CPU contention (parallel test files), which flaked this test.
-      // Shrink the window capacity instead: 600 files over 500ms windows
-      // guarantees a >100-event window even at ~240 events/s delivery, while
-      // the truncation path under test is identical.
+      // This verifies the WebSocket overflow protocol with real filesystem
+      // events. Chokidar does not reliably deliver hundreds of synchronous
+      // writes on every host; the Workspace fake-host tests cover the exact
+      // 501-event overflow logic, while this capacity remains low enough for
+      // the real event stream to cross it consistently.
       vi.stubEnv('KIMI_CODE_FS_WATCH_DEBOUNCE_MS', '500');
-      vi.stubEnv('KIMI_CODE_FS_WATCH_MAX_CHANGES_PER_WINDOW', '100');
+      vi.stubEnv('KIMI_CODE_FS_WATCH_MAX_CHANGES_PER_WINDOW', '5');
+      const burstDir = join(workspace, 'burst');
+      mkdirSync(burstDir, { recursive: true });
       const r = await boot();
       const sid = await createSession(r);
       const conn = await openConn(wsUrl(r));
@@ -276,9 +327,10 @@ describe('WS fs watch (kap-server)', () => {
       );
       await receiveType(conn, 'ack', 1000);
       await sleep(WATCH_SETTLE_MS);
+      writeFileSync(join(workspace, 'watch-ready.txt'), 'ready');
+      const readyEvent = await receiveType(conn, 'event.fs.changed', 2000);
+      expect((readyEvent.payload as { changes: Array<{ path: string }> }).changes.map((c) => c.path)).toContain('watch-ready.txt');
 
-      const burstDir = join(workspace, 'burst');
-      mkdirSync(burstDir, { recursive: true });
       for (let i = 0; i < 600; i++) writeFileSync(join(burstDir, `f${i}.txt`), `x${i}`);
 
       const deadline = Date.now() + 12000;
@@ -293,7 +345,7 @@ describe('WS fs watch (kap-server)', () => {
         if (frame.type !== 'event.fs.changed') continue;
         const payload = frame.payload as { truncated?: boolean; count?: number };
         if (payload.truncated === true) {
-          expect(payload.count).toBeGreaterThan(100);
+          expect(payload.count).toBeGreaterThan(5);
           sawTruncated = true;
           break;
         }

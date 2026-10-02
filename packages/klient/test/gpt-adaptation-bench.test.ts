@@ -9,11 +9,11 @@
 
 import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 
-import { describe, expect, test } from 'vitest';
+import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 
 import { BENCH_TASKS, BENCH_WORKSPACE_ALLOWED_TOOLS, type BenchTask } from '../examples/gpt-adaptation-bench.tasks.js';
 import { gradeWorkspace, parseTapSummary, runAllScorerSelfTests, writeTree } from '../examples/gpt-adaptation-bench.scorer.js';
@@ -58,9 +58,29 @@ import { Ledger, clusterBootstrap, replayCoverageRow, summarize } from '../examp
 const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
 const KLIENT_DIR = join(REPO_ROOT, 'packages', 'klient');
 const TSX_CLI = createRequire(join(KLIENT_DIR, 'package.json')).resolve('tsx/cli');
-const BASELINE_DIR = join(REPO_ROOT, '.tmp', 'gpt-adaptation-bench', 'baseline-9c9435ecd');
+let BASELINE_DIR: string;
+let disposeBaseline: (() => Promise<void>) | undefined;
 
 const TEST_SCRATCH_ROOT = join(REPO_ROOT, '.tmp', 'gpt-adaptation-bench', 'test-scratch');
+
+beforeAll(async () => {
+  const fixture = await scratch();
+  disposeBaseline = fixture.dispose;
+  BASELINE_DIR = join(fixture.dir, 'baseline');
+  await mkdir(BASELINE_DIR);
+  for (const path of ['packages', 'build', 'package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', 'tsconfig.json']) {
+    await cp(join(REPO_ROOT, path), join(BASELINE_DIR, path), {
+      recursive: true,
+      filter: (source) => !/(?:^|\/)(?:node_modules|dist|reports|\.tmp)(?:\/|$)/.test(source),
+    });
+  }
+  await writeFile(join(BASELINE_DIR, 'packages', 'agent-core-v2', 'src', 'benchmark-baseline-marker.ts'),
+    'export const baselineFixture = true;\n');
+}, 30_000);
+
+afterAll(async () => {
+  await disposeBaseline?.();
+});
 
 /**
  * Every test scratch directory lives inside the working tree (never the system
@@ -995,12 +1015,9 @@ describe('arm roots', () => {
         const workingEngineDir = join(REPO_ROOT, 'packages', 'agent-core-v2');
         const workingEngine = join(workingEngineDir, 'src');
         const baselineEngine = join(baselineEngineDir, 'src');
-        // A file that exists only in the dirty working tree must not be in the arm.
-        const dirtyOnly = join(workingEngine, 'features', 'aitpResearch', 'aitpPlugin.ts');
         const { existsSync } = await import('node:fs');
-        if (existsSync(dirtyOnly)) {
-          expect(existsSync(join(candidateEngine, 'features', 'aitpResearch', 'aitpPlugin.ts'))).toBe(false);
-        }
+        expect(existsSync(join(workingEngine, 'benchmark-baseline-marker.ts'))).toBe(false);
+        expect(existsSync(join(candidateEngine, 'benchmark-baseline-marker.ts'))).toBe(true);
         // The non-whitelisted files come from the baseline, not the working tree.
         const untouched = 'features/aitpResearch/injection/aitpResearchInjection.ts';
         const armContent = await readFile(join(candidateEngine, untouched), 'utf8');

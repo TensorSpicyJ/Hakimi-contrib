@@ -2,12 +2,43 @@ import { mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 import { join } from 'pathe';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
+import {
+  resetUnexpectedErrorHandler,
+  setUnexpectedErrorHandler,
+} from '#/_base/errors/unexpectedError';
+import {
+  FileStorageService,
+  type FileStorageWatchRuntime,
+} from '#/persistence/backends/node-fs/fileStorageService';
 
 const isWin = process.platform === 'win32';
 const encoder = new TextEncoder();
+
+class TestFileStorageWatcher {
+  private errorListener: ((error: NodeJS.ErrnoException) => void) | undefined;
+  closed = false;
+
+  on(_event: 'error', listener: (error: NodeJS.ErrnoException) => void): this {
+    this.errorListener = listener;
+    return this;
+  }
+
+  close(): void {
+    this.closed = true;
+  }
+
+  emit(filename: string | null): void {
+    this.listener?.('change', filename);
+  }
+
+  fail(code: string): void {
+    this.errorListener?.(Object.assign(new Error('watch failed'), { code }));
+  }
+
+  constructor(private readonly listener: (eventType: string, filename: string | null) => void) {}
+}
 
 describe('FileStorageService — file permissions', () => {
   let dir: string;
@@ -123,5 +154,97 @@ describe('FileStorageService — writeStream', () => {
 
     expect(await svc.read('scope', 'k.bin')).toBeUndefined();
     expect(await svc.list('scope')).toEqual([]);
+  });
+});
+
+describe('FileStorageService — watch', () => {
+  let baseDir: string;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), 'fss-watch-'));
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    resetUnexpectedErrorHandler();
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  it('uses a nonpersistent parent watch, filters filenames, and silently degrades on ENOSPC', () => {
+    vi.useFakeTimers();
+    const watchers: TestFileStorageWatcher[] = [];
+    const runtime: FileStorageWatchRuntime = {
+      watch: vi.fn((_path, _options, listener) => {
+        const watcher = new TestFileStorageWatcher(listener);
+        watchers.push(watcher);
+        return watcher;
+      }),
+    };
+    const svc = new FileStorageService(baseDir, undefined, undefined, runtime);
+    const unexpected = vi.fn();
+    setUnexpectedErrorHandler(unexpected);
+    const fired = vi.fn();
+
+    const subscription = svc.watch('scope', 'state.json')(fired);
+    const watcher = watchers[0]!;
+    watcher.emit('state.json.bak');
+    vi.advanceTimersByTime(200);
+    expect(fired).not.toHaveBeenCalled();
+    watcher.emit('state.json');
+    vi.advanceTimersByTime(200);
+    expect(fired).toHaveBeenCalledTimes(1);
+    watcher.fail('ENOSPC');
+
+    expect(runtime.watch).toHaveBeenCalledWith(
+      join(baseDir, 'scope'),
+      { persistent: false },
+      expect.any(Function),
+    );
+    expect(watcher.closed).toBe(true);
+    expect(unexpected).not.toHaveBeenCalled();
+    subscription.dispose();
+  });
+
+  it('silently degrades when creating the parent watch throws ENOSPC', () => {
+    const runtime: FileStorageWatchRuntime = {
+      watch: vi.fn(() => {
+        throw Object.assign(new Error('watch creation failed'), { code: 'ENOSPC' });
+      }),
+    };
+    const unexpected = vi.fn();
+    setUnexpectedErrorHandler(unexpected);
+    const subscription = new FileStorageService(baseDir, undefined, undefined, runtime)
+      .watch('scope', 'state.json')(() => {});
+
+    expect(unexpected).not.toHaveBeenCalled();
+    subscription.dispose();
+  });
+
+  it('ignores a late error from a disarmed watcher', () => {
+    const watchers: TestFileStorageWatcher[] = [];
+    const runtime: FileStorageWatchRuntime = {
+      watch: vi.fn((_path, _options, listener) => {
+        const watcher = new TestFileStorageWatcher(listener);
+        watchers.push(watcher);
+        return watcher;
+      }),
+    };
+    const unexpected = vi.fn();
+    setUnexpectedErrorHandler(unexpected);
+    const watch = new FileStorageService(baseDir, undefined, undefined, runtime).watch(
+      'scope',
+      'state.json',
+    );
+
+    const first = watch(() => {});
+    const firstWatcher = watchers[0]!;
+    first.dispose();
+    const second = watch(() => {});
+    const secondWatcher = watchers[1]!;
+    firstWatcher.fail('EIO');
+
+    expect(secondWatcher.closed).toBe(false);
+    expect(unexpected).not.toHaveBeenCalled();
+    second.dispose();
   });
 });

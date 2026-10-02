@@ -138,9 +138,9 @@ describe('plan ops (wire-backed)', () => {
 
   it('keeps plan revisions and resolutions monotonic during replay', () => {
     wire.dispatch(planModeEnter({ id: 'p1' }));
-    wire.dispatch(planRevision({ id: 'p1', version: 3, path: 'v3', sha256: 'c', bytes: 3 }));
+    wire.dispatch(planRevision({ id: 'p1', version: 3, key: 'v3', sha256: 'c', bytes: 3 }));
     const afterRevision = wire.getModel(PlanModel);
-    wire.dispatch(planRevision({ id: 'p1', version: 2, path: 'v2', sha256: 'b', bytes: 2 }));
+    wire.dispatch(planRevision({ id: 'p1', version: 2, key: 'v2', sha256: 'b', bytes: 2 }));
     expect(wire.getModel(PlanModel)).toBe(afterRevision);
 
     wire.dispatch(planResolution({ planId: 'p1', planRevision: 3, outcome: 'approved' }));
@@ -211,7 +211,7 @@ describe('plan ops (wire-backed)', () => {
       planRevision({
         id: 'p1',
         version: 1,
-        path: 'sessions/w/s/agents/main/plan/p1/v1.md',
+        key: 'plan/p1/v1.md',
         sha256: 'sha-a',
         bytes: 12,
       }),
@@ -226,7 +226,7 @@ describe('plan ops (wire-backed)', () => {
       planRevision({
         id: 'p1',
         version: 2,
-        path: 'sessions/w/s/agents/main/plan/p1/v2.md',
+        key: 'plan/p1/v2.md',
         sha256: 'sha-b',
         bytes: 20,
       }),
@@ -244,7 +244,7 @@ describe('plan ops (wire-backed)', () => {
         type: 'plan.revision',
         id: 'p1',
         version: 1,
-        path: 'sessions/w/s/agents/main/plan/p1/v1.md',
+        key: 'plan/p1/v1.md',
         sha256: 'sha-a',
         bytes: 12,
         time: expect.any(Number),
@@ -265,7 +265,7 @@ describe('plan ops (wire-backed)', () => {
       planRevision({
         id: 'p1',
         version: 1,
-        path: 'sessions/w/s/agents/main/plan/p1/v1.md',
+        key: 'plan/p1/v1.md',
         sha256: 'sha-a',
         bytes: 12,
       }),
@@ -286,7 +286,7 @@ describe('plan ops (wire-backed)', () => {
         type: 'plan.revision',
         id: 'p1',
         version: 1,
-        path: 'sessions/w/s/agents/main/plan/p1/v1.md',
+        key: 'plan/p1/v1.md',
         sha256: 'sha-a',
         bytes: 12,
       },
@@ -299,7 +299,7 @@ describe('plan ops (wire-backed)', () => {
       planRevision({
         id: 'p1',
         version: 1,
-        path: 'sessions/w/s/agents/main/plan/p1/v1.md',
+        key: 'plan/p1/v1.md',
         sha256: 'sha-a',
         bytes: 12,
       }),
@@ -308,7 +308,7 @@ describe('plan ops (wire-backed)', () => {
       planRevision({
         id: 'p1',
         version: 2,
-        path: 'sessions/w/s/agents/main/plan/p1/v2.md',
+        key: 'plan/p1/v2.md',
         sha256: 'sha-b',
         bytes: 20,
       }),

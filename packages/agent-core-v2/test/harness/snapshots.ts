@@ -234,7 +234,7 @@ function formatText(text: string): string {
   if (isPlanModeReminder(text)) {
     return '<plan-mode-reminder>';
   }
-  if (text.includes('first-person handoff note')) {
+  if (text.includes('You are about to run out of context.')) {
     return '<compaction-instruction>';
   }
   return JSON.stringify(text);

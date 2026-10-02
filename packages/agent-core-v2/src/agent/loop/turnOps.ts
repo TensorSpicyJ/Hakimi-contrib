@@ -4,9 +4,11 @@
  *
  * Owns the next available turn id, including cancelled queued reservations and
  * legacy loop-event observations. Also persists the terminal `turn.ended`
- * record (reason / error / durationMs) so downstream history rebuilds and
- * cold-resumed read models (e.g. the activity view) can recover how the last
- * turn ended. Consumed by the Agent-scope `loopService`.
+ * record (reason / error / durationMs) and the `turn.step.interrupted` record
+ * (step / reason / message) so downstream history rebuilds and cold-resumed
+ * read models (e.g. the activity view and the transcript cold fold) can
+ * recover how the last turn and its steps ended. Consumed by the Agent-scope
+ * `loopService`.
  */
 
 import { z } from 'zod';
@@ -60,6 +62,7 @@ declare module '#/wire/types' {
     'turn.steer': typeof steerTurn;
     'turn.cancel': typeof cancelTurn;
     'turn.ended': typeof endTurn;
+    'turn.step.interrupted': typeof interruptStep;
   }
 }
 
@@ -96,6 +99,25 @@ export const endTurn = TurnModel.defineOp('turn.ended', {
   apply: (s, { turnId, reason, durationMs }) => ({
     ...s,
     lastEnded: { turnId, reason, durationMs },
+  }),
+});
+
+export const interruptStep = TurnModel.defineOp('turn.step.interrupted', {
+  schema: z.object({
+    turnId: z.number(),
+    step: z.number(),
+    stepId: z.string().optional(),
+    reason: z.string(),
+    message: z.string().optional(),
+  }),
+  apply: (s) => s,
+  toEvent: (p) => ({
+    type: 'turn.step.interrupted' as const,
+    turnId: p.turnId,
+    step: p.step,
+    stepId: p.stepId,
+    reason: p.reason,
+    message: p.message,
   }),
 });
 

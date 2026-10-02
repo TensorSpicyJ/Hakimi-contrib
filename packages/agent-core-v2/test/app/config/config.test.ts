@@ -10,7 +10,7 @@
 
 import type { ModelCapability } from '#/kosong/contract/capability';
 import type { ToolCall } from '#/kosong/contract/message';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -3064,7 +3064,7 @@ function toolNames(value: unknown): string[] {
     .filter((name): name is string => name !== null);
 }
 
-describe('ConfigService thinking effort max migration', () => {
+describe('ConfigService persisted thinking effort', () => {
   let homeDir: string;
 
   beforeEach(() => {
@@ -3091,23 +3091,15 @@ describe('ConfigService thinking effort max migration', () => {
     return { config, disposables };
   }
 
-  function readMarkers(): Record<string, string> {
-    return JSON.parse(readFileSync(join(homeDir, 'migrations-effort.json'), 'utf-8')) as Record<
-      string,
-      string
-    >;
-  }
-
-  it('rewrites a persisted max to high on first load and records the marker', async () => {
+  it('preserves a persisted max effort on first load', async () => {
     const { config, disposables } = await createMigratingConfig(
       '[thinking]\nenabled = true\neffort = "max"\n',
     );
 
     expect(config.get<ThinkingConfig>(THINKING_SECTION)).toEqual({
       enabled: true,
-      effort: 'high',
+      effort: 'max',
     });
-    expect(readMarkers()['thinking-effort-max-to-high']).toBeDefined();
 
     disposables.dispose();
   });
@@ -3124,11 +3116,11 @@ describe('ConfigService thinking effort max migration', () => {
     disposables.dispose();
   });
 
-  it('records the marker even when nothing needs migrating', async () => {
+  it('preserves a persisted low effort without writing a migration marker', async () => {
     const { config, disposables } = await createMigratingConfig('[thinking]\neffort = "low"\n');
 
     expect(config.get<ThinkingConfig>(THINKING_SECTION)).toEqual({ effort: 'low' });
-    expect(readMarkers()['thinking-effort-max-to-high']).toBeDefined();
+    expect(existsSync(join(homeDir, 'migrations-effort.json'))).toBe(false);
 
     disposables.dispose();
   });
@@ -3170,8 +3162,8 @@ describe('ConfigService replaceSections', () => {
   }
 
   it('applies every domain in one transition with a single disk write, clearing undefined domains', async () => {
-    const { config, disposables, store } = await createSectionsConfig();
-    const setSpy = vi.spyOn(store, 'set');
+    const { config, disposables, storage } = await createSectionsConfig();
+    const setSpy = vi.spyOn(storage, 'write');
 
     await config.replaceSections({
       [PROVIDERS_SECTION]: { acme: { type: 'openai', apiKey: 'sk-acme-2' } },
@@ -3196,8 +3188,8 @@ describe('ConfigService replaceSections', () => {
   });
 
   it('treats null as clear — the wire encoding JSON transports use for undefined', async () => {
-    const { config, disposables, store } = await createSectionsConfig();
-    const setSpy = vi.spyOn(store, 'set');
+    const { config, disposables, storage } = await createSectionsConfig();
+    const setSpy = vi.spyOn(storage, 'write');
 
     await config.replaceSections({
       [DEFAULT_MODEL_SECTION]: null,
@@ -3255,8 +3247,8 @@ describe('ConfigService replaceSections', () => {
   });
 
   it('supports the memory target without touching the persisted user layer', async () => {
-    const { config, disposables, store } = await createSectionsConfig();
-    const setSpy = vi.spyOn(store, 'set');
+    const { config, disposables, storage } = await createSectionsConfig();
+    const setSpy = vi.spyOn(storage, 'write');
 
     await config.replaceSections(
       { [THINKING_SECTION]: { enabled: false, effort: 'low' } },
@@ -3274,12 +3266,12 @@ describe('ConfigService replaceSections', () => {
   });
 
   it('keeps failed persisted replacements out of reads, events, and later unrelated saves', async () => {
-    const { config, disposables, store } = await createSectionsConfig();
+    const { config, disposables, store, storage } = await createSectionsConfig();
     try {
       const original = await store.get('', 'config.toml');
       const events: string[] = [];
       disposables.add(config.onDidSectionChange((event) => events.push(event.domain)));
-      vi.spyOn(store, 'set').mockRejectedValueOnce(new Error('disk full'));
+      vi.spyOn(storage, 'write').mockRejectedValueOnce(new Error('disk full'));
 
       await expect(config.replaceSections({
         [DEFAULT_MODEL_SECTION]: 'acme/m2',
@@ -3300,9 +3292,9 @@ describe('ConfigService replaceSections', () => {
   });
 
   it('evaluates a Memory factory against the latest target layer without copying User values', async () => {
-    const { config, disposables, store } = await createSectionsConfig();
+    const { config, disposables, storage } = await createSectionsConfig();
     try {
-      const writes = vi.spyOn(store, 'set');
+      const writes = vi.spyOn(storage, 'write');
       const prior = config.set(THINKING_SECTION, { effort: 'low' }, ConfigTarget.Memory);
       const update = config.replaceSections((current) => {
         expect(current[DEFAULT_MODEL_SECTION]).toBeUndefined();
@@ -3319,8 +3311,8 @@ describe('ConfigService replaceSections', () => {
   });
 
   it('leaves the user layer untouched when a later domain fails validation', async () => {
-    const { config, disposables, store } = await createSectionsConfig();
-    const setSpy = vi.spyOn(store, 'set');
+    const { config, disposables, storage } = await createSectionsConfig();
+    const setSpy = vi.spyOn(storage, 'write');
 
     await expect(
       config.replaceSections({

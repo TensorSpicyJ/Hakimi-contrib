@@ -47,6 +47,7 @@ export async function refreshSubagentBindingOnResume(
       route,
       profileName,
       modelPreference: profile?.modelPreference,
+      modelRouteFallbacks: profile?.modelRouteFallbacks,
       caller: {
         modelAlias: caller.modelAlias,
         thinkingLevel: caller.thinkingLevel,

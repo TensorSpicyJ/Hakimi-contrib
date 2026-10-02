@@ -225,8 +225,8 @@ export type WireMessageContent =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; tool_call_id: string; tool_name: string; input: unknown }
   | { type: 'tool_result'; tool_call_id: string; output: unknown; is_error?: boolean }
-  | { type: 'image'; source: WireImageSource }
-  | { type: 'video'; source: WireImageSource }
+  | { type: 'image'; source: WireImageSource; name?: string }
+  | { type: 'video'; source: WireImageSource; name?: string }
   | { type: 'file'; file_id: string; name: string; media_type: string; size: number }
   | { type: 'thinking'; thinking: string; signature?: string };
 

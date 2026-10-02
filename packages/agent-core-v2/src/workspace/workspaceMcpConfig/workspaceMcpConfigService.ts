@@ -11,8 +11,8 @@
  * workspace is untrusted they are skipped (the user file and plugin
  * contributions still load), and a trust flip triggers the same reload path
  * as a file edit, so trusting connects the project servers and untrusting
- * drops them. The config files are watched (the user file directly, the
- * project root recursively pruned to the two project candidates) and plugin
+ * drops them. The config files are watched directly at their candidate paths
+ * and plugin
  * contributions follow `plugins.onDidReload`; every re-resolve recomputes the
  * merged view and publishes the fingerprint diff through `onDidChange`, so a
  * config edit or a plugin installed, enabled or reloaded AFTER the handler
@@ -27,8 +27,6 @@ import { Disposable } from '#/_base/di/lifecycle';
 import { Emitter } from '#/_base/event';
 import { ILogService } from '#/_base/log/log';
 import { TimeoutTimer } from '#/_base/utils/timer';
-import { subtreeWatchFilter } from '#/_base/utils/paths';
-import { dirname } from 'pathe';
 
 import type { McpServerConfig } from '#/mcpCore/config-schema';
 import { MCP_SECTION, type McpSection } from '#/app/mcpConfig/configSection';
@@ -90,7 +88,9 @@ export class WorkspaceMcpConfigService extends Disposable implements IWorkspaceM
         });
       }),
     );
-    void this.watchConfigFiles();
+    void this.watchConfigFiles().catch((error) => {
+      this.log.warn(`cannot watch MCP config files: ${String(error)}`);
+    });
   }
 
   servers(): Readonly<Record<string, McpServerConfig>> {
@@ -138,28 +138,25 @@ export class WorkspaceMcpConfigService extends Disposable implements IWorkspaceM
       cwd: this.workspace.cwd,
       homeDir: this.bootstrap.homeDir,
     });
-    this.watchPaths([paths.user]);
-    const projectRoot = dirname(paths.projectRoot);
-    const handle = this.fsWatch.watch(projectRoot, {
-      ignored: subtreeWatchFilter(projectRoot, [paths.projectRoot, paths.project]),
-    });
-    this._register(handle);
-    this._register(
-      handle.onDidChange(() => {
-        this.scheduleFileReload();
-      }),
-    );
+    this.watchPaths([paths.user, paths.projectRoot, paths.project]);
   }
 
   private watchPaths(paths: readonly string[]): void {
     for (const path of paths) {
-      const handle = this.fsWatch.watch(path);
-      this._register(handle);
-      this._register(
-        handle.onDidChange(() => {
-          this.scheduleFileReload();
-        }),
-      );
+      try {
+        const handle = this.fsWatch.watch(path);
+        this._register(handle);
+        this._register(
+          handle.onDidChange(() => {
+            this.scheduleFileReload();
+          }),
+        );
+        void handle.ready.catch((error) => {
+          this.log.warn(`cannot watch MCP config file ${path}: ${String(error)}`);
+        });
+      } catch (error) {
+        this.log.warn(`cannot watch MCP config file ${path}: ${String(error)}`);
+      }
     }
   }
 

@@ -56,7 +56,7 @@ Some commands are only available in the idle state. Executing these commands whi
 | `/swarm on\|off` | — | Turn swarm mode on or off without sending a prompt. | Yes |
 | `/swarm <task>` | — | Turn swarm mode on, then send `<task>` as a normal prompt. If the turn completes normally, swarm mode turns off automatically. In `manual` permission mode, Hakimi asks whether to switch to `auto` or `yolo` before starting. | No |
 | `/goal [...]` | — | Start or manage an autonomous goal | See below |
-| `/research [...]` | — | Control AITP Research Mode; the command is discoverable by default and the mode starts inactive | See below |
+| `/research [status\|agents\|back\|on\|off\|<note path>]` | — | Browse AITP topics and agents, return to the parent question, or toggle [Research mode](../guides/research-mode.md) | Status and agents always; changes while idle with no active Goal |
 
 ::: warning
 `/yolo` skips approval for regular tool calls. Please make sure you understand the potential risks before enabling it. Plan mode exit approval is not bypassed by `/yolo`; `Bash` inside Plan mode is still subject to the regular `/yolo` allow rules.

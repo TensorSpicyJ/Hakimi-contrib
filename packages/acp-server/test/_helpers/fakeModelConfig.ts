@@ -40,20 +40,20 @@ const configToml = (options?: FakeModelConfigOptions): string => {
   const altThinking = options?.altThinking === true;
   const altEfforts = options?.altSupportEfforts;
   const altDefaultEffort = options?.altDefaultEffort;
-  return `defaultModel = "${FAKE_MODEL_ID}"
+  return `default_model = "${FAKE_MODEL_ID}"
 
 [models.${FAKE_MODEL_ID}]
 name = "fake-model"
 protocol = "openai"
-baseUrl = "http://localhost"
-apiKey = "test-token"
-maxContextSize = 8192
+base_url = "http://localhost"
+api_key = "test-token"
+max_context_size = 8192
 ${thinking ? 'capabilities = ["thinking"]\n' : ''}${efforts !== undefined ? `supportEfforts = [${efforts.map((e) => `"${e}"`).join(', ')}]\n` : ''}${defaultEffort !== undefined ? `defaultEffort = "${defaultEffort}"\n` : ''}[models.${FAKE_MODEL_ALT_ID}]
 name = "fake-model-alt"
 protocol = "openai"
-baseUrl = "http://localhost"
-apiKey = "test-token"
-maxContextSize = 8192
+base_url = "http://localhost"
+api_key = "test-token"
+max_context_size = 8192
 ${altThinking ? 'capabilities = ["thinking"]\n' : ''}${altEfforts !== undefined ? `supportEfforts = [${altEfforts.map((e) => `"${e}"`).join(', ')}]\n` : ''}${altDefaultEffort !== undefined ? `defaultEffort = "${altDefaultEffort}"\n` : ''}`;
 };
 

@@ -202,6 +202,12 @@ describe('TaskOutputViewer — scrolling', () => {
 });
 
 describe('TaskOutputViewer — input', () => {
+  it('left returns from captured agent output to the directory', () => {
+    const onClose = vi.fn();
+    makeViewer({ output: 'result', taskInfo: info({ kind: 'agent' }), onClose }).handleInput('\u001B[D');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('Esc invokes onClose', () => {
     const onClose = vi.fn();
     makeViewer({ output: 'x', onClose }).handleInput('');

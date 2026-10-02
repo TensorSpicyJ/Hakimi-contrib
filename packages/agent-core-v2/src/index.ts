@@ -568,6 +568,7 @@ export {
   compressBase64ForModel,
   compressImageForModel,
   gateImageFormatParts,
+  isRecodableImage,
   IMAGE_BYTE_BUDGET,
   MAX_IMAGE_EDGE_PX,
   READ_IMAGE_BYTE_BUDGET,
@@ -578,6 +579,7 @@ export {
 export {
   MODEL_ACCEPTED_IMAGE_MIMES,
   buildImageConversionGuidance,
+  buildOversizedImageConversionGuidance,
   buildUnsupportedImageNotice,
   decodeBase64Prefix,
   isModelAcceptedImageMime,
@@ -586,6 +588,11 @@ export {
   resolveEffectiveImageMime,
   unsupportedImageMimeFromUrl,
 } from '#/agent/media/image-format-policy';
+export {
+  DEFAULT_INLINE_IMAGE_BYTE_BUDGET,
+  providerImagePolicy,
+  type ProviderImagePolicy,
+} from '#/agent/media/providerImagePolicy';
 export {
   persistOriginalImage,
   sessionMediaOriginalsDir,
@@ -666,6 +673,9 @@ export * from '#/agent/media/mediaTools';
 export * from '#/agent/media/mediaToolsRegistrar';
 export * from '#/agent/media/registerMediaTools';
 export * from '#/agent/media/kimiFileUrl';
+export * from '#/agent/media/mediaRef';
+export * from '#/agent/media/sessionMediaStore';
+import '#/agent/media/sessionMediaStoreService';
 export * from '#/agent/media/videoUpload';
 export * from '#/agent/media/videoResolver';
 export * from '#/agent/media/videoResolverService';
@@ -735,8 +745,8 @@ export * from '#/agent/skillVisibility/skillVisibility';
 import '#/agent/skillVisibility/skillVisibilityService';
 
 // Research domain — protocol-independent pure contracts
-export * from '#/features/research/types';
-export * from '#/features/research/evidencePacket';
+export * from '#/features/aitpResearch/types';
+export * from '#/features/aitpResearch/research/evidencePacket';
 
 // Research memory mode; retired wire vocabulary remains decodable.
 import '#/features/aitpResearch/errors';

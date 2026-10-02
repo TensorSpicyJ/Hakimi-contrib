@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import fs, { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { monitorEventLoopDelay, performance, type IntervalHistogram } from 'node:perf_hooks';
@@ -120,6 +121,13 @@ async function writeWire(
   const file = join(dir, 'wire.jsonl');
   await writeFile(file, lines.map((l) => `${l}\n`).join(''), 'utf8');
   return file;
+}
+
+/** Persist the authoritative session title used by index-route search. */
+async function writeTitle(home: string, sessionId: string, title: string): Promise<void> {
+  const dir = join(home, 'sessions', WS, sessionId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'state.json'), JSON.stringify({ title }), 'utf8');
 }
 
 const noopLog = {
@@ -315,6 +323,7 @@ describe('GlobalSearchService', () => {
 
   it('indexes user and assistant text and finds Chinese and English terms', async () => {
     const s1 = summary('s1', '搜索重构讨论', T1);
+    await writeTitle(home!, s1.id, s1.title!);
     await writeWire(home!, 's1', 'main', [
       userLine('帮我看看苹果怎么挑', T1),
       assistantLine('Here is the apple picking guide.', T2),
@@ -343,8 +352,214 @@ describe('GlobalSearchService', () => {
     expect(injected.items).toEqual([]);
   });
 
+  it.each([makeService, makeInlineService])(
+    'filters deleted sources before pagination without waiting for a writer sync (%#)',
+    async (make) => {
+      const removed = summary('removed', 'removed title', T3);
+      const retained = summary('retained', 'retained title', T1);
+      await writeTitle(home!, removed.id, removed.title!);
+      await writeTitle(home!, retained.id, retained.title!);
+      await writeWire(home!, removed.id, 'main', [userLine('needle deleted', T3)]);
+      await writeWire(home!, retained.id, 'main', [
+        userLine('needle first', T1),
+        userLine('needle second', T2),
+      ]);
+      const sessions = staticIndex([removed, retained]);
+      const writer = track(make(home!, sessions));
+      await writer.reindex();
+      const reader = track(make(home!, sessions));
+      await reader.status();
+
+      await rm(join(home!, 'sessions', WS, removed.id), { recursive: true });
+      for (const mode of ['terms', 'literal'] as const) {
+        const first = await reader.search({ query: 'needle', mode, sort: 'time_desc', pageSize: 1 });
+        expect(first.items).toHaveLength(1);
+        expect(first.items[0]?.sessionId).toBe(retained.id);
+        expect(first.hasMore).toBe(true);
+
+        const second = await reader.search({
+          query: 'needle',
+          mode,
+          sort: 'time_desc',
+          pageSize: 1,
+          pageToken: first.pageToken,
+        });
+        expect(second.items).toHaveLength(1);
+        expect(second.items[0]?.sessionId).toBe(retained.id);
+        expect(second.items[0]?.time).not.toBe(first.items[0]?.time);
+        expect(second.hasMore).toBe(false);
+      }
+    },
+  );
+
+  it('does not serve an old session incarnation after its directory is recreated', async () => {
+    const s1 = summary('s1', 'original title', T1);
+    await writeTitle(home!, s1.id, s1.title!);
+    await writeWire(home!, s1.id, 'main', [userLine('original secret', T1)]);
+    const sessions = staticIndex([s1]);
+    const writer = track(makeInlineService(home!, sessions));
+    await writer.reindex();
+    const reader = track(makeInlineService(home!, sessions));
+    await reader.status();
+    expect((await reader.search({ query: 'original' })).items.length).toBeGreaterThan(0);
+
+    await rm(join(home!, 'sessions', WS, s1.id), { recursive: true });
+    await writeTitle(home!, s1.id, 'replacement title');
+    await writeWire(home!, s1.id, 'main', [userLine('replacement message', T2)]);
+
+    // The read-only copy has not refreshed yet, but it must never disclose
+    // documents from the previous directory incarnation.
+    expect((await reader.search({ query: 'original' })).items).toEqual([]);
+
+    await settleSync(writer);
+    await refreshNow(reader);
+    const replacement = await reader.search({ query: 'replacement', role: 'user' });
+    expect(replacement.items).toHaveLength(1);
+    expect(replacement.items[0]?.sessionTitle).toBe('replacement title');
+    expect((await reader.search({ query: 'original' })).items).toEqual([]);
+  });
+
+  it('updates projected message titles from authoritative session metadata', async () => {
+    const s1 = summary('s1', 'stale summary title', T1);
+    await writeTitle(home!, s1.id, 'original title');
+    await writeWire(home!, s1.id, 'main', [userLine('needle body', T1)]);
+    const service = track(makeInlineService(home!, staticIndex([s1])));
+    await service.reindex();
+    expect((await service.search({ query: 'needle' })).items[0]?.sessionTitle).toBe('original title');
+
+    await writeTitle(home!, s1.id, 'renamed title');
+    await settleSync(service);
+    expect((await service.search({ query: 'needle' })).items[0]?.sessionTitle).toBe('renamed title');
+    expect((await service.search({ query: 'original', role: 'title' })).items).toEqual([]);
+  });
+
+  it('rebuilds legacy index rows before trusting their session identity', async () => {
+    const s1 = summary('s1', 'one', T1);
+    await writeTitle(home!, s1.id, s1.title!);
+    await writeWire(home!, s1.id, 'main', [userLine('needle legacy', T1)]);
+    const sessions = staticIndex([s1]);
+    const writer = track(makeInlineService(home!, sessions));
+    await writer.reindex();
+    const db = coreOf(writer).db!;
+    for (const row of db.query({ key: { prefix: 's1/' } })) {
+      const { sessionIdentity: _identity, ...legacy } = row.value;
+      await db.set(row.key, legacy);
+    }
+    await db.set('\0meta\\session\\s1', { kind: 'sessionMeta' });
+
+    const reader = track(makeInlineService(home!, sessions));
+    await reader.status();
+    expect((await reader.search({ query: 'needle' })).items).toEqual([]);
+
+    await settleSync(writer);
+    await refreshNow(reader);
+    expect((await reader.search({ query: 'needle' })).items).toHaveLength(1);
+  });
+
+  it('fails closed when a session source cannot be verified', async () => {
+    const s1 = summary('s1', 'one', T1);
+    await writeTitle(home!, s1.id, s1.title!);
+    await writeWire(home!, s1.id, 'main', [userLine('needle body', T1)]);
+    const writer = track(makeInlineService(home!, staticIndex([s1])));
+    await writer.reindex();
+    const reader = track(makeInlineService(home!, staticIndex([s1])));
+    await settleSync(reader);
+
+    const dir = join(home!, 'sessions', WS, s1.id);
+    const original = fs.stat.bind(fs);
+    const intercept = vi.spyOn(fs, 'stat').mockImplementation((async (path, options) => {
+      if (path === dir && options?.bigint === true) {
+        throw Object.assign(new Error('source unavailable'), { code: 'EACCES' });
+      }
+      return original(path, options);
+    }) as typeof fs.stat);
+    syncBuiltinESMExports();
+    try {
+      await expect(reader.search({ query: 'needle' })).rejects.toMatchObject({
+        reason: 'index_unavailable',
+      });
+    } finally {
+      intercept.mockRestore();
+      syncBuiltinESMExports();
+    }
+  });
+
+  it('returns verified results when a source stat outlives the query deadline', async () => {
+    const slow = summary('slow', 'slow', T1);
+    const healthy = summary('healthy', 'healthy', T2);
+    await writeTitle(home!, slow.id, slow.title!);
+    await writeTitle(home!, healthy.id, healthy.title!);
+    await writeWire(home!, slow.id, 'main', [userLine('needle slow extra text', T1)]);
+    await writeWire(home!, healthy.id, 'main', [userLine('needle', T2)]);
+
+    const writer = track(makeInlineService(home!, staticIndex([slow, healthy])));
+    await writer.reindex();
+    const reader = track(makeInlineService(home!, staticIndex([slow, healthy])));
+    await settleSync(reader);
+
+    let enter!: () => void;
+    let release!: () => void;
+    let finish!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const slowDir = join(home!, 'sessions', WS, slow.id);
+    const original = fs.stat.bind(fs);
+    const intercept = vi.spyOn(fs, 'stat').mockImplementation((async (path, options) => {
+      const result = await original(path, options);
+      if (path === slowDir && options?.bigint === true) {
+        enter();
+        try {
+          await gate;
+        } finally {
+          finish();
+        }
+      }
+      return result;
+    }) as typeof fs.stat);
+    syncBuiltinESMExports();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    reader.queryDeadlineMs = 100;
+    let completed: Awaited<ReturnType<GlobalSearchService['search']>> | undefined;
+    const searching = reader
+      .search({ query: 'needle', sort: 'time_desc' })
+      .then((page) => {
+        completed = page;
+      });
+    try {
+      await entered;
+      await vi.advanceTimersByTimeAsync(100);
+      expect(completed).toMatchObject({
+        incomplete: 'deadline',
+        items: [{ sessionId: healthy.id }],
+      });
+      expect(completed?.items).toHaveLength(1);
+
+      // Let the abandoned stat finish so the process-wide coordinator is
+      // released before this test restores the filesystem mock.
+      release();
+      await finished;
+      await searching;
+    } finally {
+      release();
+      await searching.catch(() => {});
+      intercept.mockRestore();
+      syncBuiltinESMExports();
+      vi.useRealTimers();
+    }
+
+    expect((await reader.search({ query: 'needle' })).items).toHaveLength(2);
+  });
+
   it('hits session titles as title docs', async () => {
     const s1 = summary('s1', '季度总结报告', T1);
+    await writeTitle(home!, s1.id, s1.title!);
     await writeWire(home!, 's1', 'main', [userLine('随便说点什么', T1)]);
     const service = track(makeService(home!, staticIndex([s1])));
     await service.reindex();
@@ -469,6 +684,7 @@ describe('GlobalSearchService', () => {
 
   it('reports indexState building before the first full sync and ready after', async () => {
     const s1 = summary('s1', 'state', T1);
+    await writeTitle(home!, s1.id, s1.title!);
     await writeWire(home!, 's1', 'main', [userLine('苹果 state', T1)]);
 
     // Block the session enumeration until released, so the constructor's
@@ -607,6 +823,7 @@ describe('GlobalSearchService', () => {
 
   it('runs a second instance read-only and catches up from the WAL', async () => {
     const s1 = summary('s1', 'shared', T1);
+    await writeTitle(home!, s1.id, s1.title!);
     const file = await writeWire(home!, 's1', 'main', [userLine('苹果 base', T1)]);
     const index = staticIndex([s1]);
 
@@ -886,6 +1103,7 @@ describe('GlobalSearchService', () => {
 
   it('assigns transcript step ids to assistant hits; user and title hits carry none', async () => {
     const s1 = summary('s1', '苹果 steps', T1);
+    await writeTitle(home!, s1.id, s1.title!);
     await writeWire(home!, 's1', 'main', [
       userLine('苹果 question', T1),
       stepBeginLine('u1', 1, T1 + 100),
@@ -2226,6 +2444,7 @@ describe('GlobalSearchService', () => {
 
     it('returns identical literal results on both routes for equivalent data', async () => {
       const s1 = summary('s1', '无关标题', T1);
+      await writeTitle(home!, s1.id, s1.title!);
       await writeWire(home!, 's1', 'main', [
         userLine('帮我看看苹果怎么挑', T1),
         stepBeginLine('u1', 1, T1 + 100),

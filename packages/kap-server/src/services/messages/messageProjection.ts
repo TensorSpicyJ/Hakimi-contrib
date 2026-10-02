@@ -46,6 +46,7 @@ function mapContentPart(part: ContextMessage['content'][number]): MessageContent
     case 'image_url':
       return {
         type: 'image',
+        name: part.imageUrl.name,
         source: { kind: 'url', url: part.imageUrl.url, id: part.imageUrl.id },
       };
     case 'audio_url':
@@ -53,8 +54,12 @@ function mapContentPart(part: ContextMessage['content'][number]): MessageContent
     case 'video_url': {
       const ref = parseKimiFileUrl(part.videoUrl.url);
       return ref !== undefined
-        ? { type: 'video', source: { kind: 'file', file_id: ref.fileId } }
-        : { type: 'video', source: { kind: 'url', url: part.videoUrl.url, id: part.videoUrl.id } };
+        ? { type: 'video', name: part.videoUrl.name, source: { kind: 'file', file_id: ref.fileId } }
+        : {
+            type: 'video',
+            name: part.videoUrl.name,
+            source: { kind: 'url', url: part.videoUrl.url, id: part.videoUrl.id },
+          };
     }
   }
 }

@@ -128,12 +128,14 @@ export function inspectMcpRequest(body: Readonly<Record<string, unknown>>, optio
   const base = { requiredTool: options.requiredTool, catalog: options.catalog, toolNames };
   const required = tools.filter((tool) => tool['name'] === options.requiredTool);
   if (required.length > 0) {
-    if (required.length !== 1 || !isRequiredSchema(required[0])) return { ...base, ready: false, reason: 'malformed-schema' };
-    return { ...base, ready: true, reason: 'schema-visible', schemaHash: hash(required[0]) };
+    const tool = required[0];
+    if (required.length !== 1 || tool === undefined || !isRequiredSchema(tool)) return { ...base, ready: false, reason: 'malformed-schema' };
+    return { ...base, ready: true, reason: 'schema-visible', schemaHash: hash(tool) };
   }
   if (!options.catalog) return { ...base, ready: false, reason: 'missing-schema' };
   const selectors = tools.filter((tool) => tool['name'] === 'select_tools');
-  if (selectors.length !== 1 || !selectorSchema(selectors[0])) return { ...base, ready: false, reason: 'missing-selector' };
+  const selector = selectors[0];
+  if (selectors.length !== 1 || selector === undefined || !selectorSchema(selector)) return { ...base, ready: false, reason: 'missing-selector' };
   if (!Array.isArray(body['input']) || body['previous_response_id'] !== undefined && body['previous_response_id'] !== null) {
     return { ...base, ready: false, reason: 'incomplete-history' };
   }

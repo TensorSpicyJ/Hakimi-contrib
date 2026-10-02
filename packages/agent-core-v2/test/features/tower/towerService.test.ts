@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -9,6 +9,9 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
+import { IAgentLoopService } from '#/agent/loop/loop';
+import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
+import { stubLoopWithHooks, type StubLoop } from '../../agent/loop/stubs';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
@@ -43,13 +46,13 @@ function toolCall(name: string, id: string): ToolCall {
   return { type: 'function', id, name, arguments: '{}' };
 }
 
-function hookContext(toolCalls: ToolCall[]): ResolvedToolExecutionHookContext {
+function hookContext(toolCalls: ToolCall[], args: Record<string, unknown> = {}): ResolvedToolExecutionHookContext {
   return {
     turnId: 0,
     signal,
     toolCall: toolCalls[0]!,
     toolCalls,
-    args: {},
+    args,
     execution: { approvalRule: toolCalls[0]!.name, execute: async () => ({ output: '' }) },
   };
 }
@@ -76,6 +79,8 @@ describe('AgentTowerService', () => {
   let executorEvents: ToolExecutorEventStubs;
   let permissionGateRan: boolean;
   let formatDenyMessage: Mock<(message: string) => string>;
+  let loop: StubLoop;
+  let inactivePolicyTool: string | undefined;
 
   beforeEach(() => {
     disposables = new DisposableStore();
@@ -90,6 +95,12 @@ describe('AgentTowerService', () => {
     ix.stub(IAgentToolExecutorService, executorEvents.executor);
     formatDenyMessage = vi.fn((message: string) => message);
     ix.stub(IAgentToolApprovalService, { formatDenyMessage });
+    loop = stubLoopWithHooks();
+    ix.stub(IAgentLoopService, loop);
+    inactivePolicyTool = undefined;
+    ix.stub(IAgentToolPolicyService, {
+      isToolActive: (name: string) => name !== inactivePolicyTool,
+    } as unknown as IAgentToolPolicyService);
     // Write-guard dependencies — inert defaults; the guard tests re-stub them
     // with a worker profile / roster-backed repo before resolving the service.
     ix.stub(IAgentProfileService, {
@@ -103,6 +114,10 @@ describe('AgentTowerService', () => {
     registerTestAgentWire(ix, testWireScope('wire', 'tower-test'), {
       log: ix.get(IAppendLogStore),
       eventBus: ix.get(IEventBus),
+    });
+    ix.stub(IAgentScopeContext, {
+      agentId: 'main',
+      scope: (subKey?: string) => subKey ?? '',
     });
     ix.set(IAgentTowerService, new SyncDescriptor(AgentTowerService));
   });
@@ -257,6 +272,123 @@ describe('AgentTowerService', () => {
     expect(decision).toBeUndefined();
     expect(permissionGateRan).toBe(true);
     expect(formatDenyMessage).not.toHaveBeenCalled();
+  });
+
+  it('vetoes foreground resume of a roster agent unless task controls are unavailable', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'tower-resume-test-'));
+    try {
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+      await execFileAsync('git', ['config', 'user.email', 'tower-test@example.com'], { cwd: repo });
+      await execFileAsync('git', ['config', 'user.name', 'Tower Test'], { cwd: repo });
+      await writeFile(join(repo, 'README.md'), '# fixture\n');
+      await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+      await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: repo });
+      const store = new TowerStore(repo);
+      await store.init();
+      await store.registerAgent({
+        name: 'worker-a',
+        agentId: 'agent-worker-a',
+        kind: 'worker',
+        spawnedAt: new Date().toISOString(),
+      });
+      const stateFile = join(repo, '.tower/comms/state.json');
+      const state = JSON.parse(await readFile(stateFile, 'utf8')) as {
+        roster: { agents: Record<string, unknown>[] };
+      };
+      state.roster.agents.unshift({
+        name: 'worker-stale',
+        agentId: 'agent-worker-a',
+        kind: 'worker',
+        spawnedAt: '2026-09-13T08:00:00.000Z',
+      });
+      await writeFile(stateFile, `${JSON.stringify(state)}\n`);
+      ix.stub(ISessionContext, { cwd: repo } as unknown as ISessionContext);
+      const tower = ix.get(IAgentTowerService);
+      tower.enter();
+
+      const veto = await fire(
+        hookContext([toolCall('Agent', 'call_resume')], { resume: ' agent-worker-a ' }),
+      );
+      expect(veto?.veto?.output).toContain('worker-a');
+      expect(veto?.veto?.output).not.toContain('worker-stale');
+      expect(veto?.veto?.output).toContain('run_in_background=true');
+
+      const background = await fire(
+        hookContext([toolCall('Agent', 'call_background')], {
+          resume: 'agent-worker-a',
+          run_in_background: true,
+        }),
+      );
+      expect(background).toBeUndefined();
+
+      for (const name of ['TaskList', 'TaskOutput', 'TaskStop']) {
+        inactivePolicyTool = name;
+        const decision = await fire(
+          hookContext([toolCall('Agent', `call_${name}`)], { resume: 'agent-worker-a' }),
+        );
+        expect(decision).toBeUndefined();
+      }
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('coalesces inbox signals, truncates the latest subject, and drains a later batch after materialization', async () => {
+    const tower = ix.get(IAgentTowerService);
+    tower.enter();
+    expect(tower.isActive).toBe(true);
+    const enqueue = vi.spyOn(loop, 'enqueue');
+    tower.notifyInbox({ from: 'worker-a', to: 'tower', subject: 'first' });
+    tower.notifyInbox({ from: 'worker-b', to: 'all', subject: 'x'.repeat(121) });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(loop.queue.hasPendingRequests()).toBe(true);
+
+    const messages: unknown[] = [];
+    loop.drainNextBatch({ append: (...items) => messages.push(...items) });
+    expect(JSON.stringify(messages)).toContain('2 new tower inbox messages');
+    expect(JSON.stringify(messages)).toContain(`${'x'.repeat(120)}…`);
+
+    tower.notifyInbox({ from: 'worker-c', to: 'tower', subject: 'later' });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(loop.queue.hasPendingRequests()).toBe(true);
+    const later: unknown[] = [];
+    loop.drainNextBatch({ append: (...items) => later.push(...items) });
+    expect(JSON.stringify(later)).toContain('latest from worker-c:');
+    expect(JSON.stringify(later)).toContain('later');
+  });
+
+  it('drops an inbox wake when disposed before its microtask runs', async () => {
+    const tower = ix.get(IAgentTowerService) as AgentTowerService;
+    tower.enter();
+    tower.notifyInbox({ from: 'worker-a', to: 'tower', subject: 'disposed' });
+    tower.dispose();
+    await Promise.resolve();
+    expect(loop.queue.hasPendingRequests()).toBe(false);
+  });
+
+  it('retries inbox wake after enqueue fails without an unhandled error', async () => {
+    const tower = ix.get(IAgentTowerService);
+    tower.enter();
+    const enqueue = vi.spyOn(loop, 'enqueue').mockImplementationOnce(() => {
+      throw new Error('loop unavailable');
+    });
+    tower.notifyInbox({ from: 'worker-a', to: 'tower', subject: 'retry' });
+    await Promise.resolve();
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    enqueue.mockRestore();
+    tower.notifyInbox({ from: 'worker-b', to: 'tower', subject: 'retry again' });
+    await Promise.resolve();
+    expect(loop.queue.hasPendingRequests()).toBe(true);
+  });
+
+  it('drops a scheduled inbox wake on exit', async () => {
+    const tower = ix.get(IAgentTowerService);
+    tower.enter();
+    tower.notifyInbox({ from: 'worker-a', to: 'tower', subject: 'stale' });
+    tower.exit();
+    await Promise.resolve();
+    expect(loop.queue.hasPendingRequests()).toBe(false);
   });
 
   describe('tower-worker write guard', () => {

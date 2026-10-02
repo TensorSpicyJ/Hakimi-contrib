@@ -556,6 +556,7 @@ function isFullHostFs(input: unknown): boolean {
     'stat',
     'readdir',
     'mkdir',
+    'createTempDirectory',
     'remove',
   ];
   return keys.every((k) => typeof (input as Record<string, unknown>)[k] === 'function');

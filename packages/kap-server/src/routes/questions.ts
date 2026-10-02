@@ -333,6 +333,7 @@ export function toWireQuestion(
   const out: ProtocolQuestionRequest = {
     question_id: interaction.id,
     session_id: sessionId,
+    agent_id: interaction.origin.agentId ?? 'main',
     questions: req.questions.map((q, i) => buildItem(q, i)),
     created_at: createdAt,
   };

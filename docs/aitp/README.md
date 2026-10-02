@@ -318,7 +318,7 @@ AITP adapter 前应阅读两侧的交接文档；AITP stage/CLI/schema 状态变
   SDK、klient、TUI 与 Web；它只区分 `review_requested` 与
   `handoff_unavailable`，不表示 trigger、card、trial、review completion、
   approval 或 publication。该 receipt 无 public mutation、retry、scheduler
-  或 H6b recovery 语义。S9 又用真实 ABACUS job-1097 packet 完成 bounded
+  或 H6b recovery 语义。S9 又用本地计算验证包完成 bounded
   revalidation、exact-workstream atomic AITP commit、失败/恢复/no-delta retry、
   单 observation 的条件性 no-card review，以及 REST/WS/SDK/klient/TUI/Web
   同一投影核验。scoped check clean 仍不等于全库健康；当前 Board 不单独公开

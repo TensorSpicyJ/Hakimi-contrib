@@ -5,8 +5,10 @@
  * Discovers project skills from the handler's workspace root
  * (`workspaceContext.cwd`) through `ISkillDiscovery`, contributing them at
  * priority 30. Watches project skill-root candidates through `hostFsWatch`
- * and emits debounced invalidations for source reloads. Bound at Workspace
- * scope so every session of the handler shares one scan.
+ * and emits debounced invalidations for source reloads. Missing roots use a
+ * shallow, candidate-filtered watch on the nearest existing ancestor, then
+ * narrow to the skill root once it appears. Bound at Workspace scope so every
+ * session of the handler shares one scan.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
@@ -21,7 +23,7 @@ import {
   type MergeAllAvailableSkillsConfig,
 } from '#/app/skillCatalog/configSection';
 import { ISkillDiscovery } from '#/app/skillCatalog/skillDiscovery';
-import { projectRoots, projectSkillRootCandidates } from '#/app/skillCatalog/skillRoots';
+import { existingSkillWatchRoot, projectRoots, projectSkillRootCandidates } from '#/app/skillCatalog/skillRoots';
 import {
   SKILL_SOURCE_PRIORITY,
   type ISkillSource,
@@ -93,25 +95,34 @@ export class WorkspaceRootSkillSource extends Disposable implements IWorkspaceRo
   private async updateProjectSkillRootWatch(
     scannedDirectories: readonly string[],
   ): Promise<boolean> {
-    const { projectRoot, candidates } = await projectSkillRootCandidates(this.workspace.cwd);
-    const signature = [...scannedDirectories].toSorted().join('\0');
+    const { candidates } = await projectSkillRootCandidates(this.workspace.cwd);
+    const watches = await Promise.all(candidates.map(async (candidate) => ({
+      candidate,
+      root: await existingSkillWatchRoot(candidate),
+    })));
+    const signature = JSON.stringify({ watches, scannedDirectories: [...scannedDirectories].toSorted() });
     if (signature === this.watchSignature) return false;
     const resources = this.watchResources.add(new DisposableStore());
-    const handle = this.fsWatch.watch(projectRoot, {
-      ignored: subtreeWatchFilter(projectRoot, candidates, {
-        scannedDirectories,
-        keepEntryFile: 'SKILL.md',
-      }),
-      signal: true,
-    });
-    resources.add(handle);
-    resources.add(
-      handle.onDidChange(() => {
-        this.watchDebounce.cancelAndSet(() => this.onDidChangeEmitter.fire(), WATCH_DEBOUNCE_MS);
-      }),
-    );
     try {
-      await handle.ready;
+      await Promise.all(
+        watches.map(async ({ candidate, root }) => {
+          const handle = this.fsWatch.watch(root, {
+            ignored: subtreeWatchFilter(root, [candidate], {
+              scannedDirectories,
+              keepEntryFile: 'SKILL.md',
+            }),
+            recursive: root === candidate,
+            signal: true,
+          });
+          resources.add(handle);
+          resources.add(
+            handle.onDidChange(() => {
+              this.watchDebounce.cancelAndSet(() => this.onDidChangeEmitter.fire(), WATCH_DEBOUNCE_MS);
+            }),
+          );
+          await handle.ready;
+        }),
+      );
     } catch (error) {
       this.watchResources.delete(resources);
       throw error;
@@ -124,4 +135,3 @@ export class WorkspaceRootSkillSource extends Disposable implements IWorkspaceRo
     return true;
   }
 }
-

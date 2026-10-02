@@ -57,19 +57,44 @@ export interface LoadMcpServersInput {
   readonly includeProject?: boolean;
 }
 
+export interface LoadMcpServersDetailedResult {
+  readonly servers: Record<string, McpServerConfig>;
+  readonly origins: Record<string, string>;
+}
+
 export async function loadMcpServers(
   input: LoadMcpServersInput,
 ): Promise<Record<string, McpServerConfig>> {
+  return (await loadMcpServersDetailed(input)).servers;
+}
+
+export async function loadMcpServersDetailed(
+  input: LoadMcpServersInput,
+): Promise<LoadMcpServersDetailedResult> {
   const paths = await resolveMcpJsonPaths(input);
   if (input.includeProject === false) {
-    return readMcpJson(input.fs, paths.user);
+    const user = await readMcpJson(input.fs, paths.user);
+    return { servers: user, origins: mapValuesToPath(user, paths.user) };
   }
-  const [user, projectRoot, project] = await Promise.all([
-    readMcpJson(input.fs, paths.user),
-    readMcpJson(input.fs, paths.projectRoot, { stdioCwdBase: dirname(paths.projectRoot) }),
-    readMcpJson(input.fs, paths.project),
-  ]);
-  return { ...user, ...projectRoot, ...project };
+  const layers: readonly [path: string, servers: Record<string, McpServerConfig>][] =
+    await Promise.all([
+      readMcpJson(input.fs, paths.user),
+      readMcpJson(input.fs, paths.projectRoot, { stdioCwdBase: dirname(paths.projectRoot) }),
+      readMcpJson(input.fs, paths.project),
+    ]).then(([user, projectRoot, project]) => [
+      [paths.user, user],
+      [paths.projectRoot, projectRoot],
+      [paths.project, project],
+    ]);
+  const servers: Record<string, McpServerConfig> = Object.create(null);
+  const origins: Record<string, string> = Object.create(null);
+  for (const [path, layer] of layers) {
+    for (const [name, config] of Object.entries(layer)) {
+      servers[name] = config;
+      origins[name] = path;
+    }
+  }
+  return { servers, origins };
 }
 
 interface ReadMcpJsonOptions {
@@ -131,6 +156,17 @@ function normalizeStdioCwd(config: McpServerConfig, cwdBase: string): McpServerC
 
 function resolvePath(base: string, value: string): string {
   return isAbsolute(value) ? normalize(value) : resolve(base, value);
+}
+
+function mapValuesToPath(
+  servers: Record<string, McpServerConfig>,
+  path: string,
+): Record<string, string> {
+  const origins: Record<string, string> = Object.create(null);
+  for (const name of Object.keys(servers)) {
+    origins[name] = path;
+  }
+  return origins;
 }
 
 function isFileNotFound(error: unknown): boolean {

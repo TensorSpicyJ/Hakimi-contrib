@@ -5,7 +5,7 @@ import {
 } from '../src/lib/conversationVisibility';
 
 describe('conversation visibility', () => {
-  it('keeps the central Composer for an empty transcript, including active Research', () => {
+  it('keeps the central Composer for an empty transcript', () => {
     expect(shouldShowChatDock(0, false)).toBe(false);
     expect(shouldShowEmptyConversation(0, false)).toBe(true);
   });
