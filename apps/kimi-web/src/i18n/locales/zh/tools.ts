@@ -17,7 +17,9 @@ export default {
     goal_get: '读取目标',
     goal_budget: '设置目标预算',
     goal_update: '更新目标',
+    start_session: '新建会话',
   },
+  openSession: '打开会话',
   swarm: {
     progress: '{done} / {total}',
     activeSub: '运行中 {running} · 排队 {queued} · 挂起 {suspended}',

@@ -386,7 +386,7 @@ describe('server-v2 /api/v1 skills', () => {
       await mkdir(join(pluginRoot, 'skills', 'aitp'), { recursive: true });
       await writeFile(
         join(pluginRoot, 'kimi.plugin.json'),
-        JSON.stringify({ name: 'aitp-research-protocol', version: '0.8.0', skills: './skills' }),
+        JSON.stringify({ name: 'aitp', version: '1.1.0', skills: './skills' }),
       );
       await writeFile(
         join(pluginRoot, 'skills', 'aitp', 'SKILL.md'),

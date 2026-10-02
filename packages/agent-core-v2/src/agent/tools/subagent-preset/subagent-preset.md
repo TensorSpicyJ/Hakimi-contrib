@@ -2,9 +2,11 @@ Activate a configured `[subagent]` routing preset so the next `Agent` / `AgentSw
 spawn uses its model routes immediately.
 
 Pass the preset name from `[subagent].presets`. The tool validates that the preset
-exists and that every route model it references resolves, then persists and manually
-locks the active preset. Automatic selection will not replace that choice until the
-user resumes it from Hakimi Web or runs `/preset auto` in the TUI. The tool never
+exists and that every route model it references resolves, then persists the active
+preset without changing the manual lock. If automatic selection is enabled and
+unlocked, it remains active and may choose another preset on a later evaluation.
+An existing manual lock is preserved; only the user controls that lock from Hakimi
+Web or `/preset` in the TUI. The tool never
 touches the main or default model or thinking configuration, never reloads the session,
 and reports `main_model_changed: false` on success. Before
 spawning many subagents, use `GetProviderUsage` for every supported provider and

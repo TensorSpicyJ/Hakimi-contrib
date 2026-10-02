@@ -442,7 +442,9 @@ describe('AgentPluginService plugin-change reminder', () => {
       const sinkChange = new Emitter<string>();
       ctx = createTestAgent(
         { autoConfigure: true },
-        appService(IBootstrapService, stubBootstrap(home)),
+        appService(IBootstrapService, stubBootstrap(home, {
+          KIMI_CODE_EXPERIMENTAL_PERSISTENCE_MINIDB_READMODEL: 'false',
+        })),
         appService(
           IProviderService,
           stubProviderService({
@@ -568,9 +570,9 @@ describe('AgentPluginService plugin-change reminder', () => {
       expect(visibilityEvents).toBe(0);
       await mode.enter({ actor: 'user' });
       await mode.enter({ actor: 'user' });
-      expect(visibilityEvents).toBe(1);
+      expect(visibilityEvents).toBe(0);
       await mode.exit();
-      expect(visibilityEvents).toBe(2);
+      expect(visibilityEvents).toBe(0);
     } finally {
       subscription.dispose();
       sinkChange.dispose();

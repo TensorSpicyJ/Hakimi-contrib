@@ -186,6 +186,39 @@ describe('SessionPickerComponent', () => {
     expect(otherLine).not.toContain('← current');
   });
 
+  it('marks a handoff session as live in this process', () => {
+    const now = new Date('2026-05-11T12:00:00.000Z').getTime();
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+
+    const component = new SessionPickerComponent({
+      sessions: [
+        {
+          id: 'ses_background',
+          title: 'handed-off work',
+          work_dir: '/tmp/project-b',
+          updated_at: now,
+          background: { status: 'waiting' },
+        },
+        {
+          id: 'ses_other',
+          title: 'ordinary session',
+          work_dir: '/tmp/project',
+          updated_at: now - 60 * 1000,
+        },
+      ],
+      loading: false,
+      currentSessionId: 'ses_other',
+      onSelect: vi.fn(),
+      onCancel: vi.fn(),
+    });
+
+    const lines = component.render(120).map((line) => stripAnsi(line));
+    const backgroundLine = lines.find((line) => line.includes('live in this process'));
+    const otherLine = lines.find((line) => line.includes('ordinary session'));
+    expect(backgroundLine).toContain('live in this process · waiting');
+    expect(otherLine).not.toContain('live in this process');
+  });
+
   it('places the relative time on the same line as the title, not right-aligned', () => {
     const now = new Date('2026-05-11T12:00:00.000Z').getTime();
     vi.spyOn(Date, 'now').mockReturnValue(now);

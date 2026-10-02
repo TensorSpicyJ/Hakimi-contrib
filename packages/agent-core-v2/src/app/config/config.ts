@@ -7,7 +7,10 @@
  * per-run memory overrides) and writes through a `ConfigTarget`. Owners react
  * to edits through two change events — `onDidChangeConfiguration` (a domain was touched) and
  * `onDidSectionChange` (the delivered value actually changed, deep-diffed) —
- * each carrying the delivered `value` and `previousValue`.
+ * each carrying the delivered `value` and `previousValue`. `replaceSections`
+ * accepts either replacements or a synchronous factory over the latest target
+ * layer at write execution time. User replacements commit only after storage
+ * succeeds; factories receive an isolated snapshot, not live mutable state.
  *
  * Sections may bind fields to env vars (`envBindings`), resolved as
  * env > user config > default on every read; an env value that fails its
@@ -230,6 +233,10 @@ export interface ConfigDiagnostic {
 
 export type ResolvedConfig = Record<string, unknown>;
 
+export type ConfigSectionsUpdate =
+  | Readonly<ResolvedConfig>
+  | ((current: Readonly<ResolvedConfig>) => Readonly<ResolvedConfig>);
+
 export enum ConfigScope {
   Core = 'core',
   Session = 'session',
@@ -266,7 +273,7 @@ export interface IConfigService {
   set(domain: string, patch: unknown, target?: ConfigTarget): Promise<void>;
   replace(domain: string, value: unknown, target?: ConfigTarget): Promise<void>;
   replaceSections(
-    sections: Readonly<Record<string, unknown>>,
+    sections: ConfigSectionsUpdate,
     target?: ConfigTarget,
   ): Promise<void>;
   reload(): Promise<void>;

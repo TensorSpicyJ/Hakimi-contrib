@@ -1,6 +1,6 @@
 /**
  * Scenario: plan-mode Harness constraints as an `onBeforeExecuteTool` veto
- * listener. Responsibilities: verify Write/Edit plan-file allow and vetoes,
+ * listener. Responsibilities: verify Write/Edit/apply_patch plan-file allow and vetoes,
  * TaskStop/Cron vetoes, abstention on unrelated tools, and every ExitPlanMode
  * review branch (approve with/without option, Reject and Exit, Revise,
  * dismiss, auto / no-plan / empty-plan / non-plan_review skips) with
@@ -32,6 +32,7 @@ import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStateService } from '#/agent/state/agentStateService';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
+import { APPLY_PATCH_TOOL_NAME } from '#/agent/tools/apply-patch/apply-patch';
 import type {
   BeforeExecuteDecision,
   ResolvedToolExecutionHookContext,
@@ -41,6 +42,7 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import type { ToolCall } from '#/kosong/contract/message';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { START_SESSION_TOOL_NAME } from '#/features/sessionHandoff/tools/start-session/start-session';
 import { ToolAccesses } from '#/tool/toolContract';
 import type { ToolInputDisplay } from '#/tool/toolInputDisplay';
 
@@ -240,6 +242,48 @@ describe('AgentPlanService plan-guard listener', () => {
   }
 
   describe('guard', () => {
+    it('allows apply_patch when its only write target is the active plan file', async () => {
+      await enterPlan();
+
+      const decision = await run(hookContext(APPLY_PATCH_TOOL_NAME, {
+        accesses: ToolAccesses.readWriteFile(PLAN_PATH),
+      }));
+
+      expect(decision).toBeUndefined();
+      expect(permissionRan).toBe(false);
+    });
+
+    it('vetoes apply_patch when a multi-file patch also targets a code file', async () => {
+      await enterPlan();
+
+      const decision = await run(hookContext(APPLY_PATCH_TOOL_NAME, {
+        accesses: [
+          ...ToolAccesses.readWriteFile(PLAN_PATH),
+          ...ToolAccesses.readWriteFile('/workspace/src/main.ts'),
+        ],
+      }));
+
+      expect(decision?.veto).toMatchObject({
+        isError: true,
+        output: expect.stringContaining('current plan file'),
+      });
+      expect(permissionRan).toBe(false);
+    });
+
+    it('vetoes apply_patch when no plan-file write path is declared', async () => {
+      await enterPlan();
+
+      const decision = await run(hookContext(APPLY_PATCH_TOOL_NAME, {
+        accesses: ToolAccesses.none(),
+      }));
+
+      expect(decision?.veto).toMatchObject({
+        isError: true,
+        output: expect.stringContaining('current plan file'),
+      });
+      expect(permissionRan).toBe(false);
+    });
+
     it.each(['Write', 'Edit'] as const)(
       'lets a %s that only targets the active plan file through without other adjudication',
       async (toolName) => {
@@ -345,6 +389,37 @@ describe('AgentPlanService plan-guard listener', () => {
         expect(permissionRan).toBe(false);
       },
     );
+
+    it.each(['manual', 'auto', 'yolo'] as const)(
+      'blocks StartSession in %s mode while plan mode is active, before any approval',
+      async (permissionMode) => {
+        mode = permissionMode;
+        await enterPlan();
+        const decision = await run(
+          hookContext(START_SESSION_TOOL_NAME, {
+            args: { work_dir: '/work/target', prompt: 'Do the thing.' },
+            accesses: ToolAccesses.all(),
+          }),
+        );
+
+        expect(decision?.veto?.isError).toBe(true);
+        expect(decision?.veto?.output).toContain(START_SESSION_TOOL_NAME);
+        expect(decision?.veto?.output).toContain('ExitPlanMode');
+        expect(permissionRan).toBe(false);
+      },
+    );
+
+    it('abstains on StartSession while plan mode is inactive', async () => {
+      const decision = await run(
+        hookContext(START_SESSION_TOOL_NAME, {
+          args: { work_dir: '/work/target', prompt: 'Do the thing.' },
+          accesses: ToolAccesses.all(),
+        }),
+      );
+
+      expect(decision).toBeUndefined();
+      expect(permissionRan).toBe(true);
+    });
 
     it.each(['Read', 'Grep', 'Bash', 'CronList'] as const)(
       'abstains on %s while plan mode is active',

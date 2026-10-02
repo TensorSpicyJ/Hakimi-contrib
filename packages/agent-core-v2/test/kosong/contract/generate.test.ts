@@ -2,16 +2,25 @@
  * `kosong/contract` generate() — the stream-merging generation driver.
  *
  * Covers event normalization (text/think deltas merged, tool-call argument
- * deltas routed by stream index), the empty/thinking-only response
- * rejections, the abort contract (standard DOMException, stream cancelled),
- * callback plumbing, and per-turn intent passthrough via GenerateOptions.
+ * deltas routed by stream index), the Responses output-item identity rules
+ * (a late item id/phase folds onto the same item, declared item and refusal
+ * boundaries never merge), the empty/thinking-only response rejections, the
+ * abort contract (standard DOMException, stream cancelled), callback plumbing,
+ * and per-turn intent passthrough via GenerateOptions.
+ * Uses the real generation driver with a stub ChatProvider stream.
+ * Run: pnpm exec vitest run --project agent-core-v2 test/kosong/contract/generate.test.ts
  */
 
 import { describe, expect, it, vi } from 'vitest';
 
 import { APIEmptyResponseError } from '#/kosong/contract/errors';
 import { generate, type GenerateResult } from '#/kosong/contract/generate';
-import type { Message, StreamedMessagePart, ToolCall } from '#/kosong/contract/message';
+import type {
+  Message,
+  OpenAIResponsesPartMetadata,
+  StreamedMessagePart,
+  ToolCall,
+} from '#/kosong/contract/message';
 import type {
   ChatProvider,
   FinishReason,
@@ -358,5 +367,247 @@ describe('generate() per-turn intent passthrough', () => {
 
     expect(generateSpy).toHaveBeenCalledTimes(1);
     expect(generateSpy.mock.calls[0]?.[3]).toBe(options);
+  });
+});
+
+describe('generate() Responses output-item identity', () => {
+  it('keeps ordinary and refusal text separate when they belong to the same item', async () => {
+    const stream = new FakeStreamedMessage([
+      { type: 'text', text: 'I can help with a safe alternative. ', openaiResponses: { itemId: 'msg_1' } },
+      {
+        type: 'text',
+        text: 'I cannot help with that request.',
+        openaiResponses: { itemId: 'msg_1', contentType: 'refusal' },
+      },
+      { type: 'text', text: ' Here is another approach.', openaiResponses: { itemId: 'msg_1' } },
+    ]);
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([
+      { type: 'text', text: 'I can help with a safe alternative. ', openaiResponses: { itemId: 'msg_1' } },
+      {
+        type: 'text',
+        text: 'I cannot help with that request.',
+        openaiResponses: { itemId: 'msg_1', contentType: 'refusal' },
+      },
+      { type: 'text', text: ' Here is another approach.', openaiResponses: { itemId: 'msg_1' } },
+    ]);
+  });
+
+  it('merges refusal deltas when they belong to the same item', async () => {
+    const stream = new FakeStreamedMessage([
+      {
+        type: 'text',
+        text: 'I cannot help ',
+        openaiResponses: { itemId: 'msg_1', contentType: 'refusal' },
+      },
+      {
+        type: 'text',
+        text: 'with that request.',
+        openaiResponses: { itemId: 'msg_1', contentType: 'refusal' },
+      },
+    ]);
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([
+      {
+        type: 'text',
+        text: 'I cannot help with that request.',
+        openaiResponses: { itemId: 'msg_1', contentType: 'refusal' },
+      },
+    ]);
+  });
+
+  it('preserves the refusal tag when a late phase updates the same item', async () => {
+    const stream = new FakeStreamedMessage([
+      {
+        type: 'text',
+        text: 'I cannot help with that request.',
+        openaiResponses: { itemId: 'msg_1', contentType: 'refusal' },
+      },
+      { type: 'text', text: '', openaiResponses: { itemId: 'msg_1', phase: 'final_answer' } },
+    ]);
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([
+      {
+        type: 'text',
+        text: 'I cannot help with that request.',
+        openaiResponses: { itemId: 'msg_1', contentType: 'refusal', phase: 'final_answer' },
+      },
+    ]);
+  });
+
+  it('folds a late phase onto the text part already streamed for the same item', async () => {
+    const stream = new FakeStreamedMessage([
+      { type: 'text', text: 'Hel', openaiResponses: { itemId: 'msg_1' } },
+      { type: 'text', text: 'lo', openaiResponses: { itemId: 'msg_1' } },
+      { type: 'text', text: '', openaiResponses: { itemId: 'msg_1', phase: 'final_answer' } },
+    ]);
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([
+      {
+        type: 'text',
+        text: 'Hello',
+        openaiResponses: { itemId: 'msg_1', phase: 'final_answer' },
+      },
+    ]);
+  });
+
+  it('does not fold an unindexed part into a neighbouring declared item', async () => {
+    const stream = new FakeStreamedMessage([
+      { type: 'text', text: 'anonymous ' },
+      { type: 'text', text: 'named', openaiResponses: { itemId: 'msg_1' } },
+      { type: 'text', text: 'anonymous again' },
+    ]);
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([
+      { type: 'text', text: 'anonymous ' },
+      { type: 'text', text: 'named', openaiResponses: { itemId: 'msg_1' } },
+      { type: 'text', text: 'anonymous again' },
+    ]);
+  });
+
+  it('keeps a metadata update visible on a part already flushed into the message', async () => {
+    const metadata: OpenAIResponsesPartMetadata = { itemId: 'msg_1' };
+    const stream: StreamedMessage = {
+      id: 'gen-1',
+      usage: null,
+      finishReason: 'completed',
+      rawFinishReason: 'stop',
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'text', text: 'answer', openaiResponses: metadata };
+        metadata.phase = 'final_answer';
+        yield { type: 'text', text: 'next', openaiResponses: { itemId: 'msg_2' } };
+      },
+    };
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([
+      {
+        type: 'text',
+        text: 'answer',
+        openaiResponses: { itemId: 'msg_1', phase: 'final_answer' },
+      },
+      { type: 'text', text: 'next', openaiResponses: { itemId: 'msg_2' } },
+    ]);
+  });
+
+  it('folds a late phase into the item part that is no longer pending', async () => {
+    const stream = new FakeStreamedMessage([
+      { type: 'text', text: 'first', openaiResponses: { itemId: 'msg_a' } },
+      { type: 'text', text: 'second', openaiResponses: { itemId: 'msg_b' } },
+      { type: 'text', text: '', openaiResponses: { itemId: 'msg_a', phase: 'final_answer' } },
+    ]);
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([
+      {
+        type: 'text',
+        text: 'first',
+        openaiResponses: { itemId: 'msg_a', phase: 'final_answer' },
+      },
+      { type: 'text', text: 'second', openaiResponses: { itemId: 'msg_b' } },
+    ]);
+  });
+
+  it('does not apply a late update to an anonymous part', async () => {
+    const stream = new FakeStreamedMessage([
+      { type: 'text', text: 'anonymous' },
+      { type: 'text', text: '', openaiResponses: { itemId: 'msg_a', phase: 'final_answer' } },
+    ]);
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([{ type: 'text', text: 'anonymous' }]);
+  });
+
+  it('keeps a late encrypted update that has no matching item part', async () => {
+    const stream = new FakeStreamedMessage([
+      { type: 'think', think: '', encrypted: 'enc-1', openaiResponses: { itemId: 'rs_1' } },
+      { type: 'text', text: 'answer' },
+    ]);
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([
+      { type: 'think', think: '', encrypted: 'enc-1', openaiResponses: { itemId: 'rs_1' } },
+      { type: 'text', text: 'answer' },
+    ]);
+  });
+
+  it('does not merge text parts that declare different item ids', async () => {
+    const stream = new FakeStreamedMessage([
+      { type: 'text', text: 'first', openaiResponses: { itemId: 'msg_a' } },
+      { type: 'text', text: 'second', openaiResponses: { itemId: 'msg_b' } },
+    ]);
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([
+      { type: 'text', text: 'first', openaiResponses: { itemId: 'msg_a' } },
+      { type: 'text', text: 'second', openaiResponses: { itemId: 'msg_b' } },
+    ]);
+  });
+
+  it('does not merge think parts that declare different item ids', async () => {
+    const stream = new FakeStreamedMessage([
+      { type: 'think', think: 'first', openaiResponses: { itemId: 'rs_a' } },
+      { type: 'think', think: 'second', openaiResponses: { itemId: 'rs_b' } },
+      { type: 'text', text: 'answer' },
+    ]);
+    const { provider } = createFakeProvider(stream);
+
+    const result = await generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY);
+
+    expect(result.message.content).toEqual([
+      { type: 'think', think: 'first', openaiResponses: { itemId: 'rs_a' } },
+      { type: 'think', think: 'second', openaiResponses: { itemId: 'rs_b' } },
+      { type: 'text', text: 'answer' },
+    ]);
+  });
+
+  it('does not run a recorded tool call when the stream fails before completing', async () => {
+    const stream: StreamedMessage = {
+      id: 'gen-err',
+      usage: null,
+      finishReason: null,
+      rawFinishReason: null,
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: 'function',
+          id: 'call-a',
+          name: 'toolA',
+          arguments: '{"x":1}',
+        } as StreamedMessagePart;
+        throw new Error('socket hang up');
+      },
+    };
+    const { provider } = createFakeProvider(stream);
+    const onToolCall = vi.fn();
+
+    await expect(
+      generate(provider, SYSTEM_PROMPT, NO_TOOLS, HISTORY, { onToolCall }),
+    ).rejects.toThrow('socket hang up');
+    expect(onToolCall).not.toHaveBeenCalled();
   });
 });

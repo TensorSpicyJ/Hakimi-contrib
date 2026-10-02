@@ -51,6 +51,7 @@ import {
   type ToolCall,
 } from '#/kosong/contract/message';
 import type { ThinkingEffort } from '#/kosong/contract/provider';
+import type { ToolInfo } from '#/tool/toolContract';
 import type { ModelCapability } from '#/kosong/contract/capability';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
 import { IModelService } from '#/kosong/model/model';
@@ -180,6 +181,7 @@ function createService(
     readonly thinkingLevel?: ThinkingEffort;
     readonly contextMessages?: Message[];
     readonly ledger?: IProviderUsageLedgerService;
+    readonly tools?: readonly ToolInfo[];
   } = {},
 ) {
   const ix = disposables.add(new TestInstantiationService());
@@ -213,7 +215,7 @@ function createService(
   };
   const usage = { record: () => undefined, status: () => ({}) };
   const context = { get: () => options.contextMessages ?? history };
-  const tools = { list: () => [] };
+  const tools = { list: () => options.tools ?? [] };
   const config: Partial<IConfigService> = {
     get: (() => undefined) as IConfigService['get'],
   };
@@ -288,6 +290,27 @@ function createService(
 }
 
 describe('AgentLLMRequesterService measured anchors', () => {
+  it('preserves text input formats in requests and durable tool snapshots', async () => {
+    const captured: ModelRequestInput[] = [];
+    const tool: ToolInfo = {
+      name: 'text_edit', description: 'Edit text.', parameters: {}, source: 'builtin',
+      inputFormat: { type: 'text', grammar: { syntax: 'lark', definition: 'start: /.+/' } },
+    };
+    const { service, records } = createService(
+      createRequester({ value: 0 }, null, [], captured),
+      undefined,
+      { tools: [tool] },
+    );
+    await service.request();
+    expect(captured[0]?.tools).toMatchObject([{
+      name: 'text_edit',
+      inputFormat: { type: 'text', grammar: { syntax: 'lark', definition: 'start: /.+/' } },
+    }]);
+    expect(records.find((record) => record.type === 'llm.tools_snapshot')).toMatchObject({
+      tools: [{ name: 'text_edit', inputFormat: { type: 'text', grammar: { syntax: 'lark', definition: 'start: /.+/' } } }],
+    });
+  });
+
   it('skips the measured anchor when the stream reports no usage', async () => {
     const { service, measuredCalls } = createService(createRequester({ value: 0 }), undefined);
 

@@ -8,6 +8,7 @@ import BashTool from './BashTool.vue';
 import EditTool from './EditTool.vue';
 import GenericTool from './GenericTool.vue';
 import MediaTool from './MediaTool.vue';
+import StartSessionTool from './StartSessionTool.vue';
 import SwarmTool from './SwarmTool.vue';
 
 type ToolRenderer = Component;
@@ -27,5 +28,8 @@ export function resolveToolRenderer(tool: ToolCall): ToolRenderer {
   if (name === 'task') return AgentTool;
   if (name === 'agentswarm') return SwarmTool;
   if (name === 'askuserquestion') return AskUserTool;
+  // Cross-project handoff gets a dedicated card for its "open the new session"
+  // entry; everything else about it renders like the generic card.
+  if (name === 'startsession') return StartSessionTool;
   return GenericTool;
 }

@@ -13,10 +13,16 @@
  * `binding` resolved by the caller; without
  * one, spawns inherit the caller agent's model and thinking level. Spawn
  * bindings are resolved through the model catalog before lifecycle allocation.
- * Resume and retry ask `autoSubagentPreset` to evaluate each actual child
- * profile before reconciling active `[subagent]` field overrides and emitting
+ * Resume and retry consume `autoSubagentPreset`'s final binding separately for
+ * each actual child profile, including temporary fallbacks, before emitting
  * the run snapshot; profiles that explicitly preserve their binding skip both
- * evaluation and rebinding. Bound at Session scope — contributed into every
+ * resolution and rebinding. A resume target is resolved through
+ * `agentLifecycle.restore`, so a child the session has on disk but not live (a
+ * cold resume materializes `main` only) is materialized on demand; the
+ * ownership and kind check runs before that materialization, so an id the
+ * session has no record of, or one owned by another caller, is rejected without
+ * creating a scope. Bound at Session
+ * scope — contributed into every
  * Session scope by `SwarmFeature` (`features/swarm/swarmFeature`).
  */
 
@@ -220,8 +226,9 @@ export class SessionSwarmService implements ISessionSwarmService {
   ): Promise<AgentRunAttemptHandle> {
     options.signal.throwIfAborted();
     await this.requireOwnedSubagent(callerAgentId, agentId);
+    options.signal.throwIfAborted();
     const caller = this.requireHandle(callerAgentId, 'Caller agent');
-    const child = this.requireHandle(agentId, 'Agent instance');
+    const child = await this.restoreHandle(agentId);
     this.requireIdleSubagent(agentId, child);
     await this.catalog.ready;
     const childProfileService = child.accessor.get(IAgentProfileService);
@@ -229,13 +236,14 @@ export class SessionSwarmService implements ISessionSwarmService {
     const childProfile =
       childData.profileName === undefined ? undefined : this.catalog.get(childData.profileName);
     const callerData = caller.accessor.get(IAgentProfileService).data();
+    let validatedBinding;
     if (
       childData.profileName !== undefined &&
       childData.modelAlias !== undefined &&
       callerData.modelAlias !== undefined &&
       childProfile?.preserveBindingOnResume !== true
     ) {
-      await this.autoPreset.evaluate(
+      validatedBinding = await this.autoPreset.resolveBinding(
         {
           route: 'swarm',
           profileName: childData.profileName,
@@ -248,6 +256,7 @@ export class SessionSwarmService implements ISessionSwarmService {
         { sessionId: this.sessionContext.sessionId, signal: options.signal },
       );
     }
+    options.signal.throwIfAborted();
     const resumed = await refreshSubagentBindingOnResume(
       this.config,
       this.flags,
@@ -256,9 +265,11 @@ export class SessionSwarmService implements ISessionSwarmService {
       childProfileService,
       callerData,
       'swarm',
+      validatedBinding,
     );
     const profileName = resumed.profileName ?? RESUMED_PROFILE_FALLBACK;
-    if (!retryTurn) {
+    if (!retryTurn || resumed.modelAlias !== childData.modelAlias ||
+        resumed.thinkingLevel !== childData.thinkingLevel) {
       const resumedModel = resumed.modelAlias;
       emitAgentRunSpawned(caller, agentId, {
         profileName,
@@ -304,6 +315,16 @@ export class SessionSwarmService implements ISessionSwarmService {
     const handle = this.lifecycle.get(agentId);
     if (handle === undefined) {
       throw new Error2(ErrorCodes.AGENT_NOT_FOUND, `${label} "${agentId}" does not exist`, {
+        details: { agentId },
+      });
+    }
+    return handle;
+  }
+
+  private async restoreHandle(agentId: string): Promise<IAgentScopeHandle> {
+    const handle = await this.lifecycle.restore(agentId);
+    if (handle === undefined) {
+      throw new Error2(ErrorCodes.AGENT_NOT_FOUND, `Agent instance "${agentId}" does not exist`, {
         details: { agentId },
       });
     }

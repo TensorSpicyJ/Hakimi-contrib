@@ -229,21 +229,98 @@ export type AutoSubagentPresetReasonCode =
   | 'activation_failed'
   | 'activation_no_effect';
 
-export type AutoSubagentPresetCandidateAvailability =
+export type SubagentRouteKind = 'agent' | 'swarm' | 'tower_worker' | 'tower_reviewer';
+export type SubagentBindingSource = 'preset' | 'agents' | 'legacy-secondary' | 'caller' | 'auto-fallback';
+export type AutoSubagentPresetRouteAvailability =
   | 'healthy'
   | 'route_unresolved'
   | 'quota_unknown'
   | 'quota_below_floor'
-  | 'circuit_open';
+  | 'circuit_open'
+  | 'balance_empty'
+  | 'balance_unknown'
+  | 'balance_invalid'
+  | 'account_unavailable'
+  | 'time_restricted'
+  | 'capability_unavailable'
+  | 'provider_unsupported'
+  | 'model_disabled';
+export type AutoSubagentPresetCandidateAvailability = AutoSubagentPresetRouteAvailability | 'partial' | 'unavailable';
+export type MeteredUsagePeriod = ProviderMeteredPeriod;
+export type LocalMeteredUsage = Omit<ProviderMeteredUsage, 'balance'>;
+/** Exponential expiring-quota priority evidence for one subscription window
+ *  (camelCase mirror of the daemon's snake_case `reset_priority`). Absent for
+ *  legacy snapshots and metered/unknown resources; never inferred client-side. */
+export interface AutoSubagentPresetResetPriority {
+  window: { duration: number; unit: 'minute' | 'hour' | 'day' | 'week' };
+  resetAt: number;
+  remainingPercent: number;
+  horizonMs: number;
+  bonus: number;
+  floorRelaxed: boolean;
+}
+export type AutoSubagentPresetResourceEvidence = (
+  | { kind: 'subscription'; resourceScore?: number; quotaRemainingPercent?: number; quotaResetAt?: number; resetPriority?: AutoSubagentPresetResetPriority }
+  | {
+      kind: 'metered';
+      currency: 'CNY';
+      balanceCny?: string;
+      isAvailable?: boolean;
+      balanceStatus: 'known' | 'query_failed' | 'invalid' | 'missing';
+      resourceScore?: 0 | 100;
+      resourceScoreBasis: 'funded_account';
+      meteredUsage?: LocalMeteredUsage;
+      peakPenalty?: { points: number; until: number };
+    }
+  | { kind: 'unknown'; reason: 'missing' | 'query_failed' | 'unsupported' }
+) & { blockedUntil?: number };
+export interface SubagentFallbackMetadata {
+  sourcePreset?: string;
+  sourceRole: string;
+  reason: Exclude<AutoSubagentPresetRouteAvailability, 'healthy'>;
+}
+export interface AutoSubagentPresetRouteScore {
+  model?: string;
+  thinking?: string;
+  provider?: string;
+  source?: SubagentBindingSource;
+  modelSource?: SubagentBindingSource;
+  thinkingSource?: SubagentBindingSource;
+  availability: AutoSubagentPresetRouteAvailability;
+  score?: number;
+  contributions: AutoSubagentPresetScoreContributions;
+  localEvidence: AutoSubagentPresetLocalEvidence;
+  resource: AutoSubagentPresetResourceEvidence;
+  circuitBreakerOpenUntil?: number;
+}
+export interface AutoSubagentPresetRoleScore {
+  key: string;
+  route: SubagentRouteKind;
+  profileName?: string;
+  weight: number;
+  original: AutoSubagentPresetRouteScore;
+  effective: AutoSubagentPresetRouteScore;
+  effectiveScore: number;
+  fallbackPenalty: number;
+  fallback?: SubagentFallbackMetadata;
+}
+export interface AutoSubagentPresetCoverage {
+  resourceProviderCount: number;
+  totalProviderCount: number;
+  localEvidenceRoleCount: number;
+  totalRoleCount: number;
+}
 
 export interface AutoSubagentPresetScoreContributions {
   quotaRemaining?: number;
+  resourceScore?: number;
   priorityBonus: number;
   resetBonus: number;
   routeFitBonus: number;
   tokenPenalty: number;
   reliabilityPenalty: number;
   latencyPenalty: number;
+  peakPenalty?: number;
 }
 
 export interface AutoSubagentPresetLocalEvidence {
@@ -258,6 +335,16 @@ export interface AutoSubagentPresetLocalEvidence {
 }
 
 export interface AutoSubagentPresetCandidateScore {
+  participating?: boolean;
+  nativeScore?: number;
+  roleScores?: AutoSubagentPresetRoleScore[];
+  coverage?: AutoSubagentPresetCoverage;
+  roleCount?: number;
+  nativeAvailableRoleCount?: number;
+  fallbackRoleCount?: number;
+  unavailableRoleCount?: number;
+  totalRoleWeight?: number;
+  deepseekRoleShare?: number;
   preset: string;
   provider?: string;
   availability: AutoSubagentPresetCandidateAvailability;
@@ -271,6 +358,15 @@ export interface AutoSubagentPresetCandidateScore {
 }
 
 export interface AutoSubagentPresetPolicySnapshot {
+  roleWeights?: Record<string, number>;
+  deepseekAvoidPeakHours?: boolean;
+  deepseekPeakPolicy?: 'block' | 'penalize' | 'off';
+  deepseekPeakPenalty?: number;
+  fallbackPenalty?: number;
+  meteredFundedResourceScore?: number;
+  resetPriorityWindowMs?: number;
+  resetPriorityExponent?: number;
+  resetPriorityMaxBonus?: number;
   quotaFloorPercent: number;
   switchMarginPercent: number;
   localUsageWindowMs: number;
@@ -285,6 +381,8 @@ export interface AutoSubagentPresetPolicySnapshot {
 
 /** Latest process-global automatic subagent-preset evaluation (v2 only). */
 export interface AutoSubagentPresetStatus {
+  /** Absent in legacy single-route snapshots; never inferred by the client. */
+  evaluationScope?: 'preset';
   evaluatedAt: number;
   route: 'agent' | 'swarm' | 'tower_worker' | 'tower_reviewer';
   profileName?: string;
@@ -912,9 +1010,16 @@ export interface SubagentAutoPresetConfig {
    *  "manual lock" state and offers a resume-auto action that clears only this
    *  field (never the active preset or the auto-switching gates). */
   manualLock?: boolean;
+  roleWeights?: Record<string, number>;
+  deepseekAvoidPeakHours?: boolean;
+  deepseekPeakPolicy?: 'block' | 'penalize' | 'off';
+  deepseekPeakPenalty?: number;
   candidates?: string[];
   quotaFloorPercent?: number;
   switchMarginPercent?: number;
+  resetPriorityWindowMs?: number;
+  resetPriorityExponent?: number;
+  resetPriorityMaxBonus?: number;
   localUsageWindowMs?: number;
   localUsageWeightPercent?: number;
   priorityWeightPercent?: number;
@@ -1060,6 +1165,14 @@ export interface AppConfig {
 }
 
 /** A session-scoped skill the user can invoke from the slash menu. */
+/** Installed plugin metadata, separate from session skill visibility. */
+export interface AppPlugin {
+  id: string;
+  version?: string;
+  enabled: boolean;
+  state: 'ok' | 'error';
+}
+
 export interface AppSkill {
   name: string;
   description: string;
@@ -1158,6 +1271,7 @@ export interface KimiWebApi {
   respondApproval(sessionId: string, approvalId: string, response: ApprovalResponse): Promise<{ resolved: true; resolvedAt: string }>;
   respondQuestion(sessionId: string, questionId: string, response: QuestionResponse): Promise<{ resolved: true; resolvedAt: string }>;
   dismissQuestion(sessionId: string, questionId: string): Promise<{ dismissed: true; dismissedAt: string }>;
+  listPlugins(): Promise<AppPlugin[]>;
   listSkills(sessionId: string): Promise<AppSkill[]>;
   /** List skills for a workspace (no session required) — GET /workspaces/{id}/skills. */
   listSkillsForWorkspace(workspaceId: string): Promise<AppSkill[]>;
@@ -1215,6 +1329,12 @@ export interface KimiWebApi {
   setConfig(patch: Partial<AppConfig>): Promise<AppConfig>;
   /** Latest process-global automatic routing evaluation; absent on old daemons or before first run. */
   getAutoSubagentPresetStatus(): Promise<AutoSubagentPresetStatus | undefined>;
+  /** Enable automatic selection and evaluate fresh usage without changing the main model. */
+  autoSelectSubagentPreset(sessionId?: string): Promise<{
+    config: AppConfig;
+    status: AutoSubagentPresetStatus;
+    warning?: string;
+  }>;
   /** Validate and serialize a manual preset choice; empty selects base routing. */
   activateSubagentPreset(preset: string): Promise<{ config: AppConfig; warning?: string }>;
   /** Query current plan limits and Extra Usage without exposing provider credentials. */

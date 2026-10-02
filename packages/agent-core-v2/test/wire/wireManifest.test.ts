@@ -11,9 +11,23 @@ import { readFileSync } from 'node:fs';
 import { Project } from 'ts-morph';
 import { describe, expect, it } from 'vitest';
 
-import { buildWireManifest, MANIFEST_PATH } from '../../scripts/gen-wire-manifest.mts';
+import { buildWireManifest, MANIFEST_PATH, sketchStringToTs } from '../../scripts/gen-wire-manifest.mts';
 
 describe('wire manifest', () => {
+  it('renders budget-truncated type sketches as unknown with their partial description', () => {
+    expect(sketchStringToTs('Example = | First | Sec… | undefined')).toEqual({
+      type: 'unknown',
+      doc: 'Example · | First | Sec… | undefined',
+    });
+  });
+
+  it('keeps complete string literal types containing an ellipsis unchanged', () => {
+    expect(sketchStringToTs("'loading…' | undefined")).toEqual({
+      type: "'loading…' | undefined",
+      doc: undefined,
+    });
+  });
+
   it('docs/wire-manifest.d.ts is up to date', async () => {
     const expected = await buildWireManifest();
     const actual = readFileSync(MANIFEST_PATH, 'utf-8');

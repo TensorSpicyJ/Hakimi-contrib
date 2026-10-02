@@ -166,6 +166,9 @@ describe('handleResearchCommand', () => {
     expect(text).toContain('Research memory mode: on');
     expect(text).toContain('AITP Skills: available');
     expect(text).toContain('read-only');
+    // The official plugin has no CLI and no ledger: the guidance must not imply one.
+    expect(text).not.toContain('CLI');
+    expect(text).not.toContain('ledger');
     expect(host.track).toHaveBeenCalledWith('research_status', { enabled: true });
   });
 
@@ -184,6 +187,7 @@ describe('handleResearchCommand', () => {
     await handleResearchCommand(host, 'manage');
     expect(session.commandResearch).not.toHaveBeenCalled();
     expect(host.showStatus).toHaveBeenCalledWith(expect.stringContaining('retired'));
+    expect(host.showStatus).toHaveBeenCalledWith(expect.not.stringContaining('CLI'));
     expect(host.restoreInputText).toHaveBeenCalledWith('/research manage');
   });
 

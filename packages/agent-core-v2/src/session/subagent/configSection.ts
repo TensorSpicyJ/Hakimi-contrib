@@ -24,6 +24,26 @@
  *   not a product control surface and provider/model maintenance must not
  *   rewrite it.
  *
+ * `auto_preset.role_weights` preserves role/profile keys verbatim; missing
+ * weights mean 1 and main is excluded from aggregate evaluation.
+ * `deepseek_peak_policy` explicitly selects block, penalize or off; when absent,
+ * legacy `deepseek_avoid_peak_hours` (default true) maps to block/off. The finite
+ * nonnegative `deepseek_peak_penalty` defaults to 60 points per effective role.
+ * The `reset_priority_*` knobs tune
+ * the exponential expiry-priority curve for declared subscription windows of at
+ * least one day: the horizon (capped at 30 days), the exponent, and the maximum
+ * bonus (0 disables the bonus and the quota-floor exception). The binding
+ * contract carries known
+ * ModelCapability requirements (true means required, false/absent imposes no
+ * constraint); temporary replacements always require tool_use, and multimodal
+ * roles require image_in. Unknown capabilities never satisfy a requirement.
+ * minContextTokens/minInputTokens refer to the matching capability token limits.
+ * `temporaryFallback` is per-dispatch evidence, never persisted into route tables;
+ * sourceRole uses the aggregate role key, and absent sourcePreset denotes base
+ * agents. Its original binding is absent only when resolution failed. Returned
+ * preset/manualRevision identify the selection revalidated for that dispatch;
+ * callers must consume model/thinking directly rather than resolving them again.
+ *
  * The legacy default is consulted only when no preset is active: Agent,
  * AgentSwarm, and Tower workers may use it when the `secondary-model` flag is
  * enabled, while Tower reviewers never do. It is best effort, so a dangling
@@ -34,8 +54,11 @@
  * Cross-field validation is enforced as `Error2(CONFIG_INVALID)` by
  * `assertValidSubagentModelConfig` before session materialization, with the
  * Session-scope validation service as backstop. It validates every canonical
- * entry in `agents` and only the active preset's entries; inactive presets and
- * legacy pool aliases are intentionally not startup blockers. `cascadeSubagentModelPool`
+ * entry in `agents` and only the active preset's entries. Unlocked automatic
+ * mode defers native subagent alias availability to the dispatch decider while
+ * retaining field-shape, nonblank-value and main-route validation. The evaluated
+ * activation boundary uses that same structural validation. Inactive presets
+ * and legacy pool aliases are intentionally not startup blockers. `cascadeSubagentModelPool`
  * remains exported for compatibility, but product provider/model maintenance
  * no longer calls it or rewrites the deprecated section.
  * Self-registered at module load via `registerConfigSection`.
@@ -54,6 +77,7 @@ import {
   type IConfigService,
 } from '#/app/config/config';
 import { registerConfigSection } from '#/app/config/configSectionContributions';
+import type { ModelCapability } from '#/kosong/contract/capability';
 import type { IModelCatalog } from '#/kosong/model/catalog';
 import {
   camelToSnake,
@@ -62,7 +86,7 @@ import {
   transformPlainObject,
 } from '#/app/config/toml';
 
-import { SECONDARY_MODEL_FLAG_ID } from './flag';
+import { AUTO_SUBAGENT_PRESET_FLAG_ID, SECONDARY_MODEL_FLAG_ID } from './flag';
 
 export const SUBAGENT_SECTION = 'subagent';
 export const SECONDARY_MODEL_SECTION = 'secondaryModel';
@@ -82,13 +106,54 @@ export type SubagentRouteKind =
   | typeof SUBAGENT_PRESET_TOWER_WORKER_ROUTE
   | typeof SUBAGENT_PRESET_TOWER_REVIEWER_ROUTE;
 
-export type SubagentBindingSource = 'preset' | 'agents' | 'legacy-secondary' | 'caller';
+export type SubagentBindingSource =
+  | 'preset'
+  | 'agents'
+  | 'legacy-secondary'
+  | 'caller'
+  | 'auto-fallback';
+
+export type SubagentRouteAvailability =
+  | 'healthy'
+  | 'route_unresolved'
+  | 'quota_unknown'
+  | 'quota_below_floor'
+  | 'circuit_open'
+  | 'balance_empty'
+  | 'balance_unknown'
+  | 'balance_invalid'
+  | 'account_unavailable'
+  | 'time_restricted'
+  | 'capability_unavailable'
+  | 'provider_unsupported'
+  | 'model_disabled';
+
+export type SubagentRouteRequirements = Partial<
+  Pick<ModelCapability, 'image_in' | 'video_in' | 'audio_in' | 'tool_use' | 'thinking' | 'dynamically_loaded_tools'>
+> & {
+  readonly minContextTokens?: number;
+  readonly minInputTokens?: number;
+};
 
 export interface SubagentRouteRequest {
   readonly route: SubagentRouteKind;
   readonly profileName?: string;
   readonly modelPreference?: AgentModelPreference;
   readonly caller: { readonly modelAlias: string; readonly thinkingLevel: string };
+  readonly requirements?: SubagentRouteRequirements;
+}
+
+export interface SubagentFallbackMetadata {
+  readonly sourcePreset?: string;
+  readonly sourceRole: string;
+  readonly reason: Exclude<SubagentRouteAvailability, 'healthy'>;
+}
+
+export interface SubagentTemporaryFallback extends SubagentFallbackMetadata {
+  readonly original?: Pick<
+    SubagentBindingResolution,
+    'model' | 'thinking' | 'source' | 'modelSource' | 'thinkingSource'
+  >;
 }
 
 export interface SubagentBindingResolution {
@@ -97,6 +162,9 @@ export interface SubagentBindingResolution {
   readonly source: SubagentBindingSource;
   readonly modelSource: SubagentBindingSource;
   readonly thinkingSource: SubagentBindingSource;
+  readonly preset?: string;
+  readonly manualRevision?: number;
+  readonly temporaryFallback?: SubagentTemporaryFallback;
 }
 
 export const DEFAULT_AUTO_PRESET_QUOTA_FLOOR_PERCENT = 25;
@@ -111,10 +179,27 @@ export const DEFAULT_AUTO_PRESET_CIRCUIT_BREAKER_FAILURE_THRESHOLD = 3;
 export const DEFAULT_AUTO_PRESET_CIRCUIT_BREAKER_COOLDOWN_MS = 15 * 60 * 1000;
 export const DEFAULT_AUTO_PRESET_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 export const DEFAULT_AUTO_PRESET_QUERY_TIMEOUT_MS = 5 * 1000;
+export const DEFAULT_AUTO_PRESET_RESET_PRIORITY_WINDOW_MS = 72 * 60 * 60 * 1000;
+export const MAX_AUTO_PRESET_RESET_PRIORITY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+export const DEFAULT_AUTO_PRESET_RESET_PRIORITY_EXPONENT = 3;
+export const DEFAULT_AUTO_PRESET_RESET_PRIORITY_MAX_BONUS = 200;
+export const MAX_AUTO_PRESET_RESET_PRIORITY_BONUS = 1000;
+export const DEFAULT_AUTO_PRESET_DEEPSEEK_PEAK_PENALTY = 60;
+
+export function resolveDeepseekPeakPolicy(settings: {
+  readonly deepseekPeakPolicy?: 'block' | 'penalize' | 'off';
+  readonly deepseekAvoidPeakHours?: boolean;
+}): 'block' | 'penalize' | 'off' {
+  return settings.deepseekPeakPolicy ?? (settings.deepseekAvoidPeakHours === false ? 'off' : 'block');
+}
 
 export const SubagentAutoPresetConfigSchema = z.object({
   enabled: z.boolean().default(false),
   manualLock: z.boolean().default(false),
+  roleWeights: z.record(z.string(), z.number().finite().nonnegative()).optional(),
+  deepseekAvoidPeakHours: z.boolean().default(true),
+  deepseekPeakPolicy: z.enum(['block', 'penalize', 'off']).optional(),
+  deepseekPeakPenalty: z.number().finite().min(0).max(1000).default(DEFAULT_AUTO_PRESET_DEEPSEEK_PEAK_PENALTY),
   candidates: z
     .array(z.string())
     .optional()
@@ -162,6 +247,22 @@ export const SubagentAutoPresetConfigSchema = z.object({
   refreshIntervalMs: z.number().int().positive().default(DEFAULT_AUTO_PRESET_REFRESH_INTERVAL_MS),
   queryTimeoutMs: z.number().int().positive().default(DEFAULT_AUTO_PRESET_QUERY_TIMEOUT_MS),
   allowExtraUsage: z.boolean().default(false),
+  resetPriorityWindowMs: z
+    .number()
+    .int()
+    .positive()
+    .max(MAX_AUTO_PRESET_RESET_PRIORITY_WINDOW_MS)
+    .default(DEFAULT_AUTO_PRESET_RESET_PRIORITY_WINDOW_MS),
+  resetPriorityExponent: z
+    .number()
+    .min(1)
+    .max(10)
+    .default(DEFAULT_AUTO_PRESET_RESET_PRIORITY_EXPONENT),
+  resetPriorityMaxBonus: z
+    .number()
+    .min(0)
+    .max(MAX_AUTO_PRESET_RESET_PRIORITY_BONUS)
+    .default(DEFAULT_AUTO_PRESET_RESET_PRIORITY_MAX_BONUS),
 });
 
 export type SubagentAutoPresetConfig = z.infer<typeof SubagentAutoPresetConfigSchema>;
@@ -173,6 +274,10 @@ export function resolveSubagentAutoPresetConfig(
   return {
     enabled: autoPreset?.enabled ?? false,
     manualLock: autoPreset?.manualLock ?? false,
+    roleWeights: autoPreset?.roleWeights,
+    deepseekAvoidPeakHours: autoPreset?.deepseekAvoidPeakHours ?? true,
+    deepseekPeakPolicy: resolveDeepseekPeakPolicy(autoPreset ?? {}),
+    deepseekPeakPenalty: autoPreset?.deepseekPeakPenalty ?? DEFAULT_AUTO_PRESET_DEEPSEEK_PEAK_PENALTY,
     candidates: autoPreset?.candidates,
     quotaFloorPercent: autoPreset?.quotaFloorPercent ?? DEFAULT_AUTO_PRESET_QUOTA_FLOOR_PERCENT,
     switchMarginPercent:
@@ -197,6 +302,12 @@ export function resolveSubagentAutoPresetConfig(
     refreshIntervalMs: autoPreset?.refreshIntervalMs ?? DEFAULT_AUTO_PRESET_REFRESH_INTERVAL_MS,
     queryTimeoutMs: autoPreset?.queryTimeoutMs ?? DEFAULT_AUTO_PRESET_QUERY_TIMEOUT_MS,
     allowExtraUsage: autoPreset?.allowExtraUsage ?? false,
+    resetPriorityWindowMs:
+      autoPreset?.resetPriorityWindowMs ?? DEFAULT_AUTO_PRESET_RESET_PRIORITY_WINDOW_MS,
+    resetPriorityExponent:
+      autoPreset?.resetPriorityExponent ?? DEFAULT_AUTO_PRESET_RESET_PRIORITY_EXPONENT,
+    resetPriorityMaxBonus:
+      autoPreset?.resetPriorityMaxBonus ?? DEFAULT_AUTO_PRESET_RESET_PRIORITY_MAX_BONUS,
   };
 }
 
@@ -519,21 +630,52 @@ export function describeSubagentModelOverride(
  */
 export function assertValidSubagentModelConfig(
   config: IConfigService,
-  _flags: IFlagService,
+  flags: IFlagService,
   modelCatalog: IModelCatalog,
 ): void {
   const subagent = readSubagentConfig(config);
   if (subagent === undefined) return;
+  const auto = resolveSubagentAutoPresetConfig(subagent);
+  const allowUnresolved = flags.enabled(AUTO_SUBAGENT_PRESET_FLAG_ID) && auto.enabled && !auto.manualLock;
+  assertSubagentRoutes(subagent, activeSubagentPreset(subagent), modelCatalog, allowUnresolved);
+}
 
-  for (const [profileName, entry] of Object.entries(subagent.agents ?? {})) {
-    assertCanonicalSubagentModelEntry(entry, `agents.${profileName}`, modelCatalog);
+export function assertValidEvaluatedSubagentPreset(
+  config: IConfigService,
+  modelCatalog: IModelCatalog,
+  preset: string,
+): void {
+  const subagent = readSubagentConfig(config) ?? {};
+  requireActivePreset(subagent, preset);
+  assertSubagentRoutes(subagent, preset, modelCatalog, true);
+}
+
+function assertSubagentRoutes(
+  subagent: SubagentConfig,
+  active: string | undefined,
+  modelCatalog: IModelCatalog,
+  allowUnresolved: boolean,
+): void {
+  const shape = SubagentConfigSchema.safeParse(subagent);
+  if (!shape.success) {
+    throw new Error2(ErrorCodes.CONFIG_INVALID, `[subagent] is invalid: ${shape.error.issues[0]?.message}.`, {
+      details: { section: SUBAGENT_SECTION },
+    });
   }
-
-  const active = activeSubagentPreset(subagent);
+  const validate = (entry: SubagentModelConfig, key: string, routeName: string): void => {
+    if (!allowUnresolved || key === SUBAGENT_PRESET_MAIN_PROFILE) {
+      assertCanonicalSubagentModelEntry(entry, routeName, modelCatalog);
+    } else {
+      canonicalRouteValue(entry.model, routeName, 'model');
+      canonicalRouteValue(entry.thinkingEffort, routeName, 'thinkingEffort');
+    }
+  };
+  for (const [profileName, entry] of Object.entries(subagent.agents ?? {})) {
+    validate(entry, profileName, `agents.${profileName}`);
+  }
   const preset = requireActivePreset(subagent, active);
-  if (preset === undefined) return;
-  for (const [routeName, entry] of Object.entries(preset)) {
-    assertCanonicalSubagentModelEntry(entry, `presets.${active}.${routeName}`, modelCatalog);
+  for (const [routeName, entry] of Object.entries(preset ?? {})) {
+    validate(entry, routeName, `presets.${active}.${routeName}`);
   }
 }
 

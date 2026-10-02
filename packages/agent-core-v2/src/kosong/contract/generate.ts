@@ -4,14 +4,19 @@
  * `generate()` is the single place that orchestrates "call
  * `ChatProvider.generate` and normalize the event stream": it merges streamed
  * deltas into a complete assistant `Message`, fires the caller's callbacks,
- * enforces the abort contract (standard abort DOMException, stream cancelled
- * on abort), and rejects empty or thinking-only responses with
- * `APIEmptyResponseError`.
+ * folds a late Responses update into the item part already accumulated (so the
+ * part carrying the item id also carries the phase or encrypted content that
+ * only arrived with the item's `done` event), enforces the abort contract
+ * (standard abort DOMException, stream cancelled on abort), and rejects empty
+ * or thinking-only responses with `APIEmptyResponseError`.
  */
 
 import { APIEmptyResponseError, createAbortError } from './errors';
 import {
+  applyLateResponsesPart,
+  applyLateResponsesPartTo,
   isContentPart,
+  isLateResponsesPart,
   isToolCall,
   isToolCallPart,
   mergeInPlace,
@@ -104,6 +109,15 @@ export async function generate(
                   ? part.argumentsPart
                   : target.arguments + part.argumentsPart;
             }
+            continue;
+          }
+        }
+
+        if (isLateResponsesPart(part)) {
+          const folded =
+            (pendingPart !== null && applyLateResponsesPart(pendingPart, part)) ||
+            applyLateResponsesPartTo(message.content, part);
+          if (folded || part.type === 'text' || part.encrypted === undefined) {
             continue;
           }
         }

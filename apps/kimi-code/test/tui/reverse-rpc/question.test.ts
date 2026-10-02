@@ -78,6 +78,21 @@ describe('question reverse-rpc', () => {
     await expect(handler(questionEvent())).resolves.toBeNull();
   });
 
+  it('carries the owning session identity into the question payload', async () => {
+    const controller = new QuestionController();
+    const show = vi.spyOn(controller, 'show').mockResolvedValue({ answers: ['Alpha'] });
+    const handler = createQuestionAskHandler(controller, {
+      sessionId: 'ses_b',
+      sessionLabel: '/tmp/project-b',
+    });
+
+    await handler(questionEvent());
+
+    expect(show).toHaveBeenCalledWith(
+      expect.objectContaining({ session_id: 'ses_b', session_label: '/tmp/project-b' }),
+    );
+  });
+
   it('maps multiple question answers by question text', async () => {
     const controller = new QuestionController();
     const show = vi

@@ -72,7 +72,8 @@ export class StubConfigService implements IConfigService {
     return Promise.resolve();
   }
 
-  replaceSections(sections: Readonly<Record<string, unknown>>): Promise<void> {
+  replaceSections(update: Parameters<IConfigService['replaceSections']>[0]): Promise<void> {
+    const sections = typeof update === 'function' ? update(this.getAll()) : update;
     for (const [domain, value] of Object.entries(sections)) {
       const previousValue = this._values.get(domain);
       if (value === undefined || value === null) {

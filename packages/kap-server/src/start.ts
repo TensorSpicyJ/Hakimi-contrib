@@ -81,6 +81,7 @@ import {
   type IRemoteShareController,
 } from './remoteShare/contract';
 import { type IRemotePersistentController } from './remotePersistent/contract';
+import { registerSessionHandoffBridge } from './sessionHandoff/sessionHandoffBridge';
 import { GuiStoreService } from './services/guiStore/guiStoreService';
 import {
   initializeServerTelemetry,
@@ -495,6 +496,10 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     // `event.config.changed` may be published by a pending batch while the
     // broadcaster is closing.
     disposeConfigChangeBridge();
+    // Revoke the handoff host / refusal guard before the listener stops: no
+    // creation during teardown may publish into a closing broadcaster, and a
+    // shared core must not keep this server's restricted-embedding refusal.
+    sessionHandoffBridge.dispose();
     await app.close();
     configWarningSubscription.dispose();
     pluginChangeSubscription.dispose();
@@ -547,6 +552,14 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     transcriptService,
   });
   const fsWatchBridge = new FsWatchBridge({ core, logger });
+  // Cross-project handoff: one `event.session.created` producer, the server's
+  // handoff host (pre-prompt broadcaster activation), and — only for a
+  // restricted embedding — the source-scoped refusal of session creation.
+  const sessionHandoffBridge = registerSessionHandoffBridge({
+    core,
+    broadcaster,
+    remoteAccess: opts.remoteAccess,
+  });
 
   // Push config warnings (deprecated keys / env vars in use, invalid sections)
   // to every WS connection as `event.config.warning` whenever the config

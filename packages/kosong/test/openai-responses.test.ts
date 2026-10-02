@@ -232,8 +232,15 @@ describe('OpenAIResponsesChatProvider', () => {
       ]);
     });
 
-    it('gpt-6-astra (and date suffixes) maps history system message to developer', async () => {
-      for (const model of ['gpt-6-astra', 'gpt-6-astra-2026-08-01']) {
+    it('gpt-6 family (astra/sol/luna, with suffixes) maps history system message to developer', async () => {
+      for (const model of [
+        'gpt-6-astra',
+        'gpt-6-astra-2026-08-01',
+        'gpt-6-sol',
+        'gpt-6-sol-2026-08-01',
+        'gpt-6-luna',
+        'GPT-6-LUNA',
+      ]) {
         const provider = new OpenAIResponsesChatProvider({
           model,
           apiKey: 'test-key',
@@ -256,6 +263,27 @@ describe('OpenAIResponsesChatProvider', () => {
             type: 'message',
           },
         ]);
+      }
+    });
+
+    it('uncatalogued gpt-6 slugs keep history system role unchanged', async () => {
+      for (const model of ['gpt-6-terra', 'gpt-6-astral', 'gpt-6-solar']) {
+        const provider = new OpenAIResponsesChatProvider({
+          model,
+          apiKey: 'test-key',
+        });
+        const history: Message[] = [
+          { role: 'system', content: [{ type: 'text', text: 'Remember this.' }], toolCalls: [] },
+          { role: 'user', content: [{ type: 'text', text: 'hi' }], toolCalls: [] },
+        ];
+        const body = await captureRequestBody(provider, '', [], history);
+
+        const input = body['input'] as Array<Record<string, unknown>>;
+        expect(input[0]).toEqual({
+          content: [{ type: 'input_text', text: 'Remember this.' }],
+          role: 'system',
+          type: 'message',
+        });
       }
     });
 

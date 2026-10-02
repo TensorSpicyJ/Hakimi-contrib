@@ -116,6 +116,8 @@ hakimi
 
 ## 运行时开关
 
+`KIMI_CODE_EXPERIMENTAL_TOOL_CATALOG`、`KIMI_CODE_EXPERIMENTAL_PROFILE_COMPACT_PROMPT` 和 `KIMI_CODE_EXPERIMENTAL_CONTEXT_CONTINUITY` 三个独立开关均默认关闭。将单项设为 `true` 可试用对应策略，设为 `false` 可强制关闭，但实验总开关开启时除外。组合配置和 A/B 对比规则见[实验功能配置](./config-files.md#experimental)。
+
 控制遥测、后台任务、plugin marketplace 等子系统行为的开关变量。旧版 `[experimental]` 下的 `openai-codex-oauth` 和 `aitp_research_mode` 仅作为不生效的兼容性输入保留，不再控制已经正式开放的 Codex OAuth 或 Research Mode 入口：
 
 | 环境变量 | 用途 | 合法值 |

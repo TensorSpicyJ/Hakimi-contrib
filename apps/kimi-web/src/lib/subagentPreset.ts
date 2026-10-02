@@ -3,7 +3,11 @@ import type {
   AutoSubagentPresetCandidateAvailability,
   AutoSubagentPresetCandidateScore,
   AutoSubagentPresetReasonCode,
+  AutoSubagentPresetResetPriority,
   AutoSubagentPresetStatus,
+  AutoSubagentPresetRoleScore,
+  AutoSubagentPresetRouteScore,
+  AutoSubagentPresetResourceEvidence,
   SubagentModelConfig,
 } from '../api/types';
 
@@ -66,11 +70,44 @@ export function subagentPresetManualLock(
   return config?.subagent?.autoPreset?.manualLock === true;
 }
 
-/** Minimal resume-auto patch: clears only `autoPreset.manualLock`. The active
- *  preset and the auto-switching preference are left untouched — resuming never
- *  rewrites routing or the two auto gates. */
-export function subagentPresetResumeAutoPatch(): Partial<AppConfig> {
-  return { subagent: { autoPreset: { manualLock: false } } };
+export function autoSubagentPresetUnavailableReason(
+  config: AppConfig | null | undefined,
+  flags: Readonly<Record<string, boolean>>,
+  t: SubagentPresetT,
+  supported?: boolean,
+): string | undefined {
+  if (!config) return t('header.subagentPresetConfigUnavailable');
+  // Cleared effective flags are unknown, not evidence that the route is absent.
+  // Only a completed metadata read (or the action's explicit 404) denies support.
+  if (supported === false) return t('header.subagentPresetAutoUnsupported');
+  if (autoSubagentPresetFlagOverridden(config, flags) && !flags[AUTO_SUBAGENT_PRESET_FLAG_ID]) {
+    return t('header.subagentPresetAutoEnvDisabled');
+  }
+  return undefined;
+}
+
+export function autoSubagentPresetActionLabel(
+  automatic: boolean,
+  locked: boolean,
+  t: SubagentPresetT,
+): string {
+  return t(automatic
+    ? 'header.subagentPresetAutoAgain'
+    : locked ? 'header.subagentPresetResumeAuto' : 'header.subagentPresetAutoSelect');
+}
+
+/** Every completed request gets feedback, including an unchanged selection. */
+export function autoSubagentPresetResultLabel(
+  config: AppConfig,
+  status: AutoSubagentPresetStatus,
+  locale: string,
+  t: SubagentPresetT,
+): string {
+  return t('header.subagentPresetAutoResult', {
+    preset: config.subagent?.preset || t('header.subagentPresetBaseOption'),
+    reason: subagentPresetReasonLabel(status.reasonCode, t),
+    time: new Date(status.evaluatedAt).toLocaleString(locale),
+  });
 }
 
 /**
@@ -223,6 +260,12 @@ export function subagentPresetCandidateSummary(
   now: number,
   t: SubagentPresetT,
 ): string {
+  if (candidate.roleScores !== undefined) {
+    return [subagentPresetCandidateState(candidate, t), subagentPresetRoleCounts(candidate, t),
+      subagentPresetPeakSummary(candidate, t),
+      candidate.localEvidence.sampleCount === 0 ? t('header.subagentPresetNoLocalEvidence') : '',
+    ].filter(Boolean).join(' · ');
+  }
   const circuit = subagentPresetRemainingLabel(
     candidate.circuitBreakerOpenUntil,
     now,
@@ -267,14 +310,16 @@ export function subagentPresetCandidateSummary(
 
 /** Full deterministic score breakdown for the read-only Settings diagnostics. */
 export function subagentPresetCandidateBreakdown(
-  candidate: AutoSubagentPresetCandidateScore,
+  candidate: Pick<AutoSubagentPresetCandidateScore, 'contributions'>,
   t: SubagentPresetT,
 ): string {
   const c = candidate.contributions;
   const parts = [
-    c.quotaRemaining === undefined
-      ? t('header.subagentPresetQuotaNoData')
-      : contributionLabel('quota', c.quotaRemaining, true, t),
+    c.resourceScore !== undefined
+      ? t('settings.presetScoring.resourceScore', { score: scoreValue(c.resourceScore) })
+      : c.quotaRemaining === undefined
+        ? t('header.subagentPresetQuotaNoData')
+        : contributionLabel('quota', c.quotaRemaining, true, t),
     contributionLabel('priority', c.priorityBonus, true, t),
     contributionLabel('reset', c.resetBonus, true, t),
     contributionLabel('routeFit', c.routeFitBonus, true, t),
@@ -282,6 +327,8 @@ export function subagentPresetCandidateBreakdown(
     contributionLabel('reliability', c.reliabilityPenalty, false, t),
     contributionLabel('latency', c.latencyPenalty, false, t),
   ];
+  if (c.peakPenalty !== undefined) parts.push(c.peakPenalty === 0 ? t('settings.presetScoring.peakNoPenalty')
+    : t('settings.presetScoring.peakRawPenalty', { points: scoreValue(c.peakPenalty) }));
   return parts.join(' · ');
 }
 
@@ -298,6 +345,196 @@ export function subagentPresetEvidenceLabel(
       : 'header.subagentPresetProviderEvidence',
     { count: candidate.localEvidence.sampleCount },
   );
+}
+
+export function subagentPresetEvaluationScopeLabel(
+  status: AutoSubagentPresetStatus,
+  t: SubagentPresetT,
+): string {
+  return t(status.evaluationScope === 'preset' && status.candidates.every((c) => c.roleScores !== undefined)
+    ? 'header.subagentPresetAggregate' : 'header.subagentPresetLegacy');
+}
+
+/** Current configuration is distinct from a historical automatic activation. */
+export function subagentPresetConfiguredLabel(config: Pick<AppConfig, 'subagent'> | null | undefined, t: SubagentPresetT): string {
+  return t('settings.smartRoutingConfiguredSelection', {
+    preset: config?.subagent?.preset?.trim() || t('header.subagentPresetBaseOption'),
+  });
+}
+
+/** Diagnostics retain removed presets, but history cannot re-enable a route. */
+export function subagentPresetDisplayRows(
+  names: readonly string[],
+  status: AutoSubagentPresetStatus | undefined,
+  candidates?: readonly string[],
+): Array<{ preset: string; candidate?: AutoSubagentPresetCandidateScore; configured: boolean; participating: boolean }> {
+  return [...new Set([...names, ...(status?.candidates.map((c) => c.preset) ?? [])])].map((preset) => {
+    const candidate = status?.candidates.find((c) => c.preset === preset);
+    const configured = names.includes(preset);
+    return { preset, candidate, configured, participating: configured && (candidates?.includes(preset) ?? candidate?.participating ?? true) };
+  });
+}
+
+/** Excluded but configured presets remain valid manual choices; deleted ones do not. */
+export function subagentPresetMenuRows(names: readonly string[], status: AutoSubagentPresetStatus | undefined, candidates?: readonly string[]) {
+  return subagentPresetDisplayRows(names, status, candidates).filter((row) => row.configured);
+}
+
+export function subagentPresetParticipationLabel(participating: boolean, t: SubagentPresetT): string {
+  return t(participating ? 'header.subagentPresetParticipating' : 'header.subagentPresetExcluded');
+}
+
+export function subagentPresetCandidateState(candidate: AutoSubagentPresetCandidateScore, t: SubagentPresetT): string {
+  if (candidate.roleScores === undefined) return t('header.subagentPresetLegacy');
+  if (candidate.availability !== 'healthy') return subagentPresetAvailabilityLabel(candidate.availability, t);
+  return t((candidate.fallbackRoleCount ?? candidate.roleScores.filter((r) => r.fallback).length) > 0
+    ? 'header.subagentPresetFallback' : 'header.subagentPresetNative');
+}
+
+export function subagentPresetTotals(candidate: AutoSubagentPresetCandidateScore | undefined, t: SubagentPresetT): string {
+  if (!candidate?.roleScores) return formatSubagentPresetScore(candidate?.score, t);
+  return t('header.subagentPresetTotals', {
+    native: presetScoreNumber(candidate.nativeScore, t), effective: presetScoreNumber(candidate.score, t),
+  });
+}
+
+export function presetScoreNumber(value: number | undefined, t: SubagentPresetT): string {
+  return value === undefined || !Number.isFinite(value) ? t('settings.presetScoring.unknown') : scoreValue(value);
+}
+
+export function subagentPresetRoleCounts(candidate: AutoSubagentPresetCandidateScore, t: SubagentPresetT): string {
+  return t('header.subagentPresetRoleCounts', {
+    native: candidate.nativeAvailableRoleCount ?? candidate.roleScores?.filter((r) => r.original.availability === 'healthy').length ?? 0,
+    total: candidate.roleCount ?? candidate.roleScores?.length ?? 0,
+    fallback: candidate.fallbackRoleCount ?? candidate.roleScores?.filter((r) => r.fallback).length ?? 0,
+    unavailable: candidate.unavailableRoleCount ?? candidate.roleScores?.filter((r) => r.effective.availability !== 'healthy').length ?? 0,
+  });
+}
+
+export function subagentPresetCoverageLabel(candidate: AutoSubagentPresetCandidateScore, t: SubagentPresetT): string {
+  const c = candidate.coverage;
+  return c ? t('settings.presetScoring.coverage', {
+    resources: c.resourceProviderCount, providers: c.totalProviderCount,
+    local: c.localEvidenceRoleCount, roles: c.totalRoleCount,
+  }) : t('header.subagentPresetNoData');
+}
+
+/** Decimal strings are money, never percentages. Missing/invalid is not zero. */
+export function formatPresetCny(value: string | null | undefined, locale: string, t: SubagentPresetT): string {
+  if (value === null || value === undefined || !/^\d+(?:\.\d+)?$/.test(value) || !Number.isFinite(Number(value))) {
+    return t('settings.presetScoring.unknown');
+  }
+  return new Intl.NumberFormat(locale, { style: 'currency', currency: 'CNY', currencyDisplay: 'narrowSymbol', minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(Number(value));
+}
+
+export function subagentPresetResourceLabel(resource: AutoSubagentPresetResourceEvidence, locale: string, t: SubagentPresetT): string {
+  if (resource.kind === 'unknown') return t(`settings.presetScoring.unknownResource.${resource.reason}`);
+  if (resource.kind === 'subscription') return resource.quotaRemainingPercent === undefined
+    ? t('header.subagentPresetQuotaNoData')
+    : t('settings.presetScoring.quota', { percent: resource.quotaRemainingPercent.toFixed(1) });
+  const parts = [t(`settings.presetScoring.balanceStatus.${resource.balanceStatus}`)];
+  if (resource.balanceStatus === 'known') parts.push(t('settings.presetScoring.balance', { amount: formatPresetCny(resource.balanceCny, locale, t) }));
+  if (resource.isAvailable === false) parts.push(t('header.subagentPresetAvailability.account_unavailable'));
+  return parts.join(' · ');
+}
+
+/** New snapshots override the legacy boolean; absent legacy evidence stays unknown. */
+export function subagentPresetPeakPolicyLabel(
+  policy: Partial<AutoSubagentPresetStatus['policy']>,
+  t: SubagentPresetT,
+): string | undefined {
+  const mode = policy.deepseekPeakPolicy ?? (policy.deepseekAvoidPeakHours === undefined
+    ? undefined : policy.deepseekAvoidPeakHours ? 'block' : 'off');
+  if (mode === undefined) return undefined;
+  const parts = [t('settings.presetScoring.peakPolicy', { mode: t(`settings.presetScoring.peakModes.${mode}`) })];
+  if (policy.deepseekPeakPenalty !== undefined) parts.push(t('settings.presetScoring.peakFullWeight', {
+    points: scoreValue(policy.deepseekPeakPenalty),
+  }));
+  return parts.join(' · ');
+}
+
+/** Display server facts, not a role-count ratio or a second score deduction. */
+export function subagentPresetPeakSummary(candidate: AutoSubagentPresetCandidateScore, t: SubagentPresetT): string | undefined {
+  const parts: string[] = [];
+  if (candidate.deepseekRoleShare !== undefined) parts.push(t('settings.presetScoring.peakShare', {
+    percent: scoreValue(candidate.deepseekRoleShare * 100),
+  }));
+  const penalty = candidate.contributions.peakPenalty;
+  if (penalty !== undefined) parts.push(penalty === 0 ? t('settings.presetScoring.peakNoPenalty')
+    : t('settings.presetScoring.peakRawPenalty', { points: scoreValue(penalty) }));
+  return parts.length > 0 ? parts.join(' · ') : undefined;
+}
+
+export function subagentPresetRolePeakLabel(resource: AutoSubagentPresetResourceEvidence, locale: string, t: SubagentPresetT): string | undefined {
+  if (resource.kind !== 'metered' || resource.peakPenalty === undefined) return undefined;
+  return t('settings.presetScoring.peakRole', {
+    points: scoreValue(resource.peakPenalty.points),
+    time: new Date(resource.peakPenalty.until).toLocaleString(locale, { timeZone: 'Asia/Shanghai' }),
+  });
+}
+
+/**
+ * Exponential expiring-quota evidence for one subscription window: the real
+ * window period (e.g. 1 week — never the short 5h throttle `quotaResetAt`),
+ * the real reset date and distance, the real remaining percent, and the
+ * server-computed bonus points. Absent evidence stays absent; the UI never
+ * recomputes the bonus or assumes the quota recovers at the reset time.
+ */
+export function subagentPresetResetPriorityLabel(
+  resetPriority: AutoSubagentPresetResetPriority | undefined,
+  now: number,
+  locale: string,
+  t: SubagentPresetT,
+): string | undefined {
+  if (resetPriority === undefined) return undefined;
+  return t('settings.presetScoring.resetPriority', {
+    window: t('settings.usageWindow', {
+      duration: resetPriority.window.duration,
+      unit: t(`settings.usageUnits.${resetPriority.window.unit}`),
+    }),
+    time: new Date(resetPriority.resetAt).toLocaleString(locale),
+    remaining: formatSubagentPresetDuration(Math.max(0, resetPriority.resetAt - now), t),
+    percent: resetPriority.remainingPercent.toFixed(1),
+    bonus: scoreValue(resetPriority.bonus),
+  });
+}
+
+/** Explains why a low-but-positive quota is still usable: the expiring window
+ *  relaxed the usual quota floor. Nothing else is waived. */
+export function subagentPresetResetFloorRelaxedLabel(
+  resetPriority: AutoSubagentPresetResetPriority | undefined,
+  t: SubagentPresetT,
+): string | undefined {
+  return resetPriority?.floorRelaxed === true
+    ? t('settings.presetScoring.resetFloorRelaxed')
+    : undefined;
+}
+
+export function subagentPresetBindingLabel(route: AutoSubagentPresetRouteScore, t: SubagentPresetT): string {
+  return `${route.model ?? t('settings.presetScoring.unknown')} · ${route.thinking ?? t('settings.presetScoring.unknown')}`;
+}
+
+export function subagentPresetBindingSourceLabel(route: AutoSubagentPresetRouteScore, t: SubagentPresetT): string {
+  const source = (value: string | undefined) => value ? t(`settings.presetScoring.sources.${value}`) : t('settings.presetScoring.unknown');
+  return t('settings.presetScoring.source', { model: source(route.modelSource ?? route.source), thinking: source(route.thinkingSource ?? route.source) });
+}
+
+export function subagentPresetRoleContribution(role: AutoSubagentPresetRoleScore, totalRoleWeight: number | undefined): number | undefined {
+  return totalRoleWeight !== undefined && totalRoleWeight > 0
+    ? role.weight * role.effectiveScore / totalRoleWeight : undefined;
+}
+
+/** The same account appears in many roles/presets. Render it once, never add its periods. */
+export function subagentPresetMeteredProviders(candidates: readonly AutoSubagentPresetCandidateScore[]): Array<{
+  provider: string; resource: Extract<AutoSubagentPresetResourceEvidence, { kind: 'metered' }>;
+}> {
+  const providers = new Map<string, Extract<AutoSubagentPresetResourceEvidence, { kind: 'metered' }>>();
+  for (const candidate of candidates) for (const role of candidate.roleScores ?? []) {
+    for (const route of [role.original, role.effective]) {
+      if (route.provider && route.resource.kind === 'metered' && !providers.has(route.provider)) providers.set(route.provider, route.resource);
+    }
+  }
+  return [...providers].map(([provider, resource]) => ({ provider, resource }));
 }
 
 /** Preset values carried by a `subagentPreset` status turn (marker metadata). */

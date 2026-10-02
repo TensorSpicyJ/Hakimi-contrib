@@ -105,6 +105,12 @@ export interface ProfileServiceOptions {
   readonly emitStatusUpdated?: () => void;
 }
 
+export interface ProfilePromptDiagnostics {
+  readonly compactPromptEnabled: boolean;
+  readonly policy: 'standard' | 'compact' | 'restored' | 'override';
+  readonly systemPromptBytes: number;
+}
+
 export interface ApplyProfileOptions {
   readonly additionalDirs?: readonly string[];
 }

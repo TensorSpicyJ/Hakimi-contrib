@@ -1,3 +1,10 @@
+/**
+ * Scenario: swarm scheduling and per-child spawn/resume/retry binding.
+ * Resolves the session coordinator through DI with lifecycle, routing and runs
+ * stubbed; asserts allocation, profile rebinding and requester display events.
+ * Run: pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run test/features/swarm/sessionSwarm.test.ts
+ */
+
 import { createControlledPromise } from '@antfu/utils';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
@@ -13,11 +20,7 @@ import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile'
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import { IEventBus, type DomainEvent } from '#/app/event/eventBus';
-import {
-  IAutoSubagentPresetService,
-  type AutoSubagentPresetContext,
-  type AutoSubagentPresetEvaluation,
-} from '#/app/autoSubagentPreset/autoSubagentPreset';
+import { IAutoSubagentPresetService } from '#/app/autoSubagentPreset/autoSubagentPreset';
 import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
 import {
@@ -26,6 +29,7 @@ import {
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import {
   SUBAGENT_SECTION,
+  resolveSubagentBinding,
   type SubagentRouteRequest,
 } from '#/session/subagent/configSection';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
@@ -897,12 +901,7 @@ describe('SessionSwarmService metadata compatibility', () => {
   let eventBus: IEventBus;
   let config: StubConfigService;
   let exploreProfile: AgentProfile;
-  let autoPresetEvaluate: Mock<
-    (
-      request: SubagentRouteRequest,
-      context: AutoSubagentPresetContext,
-    ) => Promise<AutoSubagentPresetEvaluation>
-  >;
+  let autoPresetResolveBinding: Mock<IAutoSubagentPresetService['resolveBinding']>;
   let resolverAcquire: Mock<(binding: unknown, required: unknown) => void>;
 
   beforeEach(() => {
@@ -911,7 +910,7 @@ describe('SessionSwarmService metadata compatibility', () => {
     agents = {};
     handles = new Map();
     eventBus = eventBusStub();
-    lifecycle = lifecycleStub(handles, eventBus);
+    lifecycle = lifecycleStub(handles, eventBus, agents);
     subagents = subagentStub();
     createAgent = lifecycle.create as ReturnType<typeof vi.fn>;
     runAgent = subagents.run as ReturnType<typeof vi.fn>;
@@ -998,14 +997,13 @@ describe('SessionSwarmService metadata compatibility', () => {
         return { id: alias } as Model;
       },
     } as IModelCatalog);
-    autoPresetEvaluate = vi.fn(async (request: SubagentRouteRequest) => ({
-      request,
-      reason: 'stubbed',
-    }));
-    ix.stub(
-      IAutoSubagentPresetService,
-      stubAutoSubagentPreset(autoPresetEvaluate),
+    autoPresetResolveBinding = vi.fn(async (request: SubagentRouteRequest) =>
+      resolveSubagentBinding(config, ix.get(IFlagService), ix.get(IModelCatalog), request),
     );
+    ix.stub(IAutoSubagentPresetService, {
+      ...stubAutoSubagentPreset(),
+      resolveBinding: autoPresetResolveBinding,
+    });
     ix.set(ISessionSwarmService, new SyncDescriptor(SessionSwarmService));
   });
 
@@ -1191,6 +1189,69 @@ describe('SessionSwarmService metadata compatibility', () => {
     expect(runAgent).not.toHaveBeenCalled();
   });
 
+  it('restores a child the session has on disk but not live before resuming it', async () => {
+    agents['agent-persisted'] = {
+      labels: { parentAgentId: 'main' },
+    };
+    const service = ix.get(ISessionSwarmService);
+    expect(handles.has('agent-persisted')).toBe(false);
+
+    await expect(
+      service.run({
+        callerAgentId: 'main',
+        tasks: [resumeSessionTask('agent-persisted')],
+      }),
+    ).resolves.toMatchObject([{ status: 'completed', agentId: 'agent-persisted' }]);
+
+    expect(handles.has('agent-persisted')).toBe(true);
+    expect(runAgent).toHaveBeenCalledWith(
+      'agent-persisted',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('fails a resume of an id with no persisted record without materializing it', async () => {
+    const service = ix.get(ISessionSwarmService);
+
+    await expect(
+      service.run({
+        callerAgentId: 'main',
+        tasks: [resumeSessionTask('agent-missing')],
+      }),
+    ).resolves.toMatchObject([
+      {
+        status: 'failed',
+        state: 'not_started',
+        error: 'Agent instance "agent-missing" is not a subagent',
+      },
+    ]);
+    expect(handles.has('agent-missing')).toBe(false);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it('rejects a recorded child owned by another caller before materializing it', async () => {
+    agents['other-recorded'] = {
+      labels: { parentAgentId: 'other' },
+    };
+    const service = ix.get(ISessionSwarmService);
+
+    await expect(
+      service.run({
+        callerAgentId: 'main',
+        tasks: [resumeSessionTask('other-recorded')],
+      }),
+    ).resolves.toMatchObject([
+      {
+        status: 'failed',
+        state: 'not_started',
+        error: 'Agent instance "other-recorded" does not belong to this parent agent',
+      },
+    ]);
+    expect(handles.has('other-recorded')).toBe(false);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
   it('applies the caller binding to resumed children when no route override exists', async () => {
     agents['agent-existing'] = {
       labels: { parentAgentId: 'main' },
@@ -1226,13 +1287,18 @@ describe('SessionSwarmService metadata compatibility', () => {
       { kind: 'prompt', prompt: 'Continue' },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
-    expect(autoPresetEvaluate).toHaveBeenCalledWith(
+    expect(autoPresetResolveBinding).toHaveBeenCalledWith(
       expect.objectContaining({ route: 'swarm', profileName: 'explore' }),
       expect.objectContaining({ sessionId: 's1', signal: expect.any(AbortSignal) }),
     );
   });
 
-  it('evaluates every rebindable child profile in a resume-only batch', async () => {
+  it('applies each resumed child profile\'s validated temporary binding independently', async () => {
+    autoPresetResolveBinding.mockImplementation(async (request) => ({
+      model: request.profileName === 'explore' ? 'fallback/explore' : 'fallback/coder',
+      thinking: request.profileName === 'explore' ? 'low' : 'high',
+      source: 'auto-fallback', modelSource: 'auto-fallback', thinkingSource: 'auto-fallback',
+    }));
     agents['agent-explore'] = { labels: { parentAgentId: 'main' } };
     agents['agent-coder'] = { labels: { parentAgentId: 'main' } };
     handles.set(
@@ -1256,15 +1322,23 @@ describe('SessionSwarmService metadata compatibility', () => {
       tasks: [resumeSessionTask('agent-explore'), resumeSessionTask('agent-coder')],
     });
 
-    expect(autoPresetEvaluate).toHaveBeenCalledTimes(2);
-    expect(autoPresetEvaluate.mock.calls.map(([request]) => request.profileName).toSorted()).toEqual([
+    expect(autoPresetResolveBinding).toHaveBeenCalledTimes(2);
+    expect(autoPresetResolveBinding.mock.calls.map(([request]) => request.profileName).toSorted()).toEqual([
       'coder',
       'explore',
     ]);
-    expect(autoPresetEvaluate.mock.calls.map(([request]) => request.route)).toEqual([
-      'swarm',
-      'swarm',
-    ]);
+    expect(handles.get('agent-explore')?.accessor.get(IAgentProfileService).data()).toMatchObject({
+      modelAlias: 'fallback/explore', thinkingLevel: 'low',
+    });
+    expect(handles.get('agent-coder')?.accessor.get(IAgentProfileService).data()).toMatchObject({
+      modelAlias: 'fallback/coder', thinkingLevel: 'high',
+    });
+    expect(eventBus.publish).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'subagent.spawned', subagentId: 'agent-explore', model: 'fallback/explore',
+    }));
+    expect(eventBus.publish).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'subagent.spawned', subagentId: 'agent-coder', model: 'fallback/coder',
+    }));
   });
 
   it('evaluates the actual resumed child profile in a mixed spawn/resume batch', async () => {
@@ -1283,8 +1357,8 @@ describe('SessionSwarmService metadata compatibility', () => {
       tasks: [resumeSessionTask('agent-existing'), spawnSessionTask('src/new.ts')],
     });
 
-    expect(autoPresetEvaluate).toHaveBeenCalledTimes(1);
-    expect(autoPresetEvaluate).toHaveBeenCalledWith(
+    expect(autoPresetResolveBinding).toHaveBeenCalledTimes(1);
+    expect(autoPresetResolveBinding).toHaveBeenCalledWith(
       expect.objectContaining({ route: 'swarm', profileName: 'explore' }),
       expect.objectContaining({ sessionId: 's1', signal: expect.any(AbortSignal) }),
     );
@@ -1378,7 +1452,7 @@ describe('SessionSwarmService metadata compatibility', () => {
         thinkingEffort: 'medium',
       }),
     );
-    expect(autoPresetEvaluate).not.toHaveBeenCalled();
+    expect(autoPresetResolveBinding).not.toHaveBeenCalled();
   });
 
   it('fails a swarm resume with a dangling agents route model before running or emitting', async () => {
@@ -1472,7 +1546,7 @@ describe('SessionSwarmService metadata compatibility', () => {
     expect(createAgent).not.toHaveBeenCalled();
   });
 
-  it('does not emit spawned again when a rate-limited child retries', async () => {
+  it('retries with the validated temporary binding and refreshes its displayed model', async () => {
     vi.useFakeTimers();
     try {
       await config.replace(SUBAGENT_SECTION, {
@@ -1537,13 +1611,9 @@ describe('SessionSwarmService metadata compatibility', () => {
       await vi.advanceTimersByTimeAsync(0);
       rateLimited.reject(new APIProviderRateLimitError('Rate limited'));
       await vi.advanceTimersByTimeAsync(0);
-      await config.replace(SUBAGENT_SECTION, {
-        preset: 'updated',
-        presets: {
-          updated: {
-            agent: { model: 'provider/second', thinkingEffort: 'second-effort' },
-          },
-        },
+      autoPresetResolveBinding.mockResolvedValue({
+        model: 'fallback/retry', thinking: 'high',
+        source: 'auto-fallback', modelSource: 'auto-fallback', thinkingSource: 'auto-fallback',
       });
       blocker.resolve({ summary: 'blocker summary' });
       await vi.advanceTimersByTimeAsync(3_000);
@@ -1551,12 +1621,16 @@ describe('SessionSwarmService metadata compatibility', () => {
 
       expect(
         handles.get('agent-retry')?.accessor.get(IAgentProfileService).data(),
-      ).toMatchObject({ modelAlias: 'provider/second', thinkingLevel: 'second-effort' });
+      ).toMatchObject({ modelAlias: 'fallback/retry', thinkingLevel: 'high' });
       expect(
         published
           .filter((event) => event.type === 'subagent.spawned')
-          .map((event) => event.subagentId),
-      ).toEqual(['agent-retry', 'agent-blocker']);
+          .map((event) => ({ agentId: event.subagentId, model: event.model })),
+      ).toEqual([
+        { agentId: 'agent-retry', model: 'provider/first' },
+        { agentId: 'agent-blocker', model: 'provider/first' },
+        { agentId: 'agent-retry', model: 'fallback/retry' },
+      ]);
       expect(
         runAgent.mock.calls
           .filter(([agentId]) => agentId === 'agent-retry')
@@ -1636,6 +1710,7 @@ function resumeSessionTask(agentId: string): SessionSwarmTask {
 function lifecycleStub(
   handles: Map<string, IAgentScopeHandle>,
   eventBus: IEventBus,
+  persisted: Readonly<Record<string, AgentMeta>> = {},
 ): IAgentLifecycleService {
   const lifecycle = {
     _serviceBrand: undefined,
@@ -1657,6 +1732,12 @@ function lifecycleStub(
     }),
     fork: vi.fn(),
     get: (agentId: string) => handles.get(agentId),
+    restore: vi.fn(async (agentId: string) => {
+      const live = handles.get(agentId);
+      if (live !== undefined) return live;
+      if (persisted[agentId] === undefined) return undefined;
+      return lifecycle.create({ agentId });
+    }),
     list: () => [...handles.values()],
     remove: async (agentId: string) => {
       handles.delete(agentId);

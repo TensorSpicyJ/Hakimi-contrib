@@ -343,8 +343,8 @@ export function isOpenAIReasoningModel(normalizedModelName: string): boolean {
   return /^o\d/.test(normalizedModelName);
 }
 
-export function isOpenAIGpt6AstraModel(normalizedModelName: string): boolean {
-  return /^gpt-6-astra(?:$|[-.])/.test(normalizedModelName);
+export function isOpenAIGpt6Model(normalizedModelName: string): boolean {
+  return /^gpt-6-(?:astra|sol|luna)(?:$|[-.])/.test(normalizedModelName);
 }
 
 export function hasModelPrefix(modelName: string, prefixes: readonly string[]): boolean {

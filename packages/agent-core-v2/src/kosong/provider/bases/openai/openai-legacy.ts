@@ -70,7 +70,7 @@ import {
   extractUsage,
   hasModelPrefix,
   isFunctionToolCall,
-  isOpenAIGpt6AstraModel,
+  isOpenAIGpt6Model,
   isOpenAIReasoningModel,
   normalizeOpenAIFinishReason,
   OPENAI_REASONING_CAPABILITY,
@@ -176,7 +176,7 @@ function usesMaxCompletionTokens(model: string): boolean {
   return (
     /^o\d(?:$|[-.])/.test(normalized) ||
     /^gpt-5(?:$|[-.])/.test(normalized) ||
-    isOpenAIGpt6AstraModel(normalized)
+    isOpenAIGpt6Model(normalized)
   );
 }
 
@@ -795,7 +795,7 @@ export function getOpenAILegacyModelCapability(modelName: string) {
   if (isOpenAIReasoningModel(normalized)) {
     return OPENAI_REASONING_CAPABILITY;
   }
-  if (isOpenAIGpt6AstraModel(normalized)) {
+  if (isOpenAIGpt6Model(normalized)) {
     return OPENAI_THINKING_VISION_TOOL_CAPABILITY;
   }
   if (hasModelPrefix(normalized, DEEPSEEK_VISION_PREFIXES)) {

@@ -48,6 +48,7 @@ const TOWER_WORKER_TOOLS = [
   'CronDelete',
   'CronList',
   'Edit',
+  'apply_patch',
   'EnterPlanMode',
   'ExitPlanMode',
   'Glob',

@@ -255,6 +255,63 @@ describe('reduceAppEvent turnProgress', () => {
   });
 });
 
+describe('reduceAppEvent cross-project handoff session', () => {
+  it('surfaces a session created in another project and keeps its live work state fresh without a subscription', () => {
+    // The server publishes `event.session.created` for a handoff-created target
+    // (and every later `event.session.work_changed` as a global event), so the
+    // Web client learns about session B — which lives in a different project
+    // directory — while A remains the open session.
+    const state = {
+      ...createInitialState(),
+      sessions: [makeSession('a', '2026-01-01T00:00:00.000Z')],
+      activeSessionId: 'a',
+    };
+    const target: AppSession = {
+      ...makeSession('b', '2026-01-02T00:00:00.000Z'),
+      title: '',
+      cwd: '/other/project',
+      workspaceId: 'wd_other',
+    };
+
+    const created = reduceAppEvent(
+      state,
+      { type: 'sessionCreated', session: target },
+      { sessionId: 'b', seq: 1 },
+    );
+    expect(created.sessions.map((s) => s.id)).toEqual(['b', 'a']);
+    // Opening A is unaffected: a handoff never pulls the client away.
+    expect(created.activeSessionId).toBe('a');
+
+    // The target's first turn is already running with a pending approval — the
+    // list row must say so even though no one subscribed to B.
+    const busy = reduceAppEvent(
+      created,
+      {
+        type: 'sessionWorkChanged',
+        sessionId: 'b',
+        busy: true,
+        mainTurnActive: true,
+        pendingInteraction: 'approval',
+      },
+      { sessionId: 'b', seq: 2 },
+    );
+    expect(busy.sessions.find((s) => s.id === 'b')).toMatchObject({
+      busy: true,
+      mainTurnActive: true,
+      pendingInteraction: 'approval',
+    });
+    expect(busy.sessions.find((s) => s.id === 'a')).toMatchObject({ busy: false });
+
+    // A title applied after creation (the create route's meta patch) lands too.
+    const titled = reduceAppEvent(
+      busy,
+      { type: 'sessionMetaUpdated', sessionId: 'b', title: 'handoff target' },
+      { sessionId: 'b', seq: 3 },
+    );
+    expect(titled.sessions.find((s) => s.id === 'b')?.title).toBe('handoff target');
+  });
+});
+
 describe('reduceAppEvent sessionWorkChanged', () => {
   it('updates list-level main-turn liveness for an unopened session', () => {
     const state = {

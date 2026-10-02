@@ -98,6 +98,7 @@ export interface ToolDefinition {
   readonly name: string;
   readonly description: string;
   readonly parameters?: Record<string, unknown>;
+  readonly inputFormat?: Tool['inputFormat'];
   readonly source?: ToolSource;
   readonly disclosure?: ToolDisclosure;
   readonly info?: Record<string, unknown>;

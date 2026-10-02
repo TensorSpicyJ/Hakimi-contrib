@@ -17,7 +17,9 @@ export default {
     goal_get: 'Read Goal',
     goal_budget: 'Set Goal Budget',
     goal_update: 'Update Goal',
+    start_session: 'New Session',
   },
+  openSession: 'Open session',
   swarm: {
     progress: '{done} / {total}',
     activeSub: '{running} running · {queued} queued · {suspended} suspended',

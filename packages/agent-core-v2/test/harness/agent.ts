@@ -1269,6 +1269,10 @@ export class AgentTestContext {
                 Promise.reject(
                   new Error('IAgentLifecycleService.create is not supported in the test harness'),
                 ),
+              restore: () =>
+                Promise.reject(
+                  new Error('IAgentLifecycleService.restore is not supported in the test harness'),
+                ),
               fork: () =>
                 Promise.reject(
                   new Error('IAgentLifecycleService.fork is not supported in the test harness'),
@@ -2487,6 +2491,18 @@ function configService(readConfig: () => KimiConfig): IConfigService {
     sectionEmitter.fire({ domain, source: 'set', value, previousValue });
     return Promise.resolve();
   };
+  const replaceSections: IConfigService['replaceSections'] = async (update) => {
+    const current = { ...effectiveConfig(), ...Object.fromEntries(memory) };
+    const sections = typeof update === 'function' ? update(structuredClone(current)) : update;
+    const changes = Object.entries(sections).map(([domain, value]) => ({
+      domain,
+      source: 'set' as const,
+      value: value === null ? undefined : value,
+      previousValue: valueFor(domain),
+    }));
+    for (const change of changes) memory.set(change.domain, change.value);
+    for (const change of changes) sectionEmitter.fire(change);
+  };
   return {
     _serviceBrand: undefined,
     ready: Promise.resolve(),
@@ -2512,6 +2528,7 @@ function configService(readConfig: () => KimiConfig): IConfigService {
       return replace(domain, value);
     },
     replace,
+    replaceSections,
     reload: () => Promise.resolve(),
     diagnostics: () => [],
   } as unknown as IConfigService;

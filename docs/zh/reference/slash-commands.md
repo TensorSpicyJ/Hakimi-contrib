@@ -102,17 +102,17 @@ Prompt 模式在目标完成时以退出码 `0` 退出，在目标阻塞时以 `
 
 ## Research Mode
 
-**已在本地实现并安装；运行中的进程需重新启动。** 轻量 Research Mode 只保留基本模式命令，用于本地知识层与长期记忆指引。打开模式会让已发现的官方 AITP Skills 可见；关闭模式会隐藏这些 Skills，但保留既有项目知识和 AITP 记录。`/research status` 读取本地模式状态。这些命令都不安装 AITP、不探测或初始化存储、不运行 CLI maintenance、不写账本，也不启动后台 loop。
+**已在本地实现并安装；运行中的进程需重新启动。** 轻量 Research Mode 只保留基本模式命令，用于本地知识层与长期记忆指引。打开模式会让已发现的官方 AITP Skills 可见；关闭模式会隐藏这些 Skills，但保留既有项目知识和 AITP 记忆。`/research status` 读取本地模式状态。这些命令都不安装 AITP、不初始化存储、不运行外部进程、不写记忆文件，也不启动后台 loop。
 
 | 命令 | 作用 | Surface / 可用性 |
 | --- | --- | --- |
 | `/research on` | 启用轻量模式和官方 AITP Skills 可见性 | TUI 与 Web；本地可用 |
-| `/research status` | 读取本地模式状态，不运行 AITP CLI | TUI 与 Web；本地可用 |
-| `/research off` | 关闭模式与 Skills 可见性；既有知识和记录保留 | TUI 与 Web；本地可用 |
+| `/research status` | 读取本地模式状态，不运行任何 AITP 进程 | TUI 与 Web；本地可用 |
+| `/research off` | 关闭模式与 Skills 可见性；既有知识和记忆保留 | TUI 与 Web；本地可用 |
 
 旧研究管理与推进命令——包括 pause/resume、Manager、Question/Line mutation、alignment 和 checkpoint 操作——不再支持。不要从历史记录推断别名、额外参数或 legacy 命令流程。历史记录通过原始会话日志或会话 export 只读查阅，不再有结构化 Research history API 或 Manager。CLI wrapper 当前指向本工作区构建产物，因此新启动进程使用新实现；已在运行的进程需重新启动才加载新代码，未强行重启任何用户会话。
 
-Research Mode 不创建第二套 Goal、Plan 模式或权限层。Goal 仍负责跨轮次 continuation、预算与完成；普通工具权限继续适用。退役的 host Research veto 不会变成普通文件工具无法访问 AITP 正式文件的新保证：官方 CLI 校验只约束自己的操作，不是 OS 级隔离。
+Research Mode 不创建第二套 Goal、Plan 模式或权限层。Goal 仍负责跨轮次 continuation、预算与完成；普通工具权限继续适用。退役的 host Research veto 不会变成普通文件工具无法访问课题 AITP 记忆文件的新保证：官方 Skills 的文件约定只约束自己的操作，不是 OS 级隔离。
 
 ## 信息与状态
 

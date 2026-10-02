@@ -12,10 +12,10 @@
  * carrying the homeDir-relative path, sha256 and byte length. N comes from
  * the Model's replayed per-id `revisionCount`, starting at 1. Also carries
  * the plan-mode Harness constraints as an `onBeforeExecuteTool` veto
- * listener: while a plan is active, Write/Edit calls targeting only the
+ * listener: while a plan is active, Write/Edit/apply_patch calls targeting only the
  * current plan file are allowed outright (`allow()`, ending all other
- * adjudication), any other Write/Edit and every TaskStop/CronCreate/
- * CronDelete call is vetoed with a `toolApproval.formatDenyMessage`-
+ * adjudication), any other Write/Edit/apply_patch and every TaskStop/CronCreate/
+ * CronDelete/StartSession call is vetoed with a `toolApproval.formatDenyMessage`-
  * formatted reason, and an `ExitPlanMode` call outside `auto` mode defers
  * to a cold `waitUntil` factory running the `exitPlanModeReview` through the
  * shared `humanGate` transport. Plan mode is a short-lived, nestable overlay:
@@ -44,6 +44,8 @@ import { IAgentHumanGateService } from '#/agent/humanGate/humanGate';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
 import { denyToolExecution } from '#/agent/toolExecutor/beforeToolExecuteEvent';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
+import { APPLY_PATCH_TOOL_NAME } from '#/agent/tools/apply-patch/apply-patch';
+import { START_SESSION_TOOL_NAME } from '#/features/sessionHandoff/tools/start-session/start-session';
 import type {
   BeforeToolExecuteEvent,
   ResolvedToolExecutionHookContext,
@@ -160,7 +162,7 @@ export class AgentPlanService extends Service implements IAgentPlanService {
       return;
     }
 
-    if (toolName === 'Write' || toolName === 'Edit') {
+    if (toolName === 'Write' || toolName === 'Edit' || toolName === APPLY_PATCH_TOOL_NAME) {
       if (writesOnlyPlanFile(event, plan.path)) {
         event.allow();
         return;
@@ -191,6 +193,16 @@ export class AgentPlanService extends Service implements IAgentPlanService {
         ),
       );
       return;
+    }
+
+    if (toolName === START_SESSION_TOOL_NAME) {
+      event.veto(
+        denyToolExecution(
+          this.toolApproval.formatDenyMessage(
+            `${START_SESSION_TOOL_NAME} is not available in plan mode because it would start another writable session. Call ExitPlanMode before handing this task to another project.`,
+          ),
+        ),
+      );
     }
   }
 

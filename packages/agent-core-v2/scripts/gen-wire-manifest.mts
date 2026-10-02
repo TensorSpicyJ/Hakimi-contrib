@@ -25,6 +25,7 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { ts } from 'ts-morph';
 
 import { MODEL_CROSS_REDUCERS } from '#/wire/model';
 import { OP_REGISTRY } from '#/wire/op';
@@ -193,7 +194,7 @@ function tsFieldKey(key: string): string {
  * Returns the type plus an optional doc note (the expanded type's name, or a
  * hoisted shared spread that cannot be expressed inline).
  */
-function sketchStringToTs(text: string): { type: string; doc?: string } {
+export function sketchStringToTs(text: string): { type: string; doc?: string } {
   let t = text.trim();
   const docs: string[] = [];
   const named = /^([A-Z][$\w]*) = ([\s\S]+)$/.exec(t);
@@ -210,6 +211,14 @@ function sketchStringToTs(text: string): { type: string; doc?: string } {
   t = t.replaceAll(/union on [$\w]+: /g, '');
   t = t.replaceAll(/\brecord</g, 'Record<');
   t = t.replaceAll(/\binteger\b/g, 'number');
+  if (t.includes('…')) {
+    const source = ts.createSourceFile('sketch.d.ts', `type Sketch = ${t};`, ts.ScriptTarget.Latest);
+    const diagnostics = (source as { parseDiagnostics?: readonly unknown[] }).parseDiagnostics;
+    if (diagnostics !== undefined && diagnostics.length > 0) {
+      docs.push(t);
+      t = 'unknown';
+    }
+  }
   return { type: t, doc: docs.length > 0 ? docs.join(' · ') : undefined };
 }
 

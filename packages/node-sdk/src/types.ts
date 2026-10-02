@@ -10,6 +10,8 @@ import type { Kaos } from '@moonshot-ai/kaos';
 import type { KimiHostIdentity, OAuthRefreshOutcome } from '@moonshot-ai/kimi-code-oauth';
 import type { ContentPart } from '@moonshot-ai/kosong';
 
+import type { Session } from '#/session';
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: JsonValue };
 export type JsonObject = { readonly [key: string]: JsonValue };
@@ -153,6 +155,66 @@ export type PromptInput = readonly PromptPart[];
 export interface PromptSkillActivation {
   readonly name: string;
   readonly args?: string;
+}
+
+/**
+ * Lineage and task facts of a session that another session handed off into
+ * this process. The target is an ordinary independent session: `sessionId` is
+ * its real id, and `sourceSessionId` is recorded as lineage only — it carries
+ * no inherited permissions, history, or modes.
+ */
+export interface HandoffSessionInfo {
+  readonly sessionId: string;
+  readonly workspaceId: string;
+  /** Absolute directory of the project the target session runs in. */
+  readonly workDir: string;
+  readonly title?: string;
+  /** Session the handoff was initiated from. */
+  readonly sourceSessionId: string;
+  readonly sourceWorkDir: string;
+  /** The self-contained task the target session was started with. */
+  readonly prompt: string;
+}
+
+/**
+ * Host opt-in for cross-project session handoff. Registration makes the
+ * `StartSession` tool available to the main agent of every matching source
+ * session; a process that never enables it (the print runner, a remote
+ * client, the legacy engine) has no host, so the tool stays unavailable there.
+ */
+export interface SessionHandoffOptions {
+  /**
+   * Restricts which source sessions may hand work off through this process.
+   * Defaults to every session this client currently owns (live).
+   */
+  readonly matches?: (sourceSessionId: string) => boolean;
+  /**
+   * Awaited after the target session has been materialized and made
+   * accessible through {@link Session} but *before* its first prompt is
+   * submitted — install the target's approval / question handlers and event
+   * listeners here; resolving lets the first turn start. The session is not
+   * resumed or re-bound, and a rejection leaves it created but unstarted.
+   */
+  readonly onSessionReady: (session: Session, info: HandoffSessionInfo) => void | Promise<void>;
+}
+
+/**
+ * The RPC-side form of {@link SessionHandoffOptions}: the harness supplies the
+ * adopter that registers the target session in its own live-session map, so a
+ * client used without a harness cannot host a handoff.
+ */
+export interface SessionHandoffHostOptions extends SessionHandoffOptions {
+  readonly adoptSession: (summary: SessionSummary) => Session;
+}
+
+/**
+ * A pending approval / question the engine no longer waits for (the turn was
+ * cancelled, the request was answered, or the session was closed). Panels are
+ * keyed by `toolCallIds`, so a host can drop the stale ones.
+ */
+export interface SessionInteractionSettledEvent {
+  readonly sessionId: string;
+  readonly toolCallIds: readonly string[];
 }
 
 export interface KimiHarnessOptions {

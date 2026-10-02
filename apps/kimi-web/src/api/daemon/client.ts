@@ -12,6 +12,7 @@ import type {
   AppMessage,
   AppMessageRole,
   AppModel,
+  AppPlugin,
   AppProvider,
   ProviderRefreshResult,
   ProviderUsageResult,
@@ -83,6 +84,7 @@ import type {
   WireOAuthLoginPollResult,
   WireOAuthLoginStartResult,
   WirePage,
+  WirePluginSummary,
   WirePromptSubmitResult,
   WirePromptSteerResult,
   WireProvider,
@@ -91,6 +93,7 @@ import type {
   WireRemotePersistentStatus,
   WireRemoteShareStatus,
   WireAutoSubagentPresetStatusResponse,
+  WireAutoSubagentPresetSelection,
   WireSubagentPresetActivation,
   WireResearchCommandResponse,
   WireResearchModeSnapshot,
@@ -983,6 +986,11 @@ export class DaemonKimiWebApi implements KimiWebApi {
   // POST /sessions/{id}/skills/{name}:activate body { args? } → { activated, skill_name }
   // -------------------------------------------------------------------------
 
+  async listPlugins(): Promise<AppPlugin[]> {
+    const data = await this.http.get<{ plugins: WirePluginSummary[] }>('/plugins');
+    return data.plugins.map(({ id, version, enabled, state }) => ({ id, version, enabled, state }));
+  }
+
   async listSkills(sessionId: string): Promise<AppSkill[]> {
     const data = await this.http.get<{ skills: WireSkillDescriptor[] }>(
       `/sessions/${encodeURIComponent(sessionId)}/skills`,
@@ -1399,6 +1407,17 @@ export class DaemonKimiWebApi implements KimiWebApi {
       if (isRouteNotFoundError(error)) return undefined;
       throw error;
     }
+  }
+
+  async autoSelectSubagentPreset(sessionId?: string) {
+    // No config-patch fallback: unlocking alone is not an automatic evaluation.
+    const data = await this.http.post<WireAutoSubagentPresetSelection>(
+      '/config/subagent-preset/auto',
+      { session_id: sessionId },
+    );
+    const status = toAppAutoSubagentPresetStatus(data.status);
+    if (status === undefined) throw new Error('Invalid automatic preset evaluation response');
+    return { config: toAppConfig(data.config), status, warning: data.warning };
   }
 
   async setConfig(patch: Partial<AppConfig>): Promise<AppConfig> {

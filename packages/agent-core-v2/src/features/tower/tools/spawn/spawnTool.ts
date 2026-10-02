@@ -13,13 +13,11 @@
  * the `Agent` tool. Spawn concurrency is gated by `ITowerRateLimitService`;
  * the slot is released when the agent's completion settles (or immediately on
  * a launch/registration failure). Worker and reviewer model bindings use the
- * canonical `tower_worker` and `tower_reviewer` routes through
- * `resolveSubagentBinding`: an active preset route wins, and without a preset
- * workers may use the gated legacy fallback while reviewers inherit the
- * caller's model. Before resolving, the tool asks the App-scope automatic
- * preset decider for the matching `tower_worker` / `tower_reviewer` route
- * (fail-open, only writes `[subagent].preset`). The resolved model is reported
- * in the tool output and the
+ * `tower_worker` and `tower_reviewer` routes through the App-scope automatic
+ * preset decider's final binding, including temporary role fallbacks. Failed
+ * resolution refuses allocation; disabled or locked automatic routing retains
+ * canonical routing. Each worker/reviewer keeps its resolved binding for the
+ * run. The actual model is reported in task/display facts, tool output and the
  * `spawn` line of the tower activity log. The spawned agent is pinned
  * to the `auto` permission mode regardless of the tower's own mode: workers
  * and reviewers run detached and unattended, so per-call approval prompts
@@ -65,8 +63,6 @@ import {
 } from '#/features/tower/protocol/index';
 import { IAgentTowerService, TOWER_WORKER_PROFILE } from '#/features/tower/tower';
 import { ITowerRateLimitService } from '#/features/tower/towerRateLimit';
-import { IConfigService } from '#/app/config/config';
-import { IFlagService } from '#/app/flag/flag';
 import { IModelCatalog } from '#/kosong/model/catalog';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import {
@@ -80,7 +76,7 @@ import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { IAutoSubagentPresetService } from '#/app/autoSubagentPreset/autoSubagentPreset';
 import {
   DEFAULT_SUBAGENT_TIMEOUT_MS,
-  resolveSubagentBinding,
+  type SubagentBindingResolution,
   wrapSubagentModelError,
 } from '#/session/subagent/configSection';
 import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
@@ -91,7 +87,7 @@ import { SubagentTask, type SubagentHandle } from '#/agent/tools/agent/subagent-
 import { ITowerSpawnTool, TowerSpawnToolInputSchema, type TowerSpawnToolInput } from './spawn';
 import DESCRIPTION from './spawn.md?raw';
 
-type SubagentBinding = ReturnType<typeof resolveSubagentBinding>;
+type SubagentBinding = SubagentBindingResolution;
 
 export class TowerSpawnTool implements ITowerSpawnTool {
   declare readonly _serviceBrand: undefined;
@@ -110,8 +106,6 @@ export class TowerSpawnTool implements ITowerSpawnTool {
     @ISessionSubagentService private readonly subagents: ISessionSubagentService,
     @IAgentTaskService private readonly tasks: IAgentTaskService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
-    @IConfigService private readonly config: IConfigService,
-    @IFlagService private readonly flags: IFlagService,
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
     @IAutoSubagentPresetService private readonly autoPreset: IAutoSubagentPresetService,
   ) {
@@ -204,24 +198,16 @@ export class TowerSpawnTool implements ITowerSpawnTool {
         const controller = new AbortController();
         const own = this.profile.data();
         const route = args.kind === 'worker' ? 'tower_worker' : 'tower_reviewer';
-        if (own.modelAlias !== undefined) {
-          await this.autoPreset.evaluate(
-            { route, caller: { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel } },
-            { sessionId: this.sessionContext.sessionId, signal },
-          );
-        }
-        const binding =
-          own.modelAlias === undefined
-            ? undefined
-            : resolveSubagentBinding(this.config, this.flags, this.modelCatalog, {
-                route,
-                caller: {
-                  modelAlias: own.modelAlias,
-                  thinkingLevel: own.thinkingLevel,
-                },
-              });
+        let binding: SubagentBinding | undefined;
         let handle: SubagentHandle;
         try {
+          binding = own.modelAlias === undefined
+            ? undefined
+            : await this.autoPreset.resolveBinding(
+                { route, caller: { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel } },
+                { sessionId: this.sessionContext.sessionId, signal },
+              );
+          signal.throwIfAborted();
           handle = await this.launch(prompt, description, toolCallId, controller, binding);
         } catch (error) {
           return {
@@ -365,6 +351,7 @@ export class TowerSpawnTool implements ITowerSpawnTool {
       parentToolCallId: toolCallId,
       description,
       runInBackground: true,
+      model: binding?.model,
     });
 
     const run = await this.subagents.run(
@@ -383,6 +370,9 @@ export class TowerSpawnTool implements ITowerSpawnTool {
     return {
       agentId,
       profileName: TOWER_WORKER_PROFILE,
+      parentToolCallId: toolCallId,
+      model: binding?.model,
+      thinkingEffort: created.accessor.get(IAgentProfileService).getEffectiveThinkingLevel(),
       completion: mirrored.then((r) => ({ result: r.summary, usage: r.usage })),
     };
   }

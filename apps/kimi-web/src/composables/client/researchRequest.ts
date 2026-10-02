@@ -49,6 +49,8 @@ export function applyResearchResponseIfCurrent(
   return true;
 }
 
+export const RESEARCH_REQUEST_INVALIDATED = new Error('Research backend changed');
+
 export interface ResearchRequestCoordinator {
   read: (
     state: ResearchRequestState,
@@ -60,6 +62,7 @@ export interface ResearchRequestCoordinator {
     sessionId: string,
     request: () => Promise<ResearchModeSnapshot>,
   ) => Promise<ResearchModeSnapshot>;
+  reset: () => void;
 }
 
 /** Coordinate Research HTTP work per session. Mutations run serially, and reads
@@ -68,47 +71,22 @@ export interface ResearchRequestCoordinator {
  * a mutation began. Different sessions remain independent. */
 export function createResearchRequestCoordinator(): ResearchRequestCoordinator {
   const mutationTailBySession = new Map<string, Promise<void>>();
+  let epoch = 0;
 
-  function currentOrResponse(
-    state: ResearchRequestState,
-    sessionId: string,
-    snapshot: ResearchModeSnapshot,
-  ): ResearchModeSnapshot {
-    return state.researchBySession[sessionId] ?? snapshot;
+  function assertCurrent(atRequest: number): void {
+    if (epoch !== atRequest) throw RESEARCH_REQUEST_INVALIDATED;
   }
 
   async function currentAfterMutationTail(
     state: ResearchRequestState,
     sessionId: string,
+    atRequest: number,
   ): Promise<ResearchModeSnapshot | undefined> {
     for (;;) {
+      assertCurrent(atRequest);
       const mutationTail = mutationTailBySession.get(sessionId);
       if (mutationTail === undefined) return state.researchBySession[sessionId];
       await mutationTail;
-    }
-  }
-
-  async function settleInvalidatedRead(
-    state: ResearchRequestState,
-    sessionId: string,
-    request: () => Promise<ResearchModeSnapshot>,
-  ): Promise<ResearchModeSnapshot> {
-    // A mutation may still be applying the state that invalidated this read.
-    // Await the full queue before choosing a value for the caller.
-    const current = await currentAfterMutationTail(state, sessionId);
-    if (current !== undefined) return current;
-
-    // A failed mutation may leave no applied snapshot. Re-read authoritatively
-    // instead of returning the invalidated response; keep retries iterative so
-    // a new mutation can invalidate this read without recursive generation use.
-    for (;;) {
-      const retryToken = beginResearchRequest(state, sessionId);
-      const retrySnapshot = await request();
-      if (applyResearchResponseIfCurrent(state, sessionId, retryToken, retrySnapshot)) {
-        return retrySnapshot;
-      }
-      const nextCurrent = await currentAfterMutationTail(state, sessionId);
-      if (nextCurrent !== undefined) return nextCurrent;
     }
   }
 
@@ -117,16 +95,23 @@ export function createResearchRequestCoordinator(): ResearchRequestCoordinator {
     sessionId: string,
     request: () => Promise<ResearchModeSnapshot>,
   ): Promise<ResearchModeSnapshot> {
-    // A second mutation may be queued while this read is awaiting the first.
-    // Keep following the current tail until the complete queue is drained.
+    const atRequest = epoch;
+    // Follow the full mutation queue before reading; a failed mutation may have
+    // left no applied snapshot, so invalidated reads retry authoritatively.
     while (mutationTailBySession.has(sessionId)) {
       await mutationTailBySession.get(sessionId);
+      assertCurrent(atRequest);
     }
-
-    const token = beginResearchRequest(state, sessionId);
-    const snapshot = await request();
-    if (applyResearchResponseIfCurrent(state, sessionId, token, snapshot)) return snapshot;
-    return settleInvalidatedRead(state, sessionId, request);
+    for (;;) {
+      assertCurrent(atRequest);
+      const token = beginResearchRequest(state, sessionId);
+      const snapshot = await request();
+      assertCurrent(atRequest);
+      if (applyResearchResponseIfCurrent(state, sessionId, token, snapshot)) return snapshot;
+      const current = await currentAfterMutationTail(state, sessionId, atRequest);
+      assertCurrent(atRequest);
+      if (current !== undefined) return current;
+    }
   }
 
   function mutate(
@@ -134,13 +119,16 @@ export function createResearchRequestCoordinator(): ResearchRequestCoordinator {
     sessionId: string,
     request: () => Promise<ResearchModeSnapshot>,
   ): Promise<ResearchModeSnapshot> {
+    const atRequest = epoch;
     const previousMutation = mutationTailBySession.get(sessionId) ?? Promise.resolve();
     const response = previousMutation.then(async () => {
+      assertCurrent(atRequest);
       const token = beginResearchRequest(state, sessionId);
       const snapshot = await request();
+      assertCurrent(atRequest);
       return applyResearchResponseIfCurrent(state, sessionId, token, snapshot)
         ? snapshot
-        : currentOrResponse(state, sessionId, snapshot);
+        : (state.researchBySession[sessionId] ?? snapshot);
     });
     const settled = response.then(
       () => undefined,
@@ -155,5 +143,10 @@ export function createResearchRequestCoordinator(): ResearchRequestCoordinator {
     return response;
   }
 
-  return { read, mutate };
+  function reset(): void {
+    epoch += 1;
+    mutationTailBySession.clear();
+  }
+
+  return { read, mutate, reset };
 }

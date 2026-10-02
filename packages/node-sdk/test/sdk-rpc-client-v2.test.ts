@@ -44,18 +44,31 @@ import {
   drainSessionIndexMirror,
   HostProcessError,
   IAgentResearchService,
+  IAgentToolRegistryService,
   IAppendLogStore,
   ensureMainAgent,
   getLiveSessionById,
   IAutoSubagentPresetService,
   IEventService,
   IHostRequestHeaders,
+  IProtocolAdapterRegistry,
+  ISessionHandoffCoordinator,
   ISessionIndex,
   ISessionIndexMirror,
   ISessionManager,
   OsProcessErrors,
+  START_SESSION_TOOL_NAME,
   SUBAGENT_PRESET_CHANGED_EVENT_TYPE,
   SUBAGENT_PRESET_EVALUATED_EVENT_TYPE,
+  UNKNOWN_CAPABILITY,
+  type ApprovalRequest,
+  type ApprovalResponse,
+  type ChatProvider,
+  type FinishReason,
+  type ScopeSeed,
+  type StreamedMessage,
+  type StreamedMessagePart,
+  type TokenUsage,
 } from '@moonshot-ai/agent-core-v2';
 
 import { McpOAuthService } from '../../agent-core/src/mcp/oauth/service';
@@ -1306,6 +1319,437 @@ describe('SDKRpcClientV2 workspace trust', () => {
       await harness.close();
     }
   });
+});
+
+describe('SDKRpcClientV2 cross-project session handoff host', () => {
+  /** A configured stub provider, so the default model resolves locally. */
+  const STUB_CONFIG = `
+default_model = "stub"
+
+[providers.stub]
+type = "openai"
+base_url = "https://model.example.test/v1"
+api_key = "stub"
+
+[models.stub]
+provider = "stub"
+model = "stub"
+max_context_size = 1000
+`;
+
+  async function makeHandoffClient(): Promise<{
+    client: SDKRpcClientV2;
+    workDir: string;
+    homeDir: string;
+  }> {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-handoff-'));
+    tempDirs.push(homeDir);
+    await writeFile(join(homeDir, 'config.toml'), STUB_CONFIG, 'utf-8');
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-handoff-work-'));
+    tempDirs.push(workDir);
+    return { client: new SDKRpcClientV2({ homeDir, identity: TEST_IDENTITY }), workDir, homeDir };
+  }
+
+  it('enables handoff by default once the process provides a host', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_CROSS_PROJECT_SESSIONS', undefined);
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', undefined);
+    const { client, workDir } = await makeHandoffClient();
+    try {
+      await client.createSession({ id: 'ses_source', workDir });
+      const coordinator = client.engineAccessor.get(ISessionHandoffCoordinator);
+      expect(client.supportsSessionHandoff()).toBe(true);
+      // No host registered: the source session cannot hand work off.
+      expect(coordinator.isAvailable('ses_source')).toBe(false);
+
+      expect(
+        client.enableSessionHandoff({
+          onSessionReady: () => undefined,
+          adoptSession: (summary) => new Session({ ...summary, rpc: client }),
+        }),
+      ).toBe(true);
+      // The default match is "a session this client owns", so an unknown id
+      // never selects this host.
+      expect(coordinator.isAvailable('ses_source')).toBe(true);
+      expect(coordinator.isAvailable('ses_elsewhere')).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('keeps the handoff unavailable when explicitly disabled', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_CROSS_PROJECT_SESSIONS', 'false');
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', undefined);
+    const { client, workDir } = await makeHandoffClient();
+    try {
+      await client.createSession({ id: 'ses_source', workDir });
+      const coordinator = client.engineAccessor.get(ISessionHandoffCoordinator);
+      // Registering is allowed, but the engine's flag gate outranks the host:
+      // the tool stays hidden and its execution path refuses.
+      expect(
+        client.enableSessionHandoff({
+          onSessionReady: () => undefined,
+          adoptSession: (summary) => new Session({ ...summary, rpc: client }),
+        }),
+      ).toBe(true);
+      expect(coordinator.isAvailable('ses_source')).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('is first-wins: a second opt-in registers nothing and keeps the first options', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_CROSS_PROJECT_SESSIONS', 'true');
+    const { client, workDir } = await makeHandoffClient();
+    try {
+      await client.createSession({ id: 'ses_source', workDir });
+      const coordinator = client.engineAccessor.get(ISessionHandoffCoordinator);
+
+      expect(
+        client.enableSessionHandoff({
+          matches: () => true,
+          onSessionReady: () => undefined,
+          adoptSession: (summary) => new Session({ ...summary, rpc: client }),
+        }),
+      ).toBe(true);
+
+      // A client owns one host registration: the second call reports that it
+      // registered nothing (rather than pretending the new options took
+      // effect), and the first call's `matches` stays in force.
+      expect(
+        client.enableSessionHandoff({
+          matches: () => false,
+          onSessionReady: () => undefined,
+          adoptSession: (summary) => new Session({ ...summary, rpc: client }),
+        }),
+      ).toBe(false);
+      expect(coordinator.isAvailable('ses_source')).toBe(true);
+      expect(coordinator.isAvailable('ses_elsewhere')).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('adopts the target session before submitting its first prompt', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_CROSS_PROJECT_SESSIONS', 'true');
+    const { client, workDir } = await makeHandoffClient();
+    const targetWorkDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-handoff-target-'));
+    tempDirs.push(targetWorkDir);
+    try {
+      await client.createSession({ id: 'ses_source', workDir });
+      await client.trustWorkspace(targetWorkDir);
+      const coordinator = client.engineAccessor.get(ISessionHandoffCoordinator);
+
+      const order: string[] = [];
+      let adoptedId: string | undefined;
+      let readyInfo: { sessionId: string } | undefined;
+      const controller = new AbortController();
+      expect(
+        client.enableSessionHandoff({
+          matches: () => true,
+          // In production the harness supplies this adopter; here it is the
+          // same `Session` facade the harness builds for a live session.
+          adoptSession: (summary) => {
+            order.push('adopt');
+            adoptedId = summary.id;
+            return new Session({ ...summary, rpc: client });
+          },
+          onSessionReady: (_session, info) => {
+            order.push('ready');
+            readyInfo = info;
+            // Cancelling inside the prepare gate keeps the prompt from being
+            // submitted, so this proves the gate runs before submit without
+            // driving a model turn.
+            controller.abort();
+          },
+        }),
+      ).toBe(true);
+
+      const result = await coordinator.start({
+        sourceSessionId: 'ses_source',
+        sourceAgentId: 'main',
+        sourceWorkDir: workDir,
+        workDir: targetWorkDir,
+        prompt: 'do the thing',
+        title: 'Handed-off task',
+        signal: controller.signal,
+      });
+
+      expect(order).toEqual(['adopt', 'ready']);
+      expect(result.status).toBe('aborted');
+      expect(result.promptId).toBeUndefined();
+      expect(result.sessionId).toBe(adoptedId);
+      expect(result.workDir).toBe(targetWorkDir);
+      expect(result.workspaceId.length).toBeGreaterThan(0);
+      expect(readyInfo).toMatchObject({
+        sessionId: adoptedId,
+        sourceSessionId: 'ses_source',
+        sourceWorkDir: workDir,
+        workDir: targetWorkDir,
+        title: 'Handed-off task',
+        prompt: 'do the thing',
+      });
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The full handoff loop on a real engine with a scripted in-process model (no
+// HTTP, no external LLM — the same technique kap-server's server e2e uses):
+// a real target session is created, the host installs its interaction bridge
+// during the prepare gate, the target's FIRST turn parks a real approval-gated
+// `Write` that the bridge serves, approving it finishes the turn, and closing
+// the source session in the middle never stops the target.
+// ---------------------------------------------------------------------------
+
+const HANDOFF_FLAG_ENV = 'KIMI_CODE_EXPERIMENTAL_CROSS_PROJECT_SESSIONS';
+const HANDOFF_NOTE = 'handoff-note.txt';
+
+/**
+ * The one `ChatProvider` the seeded registry returns: its first request asks
+ * for the approval-gated `Write` tool, every later request answers in plain
+ * text, so the target's first turn reaches a real approval and completes once
+ * that approval is resolved.
+ */
+class ScriptedChatProvider implements ChatProvider {
+  readonly name = 'scripted';
+  readonly thinkingEffort = null;
+  requests = 0;
+
+  constructor(
+    readonly modelName: string,
+    private readonly notePath: string,
+    /** Witness for the pre-prompt ordering: the first request only. */
+    private readonly onFirstRequest: () => void = () => {},
+  ) {}
+
+  async generate(): Promise<StreamedMessage> {
+    this.requests += 1;
+    if (this.requests === 1) this.onFirstRequest();
+    const toolCall: StreamedMessagePart = {
+      type: 'function',
+      id: 'call_handoff_note',
+      name: 'Write',
+      arguments: JSON.stringify({ path: this.notePath, content: 'written by the handoff target' }),
+    };
+    const answer: StreamedMessagePart = { type: 'text', text: 'handoff task done' };
+    const parts = this.requests === 1 ? [toolCall] : [answer];
+    const finishReason: FinishReason = this.requests === 1 ? 'tool_calls' : 'completed';
+    const usage: TokenUsage = {
+      inputOther: 1,
+      output: 1,
+      inputCacheRead: 0,
+      inputCacheCreation: 0,
+    };
+    return {
+      id: 'scripted-response',
+      usage,
+      finishReason,
+      rawFinishReason: finishReason,
+      async *[Symbol.asyncIterator]() {
+        for (const part of parts) yield part;
+      },
+    };
+  }
+
+  withThinking(): ChatProvider {
+    return this;
+  }
+}
+
+/** Seed replacing the whole model transport: every model resolves to the
+ *  scripted provider, so a turn never touches a network. */
+function scriptedAdapterRegistry(provider: ChatProvider): IProtocolAdapterRegistry {
+  return {
+    _serviceBrand: undefined,
+    supportedProtocols: () => ['openai'],
+    resolveAdapterIdentity: (protocol) => ({ baseId: protocol, traits: [] }),
+    resolveProviderBaseId: (protocol) => protocol,
+    resolveCapability: () => UNKNOWN_CAPABILITY,
+    explainCapability: () => ({ capability: UNKNOWN_CAPABILITY, source: { kind: 'none' } }),
+    createChatProvider: () => provider,
+  };
+}
+
+describe('SDKRpcClientV2 cross-project session handoff (end to end, scripted model)', () => {
+  // A resolvable alias plus a declared tool capability: the scripted registry
+  // answers UNKNOWN for capability detection, so the model must say it takes
+  // tools. `manual` keeps the first `Write` behind a real approval.
+  const HANDOFF_CONFIG = [
+    'default_model = "stub"',
+    'default_permission_mode = "manual"',
+    '',
+    '[providers.stub]',
+    'type = "openai"',
+    'base_url = "http://127.0.0.1:1"',
+    'api_key = "stub"',
+    '',
+    '[models.stub]',
+    'provider = "stub"',
+    'model = "stub"',
+    'max_context_size = 131072',
+    'capabilities = ["tool_use"]',
+    '',
+  ].join('\n');
+
+  async function waitFor(
+    predicate: () => boolean | Promise<boolean>,
+    message: string,
+    timeoutMs = 15_000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`timed out: ${message}`);
+  }
+
+  it(
+    'serves the target\u2019s first-turn approval and finishes it after the source session closes',
+    async () => {
+      vi.stubEnv(HANDOFF_FLAG_ENV, 'true');
+      const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-handoff-e2e-'));
+      tempDirs.push(homeDir);
+      const targetDir = join(homeDir, 'target-project');
+      await mkdir(targetDir, { recursive: true });
+      await writeFile(join(homeDir, 'config.toml'), HANDOFF_CONFIG, 'utf-8');
+
+      /** Witness log: `ready` (host prepare), `witness` (2nd host), `model`. */
+      const order: string[] = [];
+      const provider = new ScriptedChatProvider('stub', join(targetDir, HANDOFF_NOTE), () => {
+        order.push('model');
+      });
+      const client = new SDKRpcClientV2({
+        homeDir,
+        identity: TEST_IDENTITY,
+        seeds: [[IProtocolAdapterRegistry, scriptedAdapterRegistry(provider)]] as ScopeSeed,
+      });
+
+      let approvalResolve: (response: ApprovalResponse) => void = () => undefined;
+      const approvalDecision = new Promise<ApprovalResponse>((resolve) => {
+        approvalResolve = resolve;
+      });
+      let approvedRequest: ApprovalRequest | undefined;
+      const targetEvents: Event[] = [];
+
+      try {
+        await client.trustWorkspace(targetDir);
+
+        // The TUI's opt-in window: the host is registered while the process
+        // still owns no session, exactly like `KimiTUI.start()`.
+        expect(
+          client.enableSessionHandoff({
+            // The default match ("a session this client owns") is what the TUI
+            // relies on, so the source session does not exist yet here.
+            adoptSession: (summary) => new Session({ ...summary, rpc: client }),
+            onSessionReady: (session, info) => {
+              order.push('ready');
+              // Handlers first: the engine submits the first prompt only after
+              // this resolves, so the first turn's approval already has a
+              // bridge (no "no handler" cancellation, nothing lost).
+              session.setApprovalHandler(async (request) => {
+                approvedRequest = request;
+                return approvalDecision;
+              });
+              session.setQuestionHandler(async () => null);
+              session.onEvent((event) => {
+                targetEvents.push(event);
+              });
+              expect(info.workDir).toBe(targetDir);
+            },
+          }),
+        ).toBe(true);
+
+        // A: a real session created AFTER the host registration, which is the
+        // ordering that makes the tool visible without a manual activation
+        // refresh (a host registered later would have to call
+        // `IAgentToolActivationService.activate()` itself).
+        await client.createSession({ id: 'ses_source', workDir: homeDir });
+        const sourceHandle = getLiveSessionById(client.engineAccessor, 'ses_source');
+        expect(sourceHandle).toBeDefined();
+        const sourceAgent = await ensureMainAgent(sourceHandle!);
+        expect(
+          sourceAgent
+            .accessor.get(IAgentToolRegistryService)
+            .list()
+            .map((tool) => tool.name),
+        ).toContain(START_SESSION_TOOL_NAME);
+
+        const coordinator = client.engineAccessor.get(ISessionHandoffCoordinator);
+        expect(coordinator.isAvailable('ses_source')).toBe(true);
+        // Every matching host participates, in registration order: a witness
+        // host registered now must also be prepared before the first prompt.
+        const witness = coordinator.registerHost({
+          id: 'sdk-test-witness-host',
+          matches: () => true,
+          prepare: () => {
+            order.push('witness');
+          },
+        });
+
+        try {
+          const result = await coordinator.start({
+            sourceSessionId: 'ses_source',
+            sourceAgentId: 'main',
+            sourceWorkDir: homeDir,
+            workDir: targetDir,
+            prompt: 'Write the handoff note in this project and report back.',
+            title: 'Handoff target',
+            signal: new AbortController().signal,
+          });
+
+          const targetId = result.sessionId;
+          expect(result.workDir).toBe(targetDir);
+          expect(result.promptId).toBeTypeOf('string');
+          expect(['running', 'pending']).toContain(result.status);
+          expect(result.failure).toBeUndefined();
+          // Both matching hosts were prepared, in registration order, before
+          // the initial prompt was submitted.
+          expect(order).toEqual(['ready', 'witness']);
+
+          // The very first turn of the handed-off session parks a real
+          // approval, and it reached the handler installed during the gate.
+          await waitFor(() => approvedRequest !== undefined, 'the first-turn approval');
+          expect(approvedRequest?.toolName).toBe('Write');
+          // Witnessed in-process: the scripted model was asked only after every
+          // matching host had been prepared.
+          expect(order).toEqual(['ready', 'witness', 'model']);
+
+          // A is closed while B is parked on that approval: the source
+          // session's teardown must not touch the target.
+          await client.closeSession({ sessionId: 'ses_source' });
+          expect(getLiveSessionById(client.engineAccessor, 'ses_source')).toBeUndefined();
+          expect(getLiveSessionById(client.engineAccessor, targetId)).toBeDefined();
+
+          approvalResolve({ decision: 'approved' });
+
+          await waitFor(
+            async () =>
+              (await readFile(join(targetDir, HANDOFF_NOTE), 'utf-8').catch(() => '')) ===
+              'written by the handoff target',
+            'the approved Write to land on disk',
+          );
+          expect(provider.requests).toBeGreaterThanOrEqual(2);
+          await waitFor(
+            () =>
+              targetEvents.some(
+                (event) => event.type === 'turn.ended' && event.reason === 'completed',
+              ),
+            'the target turn to complete',
+          );
+          // The target outlived the source session to the end.
+          expect(getLiveSessionById(client.engineAccessor, targetId)).toBeDefined();
+        } finally {
+          witness.dispose();
+        }
+      } finally {
+        await client.close();
+      }
+    },
+    30_000,
+  );
 });
 
 describe('foldAgentWireReplay', () => {

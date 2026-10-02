@@ -8,4 +8,12 @@ export class QuestionController extends ReverseRpcController<
   protected createCancelResponse(_reason: string): QuestionPanelResponse {
     return { answers: [] };
   }
+
+  protected override sessionIdOf(payload: QuestionPanelData): string | undefined {
+    return payload.session_id;
+  }
+
+  protected override toolCallIdOf(payload: QuestionPanelData): string | undefined {
+    return payload.tool_call_id;
+  }
 }

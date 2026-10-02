@@ -112,6 +112,15 @@
  *   interaction kernel's pending set (`onDidChangePending`), and the outcome
  *   is written back through `ISessionApprovalService.decide` /
  *   `ISessionQuestionService.answer|dismiss` / the kernel's `respond`.
+ * - `supportsSessionHandoff` / `enableSessionHandoff` / the settled channel →
+ *   the App-scope `ISessionHandoffCoordinator` from the engine's
+ *   `sessionHandoff` feature. Enabling registers this client as a host, which
+ *   is also what makes the engine's `StartSession` tool available; the
+ *   coordinator then calls back into `prepareHandoff` after creating the target
+ *   session and before enqueueing its first prompt, where the target is wired
+ *   and adopted as a live `Session` by the harness. Cross-project handoff is
+ *   therefore in-process-only by construction, and a client that never enables
+ *   it (print runners, remote clients) simply has no host.
  * - `exportSession` → `ISessionExportService` (app scope, the v2 port of v1's
  *   export) through {@link engineAccessor}; `listSkills` → the session
  *   scope's `ISessionSkillCatalog`; `startBtw` → the session scope's
@@ -195,6 +204,7 @@ import {
   ISessionContext,
   ISessionCronService,
   ISessionExportService,
+  ISessionHandoffCoordinator,
   ISessionIndex,
   ISessionIndexMirror,
   ISessionInitService,
@@ -237,7 +247,9 @@ import {
   type IDisposable,
   type ISessionScopeHandle,
   type Scope,
+  type ScopeSeed,
   type ServicesAccessor,
+  type SessionHandoffPrepareContext,
   type SessionSummary as V2SessionSummary,
 } from '@moonshot-ai/agent-core-v2';
 import { RPCError, type AgentHandle, type Klient } from '@moonshot-ai/klient';
@@ -313,6 +325,7 @@ import type {
   ResumeGoalInput,
   SessionPlan,
   SessionStatus,
+  SessionHandoffHostOptions,
   SessionSummary,
   SessionSummaryPage,
   SessionUsage,
@@ -358,6 +371,14 @@ export interface SDKRpcClientV2Options {
    * source. Passed into the engine through `BootstrapInput.args.skillDirs`.
    */
   readonly skillDirs?: readonly string[];
+  /**
+   * Extra App-scope seeds applied at bootstrap — the same escape hatch
+   * kap-server's `StartServerOptions.seeds` offers, and agent-core-v2 only (the
+   * legacy engine has no seed layer). An in-process embedder can replace a
+   * whole engine domain this way (the model transport through
+   * `IProtocolAdapterRegistry`, a host-provided `ISessionModelResolver`, ...).
+   */
+  readonly seeds?: ScopeSeed;
   readonly telemetry?: TelemetryClient;
   readonly onOAuthRefresh?: (outcome: OAuthRefreshOutcome) => void;
   readonly uiMode?: string;
@@ -444,6 +465,14 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   private readonly sessionAccessQueues = new Map<string, Promise<void>>();
   /** App-scope subscriptions (global event forwarding, lifecycle tracking), disposed in {@link close}. */
   private readonly appSubscriptions: IDisposable[] = [];
+  /**
+   * The host registration + options of an enabled cross-project session
+   * handoff ({@link enableSessionHandoff}). Undefined means no host is
+   * registered, so the engine reports the handoff as unsupported.
+   */
+  private handoffHost: IDisposable | undefined;
+  private handoffOptions: SessionHandoffHostOptions | undefined;
+  private handoffHostSeq = 0;
 
   constructor(options: SDKRpcClientV2Options = {}) {
     super();
@@ -479,7 +508,10 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
           skillDirs: options.skillDirs,
         },
       },
-      [...logSeed(resolveLoggingConfig({ homeDir: this.homeDir, env: process.env }))],
+      [
+        ...logSeed(resolveLoggingConfig({ homeDir: this.homeDir, env: process.env })),
+        ...(options.seeds ?? []),
+      ],
     );
     this.app = app;
     this.klient = createKlient({ scope: app });
@@ -539,6 +571,11 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   async close(): Promise<void> {
+    // Drop the handoff host before the engine goes away: a host that is still
+    // registered would advertise a capability this client can no longer serve.
+    this.handoffHost?.dispose();
+    this.handoffHost = undefined;
+    this.handoffOptions = undefined;
     for (const wiring of this.sessionWirings.values()) {
       wiring.dispose();
     }
@@ -905,6 +942,75 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     return getLiveSessionById(this.engineAccessor, sessionId);
   }
 
+  // -----------------------------------------------------------------------
+  // Cross-project session handoff (host side)
+  //
+  // The engine's `ISessionHandoffCoordinator` (App scope, from the
+  // `sessionHandoff` feature) owns the host table and the start
+  // orchestration; this client contributes one host when the host opts in.
+  // Registering a host is what makes the `StartSession` tool visible at all,
+  // so a client that never calls `enableSessionHandoff` — the print runner, a
+  // remote client — cannot hand work off, and registering is per source
+  // session (`matches`) rather than a process-wide switch.
+  // -----------------------------------------------------------------------
+
+  override supportsSessionHandoff(): boolean {
+    return true;
+  }
+
+  /**
+   * Register this client as a handoff host. The target session is adopted as a
+   * real {@link Session} (through the harness-supplied `adoptSession`), its
+   * event/interaction wiring is installed, and the host's `onSessionReady` is
+   * awaited — all before the engine submits the first prompt, so the very first
+   * approval or question already has a handler. Nothing is resumed or
+   * re-bound: the engine created and started this session itself.
+   *
+   * First call wins: this client holds ONE host registration, so a later call
+   * does not replace the options the first one registered (its `matches` and
+   * `onSessionReady` stay in force) and returns false — the call registered
+   * nothing. Call {@link close} and build a new client to change hosts.
+   */
+  override enableSessionHandoff(options: SessionHandoffHostOptions): boolean {
+    if (this.handoffHost !== undefined) return false;
+    this.handoffOptions = options;
+    const hostId = `sdk-handoff-${String(++this.handoffHostSeq)}`;
+    this.handoffHost = this.engineAccessor.get(ISessionHandoffCoordinator).registerHost({
+      id: hostId,
+      matches: (sourceSessionId) =>
+        options.matches === undefined
+          ? this.liveSession(sourceSessionId) !== undefined
+          : options.matches(sourceSessionId),
+      prepare: (context) => this.prepareHandoff(context),
+    });
+    return true;
+  }
+
+  private async prepareHandoff(context: SessionHandoffPrepareContext): Promise<void> {
+    const options = this.handoffOptions;
+    if (options === undefined) {
+      throw new KimiError(
+        ErrorCodes.NOT_IMPLEMENTED,
+        'This SDK client is no longer hosting cross-project session handoffs.',
+      );
+    }
+    // Attach the event/interaction wiring first: it must be live before the
+    // host's handlers are installed so a pending interaction can never be
+    // answered before there is a bridge to carry it.
+    this.wireSession(context.handle);
+    const summary = await this.liveSessionSummary(context.handle);
+    const session = options.adoptSession(summary);
+    await options.onSessionReady(session, {
+      sessionId: context.target.sessionId,
+      workspaceId: context.target.workspaceId,
+      workDir: context.target.workDir,
+      title: context.target.title,
+      sourceSessionId: context.sourceSessionId,
+      sourceWorkDir: context.sourceWorkDir,
+      prompt: context.prompt,
+    });
+  }
+
   /**
    * Runs `work` after every previously queued operation on the same session
    * settles; different sessions still run in parallel. The map entry drops
@@ -996,6 +1102,18 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     if (wiring === undefined) return;
     this.sessionWirings.delete(sessionId);
     wiring.dispose();
+  }
+
+  /**
+   * {@link SessionEventSink} implementation: a pending approval/question the
+   * engine stopped waiting for is reported to the host's listeners so it can
+   * drop the panel it mounted. Feeds the narrow settled channel rather than
+   * the legacy `Event` stream — v1 has no such fact.
+   *
+   * @internal — called by the per-session wiring, not part of the host API.
+   */
+  notifyInteractionSettled(sessionId: string, toolCallIds: readonly string[]): void {
+    this.receiveSessionInteractionSettled({ sessionId, toolCallIds });
   }
 
   /**

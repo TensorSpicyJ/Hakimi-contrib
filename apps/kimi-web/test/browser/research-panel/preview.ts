@@ -3,8 +3,8 @@ import ConversationPane from '../../../src/components/chat/ConversationPane.vue'
 import i18n, { setLocale } from '../../../src/i18n';
 import '../../../src/style.css';
 
-// Research memory-mode fixture: the panel only reflects the mode snapshot
-// (`enabled` / `skillsAvailable`); there is no legacy executor state to drive.
+// Visual-only fixture: mode, plugin metadata and actual session skills are
+// independent props. The real server/browser smoke is a separate verification.
 const snapshot = ref({ enabled: true, skillsAvailable: true });
 const sessionId = ref('session-a');
 const turns = ref([]);
@@ -20,10 +20,15 @@ createApp({ setup: () => () => h('main', {
     style: 'flex:1;min-width:0;',
     turns: turns.value, sessionId: sessionId.value, sessionLoading: sessionLoading.value,
     research: snapshot.value, researchEnabled: true, researchExpandSignal: expandSignal.value,
+    aitpPlugin: { id: 'aitp', version: '1.1.0+example.20260916.long-build-metadata-for-narrow-screen-layout', enabled: true, state: 'ok' },
+    pluginMetadataStatus: 'ready',
+    skills: ['aitp-memory', 'aitp-research', 'aitp-writing', 'aitp-distill'].map(name => ({ name, source: 'plugin', description: name })),
     tasks: [], running: true, workspaceName: 'Research fixture',
     status: { model: 'Fixture', modelId: 'fixture', ctxUsed: 0, ctxMax: 100000,
       permission: 'auto', branch: '', cwd: '/fixture', auto: true },
     onInterrupt: () => commands.push('interrupt'),
+    onStartResearch: () => { snapshot.value = { ...snapshot.value, enabled: true }; },
+    onStopResearch: () => { snapshot.value = { ...snapshot.value, enabled: false }; },
   }),
   previewOpen.value ? h('aside', { class: 'fixture-preview',
     style: 'width:320px;flex:none;background:var(--color-surface);',

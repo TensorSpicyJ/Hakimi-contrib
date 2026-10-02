@@ -6,6 +6,8 @@
  *    hides the static entries from the orchestrator and merges them back
  *    verbatim — the static provider, its models, and a default model pointing
  *    at them all survive;
+ *  - managed Codex aliases are supplemented locally before startup hydration
+ *    and on refresh, preserving user preferences without authentication;
  *  - concurrent refreshes serialize (never overlap);
  *  - custom-registry fetches carry the host `User-Agent`;
  *  - provider/model patches land in config through ONE atomic
@@ -86,7 +88,7 @@ function stubLogService(): ILogService {
 }
 
 async function createHost(
-  sections: Record<string, unknown> = {},
+  sections: Record<string, unknown> | StubConfigService = {},
   oauth: IOAuthService = stubOAuthService(),
 ): Promise<{
   host: ReturnType<typeof createScopedTestHost>;
@@ -96,7 +98,7 @@ async function createHost(
   providers: IProviderService;
   models: IModelService;
 }> {
-  const config = new StubConfigService(sections);
+  const config = sections instanceof StubConfigService ? sections : new StubConfigService(sections);
   const events = stubEvents();
   const host = createScopedTestHost([
     [IConfigService, config],
@@ -144,6 +146,137 @@ const staticSections: Record<string, unknown> = {
   models: staticModels,
   defaultModel: 's1',
 };
+
+describe('managed Codex local catalog', () => {
+  const providerId = 'managed:openai-codex';
+  const provider: ProviderConfig = {
+    type: 'openai_responses',
+    baseUrl: 'https://chatgpt.com/backend-api/codex',
+    oauth: { storage: 'file', key: 'oauth/openai-codex' },
+    customHeaders: { 'x-example': 'preserved' },
+  };
+  const existing: ModelRecord = {
+    provider: providerId, model: 'gpt-6-astra', maxContextSize: 100_000,
+    displayName: 'Custom Astra',
+  };
+  const sections = {
+    providers: { [providerId]: provider },
+    models: { 'openai-codex/gpt-6-astra': existing },
+    defaultModel: 'openai-codex/gpt-6-astra',
+    thinking: { enabled: true, effort: 'xhigh' },
+    subagent: { preset: 'custom', presets: { custom: { coder: { model: 'openai-codex/gpt-6-sol' } } } },
+  };
+
+  it('makes missing built-in models available before startup hydration completes without authentication', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const oauth = stubOAuthService();
+    const tokenSpy = vi.spyOn(oauth, 'resolveTokenProvider');
+    const loginSpy = vi.spyOn(oauth, 'startLogin');
+    const { host, config, models } = await createHost(structuredClone(sections), oauth);
+    try {
+      expect(models.get('openai-codex/gpt-6-sol')).toMatchObject({
+        provider: providerId, model: 'gpt-6-sol', defaultEffort: 'medium',
+      });
+      expect(models.get('openai-codex/gpt-6-luna')).toMatchObject({
+        provider: providerId, model: 'gpt-6-luna',
+        supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      });
+      expect(models.get('openai-codex/gpt-6-astra')).toEqual(existing);
+      expect(models.getDefaultModel()).toBe('openai-codex/gpt-6-astra');
+      expect(config.get('providers')).toEqual(sections.providers);
+      expect(config.get('thinking')).toEqual({ enabled: true, effort: 'xhigh' });
+      expect(config.get('subagent')).toEqual(sections.subagent);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(tokenSpy).not.toHaveBeenCalled();
+      expect(loginSpy).not.toHaveBeenCalled();
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it.each([
+    {},
+    { [providerId]: { ...provider, oauth: undefined } },
+    { [providerId]: { ...provider, modelSource: 'static' } },
+  ])('does not inject models when managed catalog sync is not enabled: %j', async (providers) => {
+    const { host, config, models } = await createHost({ ...sections, providers });
+    try {
+      expect(models.list()).toEqual(sections.models);
+      expect(config.get('models')).toEqual(sections.models);
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it('merges against the latest user records inside the serialized config update', async () => {
+    const config = new StubConfigService(structuredClone(sections));
+    const replaceSections = config.replaceSections.bind(config);
+    vi.spyOn(config, 'replaceSections').mockImplementationOnce((update) => {
+      config.setSilent('models', {
+        ...sections.models,
+        'openai-codex/gpt-6-sol': { ...existing, model: 'gpt-6-sol', displayName: 'Latest Sol' },
+        custom: { ...existing, model: 'custom-model' },
+      });
+      return replaceSections(update);
+    });
+    const { host, models } = await createHost(config);
+    try {
+      expect(models.get('openai-codex/gpt-6-sol')?.displayName).toBe('Latest Sol');
+      expect(models.get('custom')?.model).toBe('custom-model');
+      expect(models.get('openai-codex/gpt-6-luna')).toBeDefined();
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it('still readies the existing catalog when the startup write fails', async () => {
+    const config = new StubConfigService(structuredClone(sections));
+    vi.spyOn(config, 'replaceSections').mockRejectedValue(new Error('read-only config'));
+    const { host, models, providers } = await createHost(config);
+    try {
+      await expect(models.ready).resolves.toBeUndefined();
+      await expect(providers.ready).resolves.toBeUndefined();
+      expect(models.list()).toEqual(sections.models);
+      expect(models.getDefaultModel()).toBe('openai-codex/gpt-6-astra');
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it.each([
+    { providerId: 'managed:openai-codex' }, { scope: 'all' }, { scope: 'oauth' },
+  ] as const)('adds missing aliases through discovery without token access: %j', async (options) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const oauth = stubOAuthService();
+    const tokenSpy = vi.spyOn(oauth, 'resolveTokenProvider');
+    const { host, config, discovery, models } = await createHost({}, oauth);
+    try {
+      await config.replace('providers', sections.providers);
+      await config.replace('models', sections.models);
+      await config.replace('defaultModel', sections.defaultModel);
+      await config.replace('thinking', sections.thinking);
+      const result = await discovery.refreshProviderModels(options);
+      expect(result.failed).toEqual([]);
+      expect(result.changed).toMatchObject([{ provider_id: providerId, added: 5, removed: 0 }]);
+      expect(models.get('openai-codex/gpt-6-sol')).toBeDefined();
+      expect(models.get('openai-codex/gpt-6-luna')).toBeDefined();
+      expect(models.get('openai-codex/gpt-6-astra')).toEqual(existing);
+      expect(config.get('defaultModel')).toBe(sections.defaultModel);
+      expect(config.get('thinking')).toEqual(sections.thinking);
+      const writes = vi.spyOn(config, 'replaceSections');
+      expect(await discovery.refreshProviderModels(options)).toEqual({
+        changed: [], unchanged: [providerId], failed: [],
+      });
+      expect(writes).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(tokenSpy).not.toHaveBeenCalled();
+    } finally {
+      host.dispose();
+    }
+  });
+});
 
 describe('refreshProviderModels modelSource short-circuit', () => {
   it('answers scoped refreshes of static providers with unchanged and no I/O', async () => {

@@ -116,6 +116,8 @@ If `KIMI_MODEL_NAME` is set but a required variable is missing, startup fails im
 
 ## Runtime switches
 
+The independent `KIMI_CODE_EXPERIMENTAL_TOOL_CATALOG`, `KIMI_CODE_EXPERIMENTAL_PROFILE_COMPACT_PROMPT`, and `KIMI_CODE_EXPERIMENTAL_CONTEXT_CONTINUITY` switches are all off by default. Set a switch to `true` to try that policy or `false` to force it off, unless the master experimental flag is enabled. See [experimental configuration](./config-files.md#experimental) for the combined setup and A/B comparison rules.
+
 Switches that control the behavior of subsystems such as telemetry, background tasks, and the plugin marketplace. The legacy `[experimental]` keys `openai-codex-oauth` and `aitp_research_mode` are retained only as inert compatibility inputs; they do not gate the graduated Codex OAuth or Research Mode surfaces.
 
 | Variable | Purpose | Valid values |

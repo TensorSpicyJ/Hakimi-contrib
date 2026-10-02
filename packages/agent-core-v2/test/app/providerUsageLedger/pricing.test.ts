@@ -1,21 +1,22 @@
 /**
- * `providerUsageLedger` pricing tests — the pure DeepSeek rate table, fixed
- * precision CNY formatting, and the Asia/Shanghai day/month + peak clock.
+ * `providerUsageLedger` pricing tests — the pure DeepSeek dated rate schedules,
+ * fixed precision CNY formatting, and the Asia/Shanghai day/month + peak clock.
  */
 
 import { describe, expect, it } from 'vitest';
 
 import {
-  computeCostNanos,
   endOfShanghaiDay,
   endOfShanghaiMonth,
   formatNanosToCny,
   isDeepSeekPeak,
-  resolveDeepSeekModelKind,
+  LEGACY_PRICING_VERSION,
+  resolveDeepSeekPrice,
   shanghaiParts,
   shanghaiYearMonth,
   startOfShanghaiDay,
   startOfShanghaiMonth,
+  V41_PRICING_VERSION,
 } from '#/app/providerUsageLedger/pricing';
 
 const SHANGHAI_OFFSET_MS = 8 * 3_600_000;
@@ -30,64 +31,128 @@ function shanghaiEpoch(
   return Date.UTC(year, month - 1, day, hour, minute) - SHANGHAI_OFFSET_MS;
 }
 
-describe('resolveDeepSeekModelKind', () => {
-  it('maps the exact V4 model names and leaves unknown names unpriced', () => {
-    expect(resolveDeepSeekModelKind('deepseek-v4-pro')).toBe('pro');
-    expect(resolveDeepSeekModelKind('deepseek-v4-flash')).toBe('flash');
-    expect(resolveDeepSeekModelKind('deepseek-v4-flash-vision-exp')).toBe('flash-vision');
-    expect(resolveDeepSeekModelKind('deepseek-chat')).toBeUndefined();
-    expect(resolveDeepSeekModelKind('deepseek-v4-flash-extra')).toBeUndefined();
-    expect(resolveDeepSeekModelKind('')).toBeUndefined();
+const OUTPUT_MILLION = {
+  inputOther: 0,
+  output: 1_000_000,
+  inputCacheRead: 0,
+  inputCacheCreation: 0,
+};
+
+function pricedCny(
+  modelName: string,
+  startedAtEpochMs: number,
+  usage = OUTPUT_MILLION,
+): string | undefined {
+  const priced = resolveDeepSeekPrice(modelName, startedAtEpochMs, usage);
+  return priced === undefined ? undefined : formatNanosToCny(priced.costNanos);
+}
+
+describe('resolveDeepSeekPrice model names', () => {
+  it('prices the exact known V4 names and leaves every other name unpriced', () => {
+    const at = shanghaiEpoch(2026, 9, 10, 10, 0);
+    expect(resolveDeepSeekPrice('deepseek-v4-pro', at, OUTPUT_MILLION)).toBeDefined();
+    expect(resolveDeepSeekPrice('deepseek-v4-flash', at, OUTPUT_MILLION)).toBeDefined();
+    expect(resolveDeepSeekPrice('deepseek-v4-flash-vision-exp', at, OUTPUT_MILLION)).toBeDefined();
+    expect(resolveDeepSeekPrice('deepseek-flash', at, OUTPUT_MILLION)).toBeDefined();
+    expect(resolveDeepSeekPrice('deepseek-chat', at, OUTPUT_MILLION)).toBeUndefined();
+    expect(resolveDeepSeekPrice('deepseek-flash-extra', at, OUTPUT_MILLION)).toBeUndefined();
+    expect(resolveDeepSeekPrice('deepseek-v4-flash-extra', at, OUTPUT_MILLION)).toBeUndefined();
+    expect(resolveDeepSeekPrice('', at, OUTPUT_MILLION)).toBeUndefined();
   });
 
-  it('does not resolve prototype keys to a tier', () => {
-    expect(resolveDeepSeekModelKind('constructor')).toBeUndefined();
-    expect(resolveDeepSeekModelKind('toString')).toBeUndefined();
-    expect(resolveDeepSeekModelKind('__proto__')).toBeUndefined();
-    expect(resolveDeepSeekModelKind('hasOwnProperty')).toBeUndefined();
+  it('does not resolve prototype keys to a schedule', () => {
+    const at = shanghaiEpoch(2026, 9, 10, 10, 0);
+    expect(resolveDeepSeekPrice('constructor', at, OUTPUT_MILLION)).toBeUndefined();
+    expect(resolveDeepSeekPrice('toString', at, OUTPUT_MILLION)).toBeUndefined();
+    expect(resolveDeepSeekPrice('__proto__', at, OUTPUT_MILLION)).toBeUndefined();
+    expect(resolveDeepSeekPrice('hasOwnProperty', at, OUTPUT_MILLION)).toBeUndefined();
   });
 });
 
-describe('computeCostNanos', () => {
-  const usage = {
-    inputOther: 0,
-    output: 1_000_000,
-    inputCacheRead: 0,
-    inputCacheCreation: 0,
-  };
-
-  it('uses the peak pro output rate', () => {
-    expect(computeCostNanos('pro', true, usage)).toBe(27_000_000_000n);
+describe('resolveDeepSeekPrice effective dates', () => {
+  it('keeps every name unpriced before the first snapshot', () => {
+    const before = shanghaiEpoch(2026, 9, 6, 23, 59);
+    for (const name of ['deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-flash']) {
+      expect(resolveDeepSeekPrice(name, before, OUTPUT_MILLION)).toBeUndefined();
+    }
+    expect(pricedCny('deepseek-v4-pro', shanghaiEpoch(2026, 9, 7, 10, 0))).toBe('27');
   });
 
-  it('uses the peak flash output rate', () => {
-    expect(computeCostNanos('flash', true, usage)).toBe(9_000_000_000n);
+  it('keeps the legacy flash rates for the legacy names before the V4.1 release', () => {
+    const before = shanghaiEpoch(2026, 9, 9, 23, 59);
+    for (const name of ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp']) {
+      const priced = resolveDeepSeekPrice(name, before, OUTPUT_MILLION);
+      expect(priced?.pricingVersion).toBe(LEGACY_PRICING_VERSION);
+      expect(priced?.costNanos).toBe(4_500_000_000n);
+    }
   });
 
-  it('prices the flash-vision exp at the flash rate', () => {
-    expect(computeCostNanos('flash-vision', true, usage)).toBe(9_000_000_000n);
+  it('switches the legacy flash names to the cheaper V4.1 rates at the day boundary', () => {
+    const at = shanghaiEpoch(2026, 9, 10, 0, 0);
+    for (const name of ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp']) {
+      const priced = resolveDeepSeekPrice(name, at, OUTPUT_MILLION);
+      expect(priced?.pricingVersion).toBe(V41_PRICING_VERSION);
+      expect(priced?.costNanos).toBe(4_000_000_000n);
+    }
   });
 
-  it('halves the rate off-peak', () => {
-    expect(computeCostNanos('pro', false, usage)).toBe(13_500_000_000n);
-    expect(computeCostNanos('flash', false, usage)).toBe(4_500_000_000n);
+  it('prices deepseek-flash only from the V4.1 release onward', () => {
+    expect(resolveDeepSeekPrice('deepseek-flash', shanghaiEpoch(2026, 9, 9, 23, 59), OUTPUT_MILLION))
+      .toBeUndefined();
+    const priced = resolveDeepSeekPrice('deepseek-flash', shanghaiEpoch(2026, 9, 10, 0, 0), OUTPUT_MILLION);
+    expect(priced?.pricingVersion).toBe(V41_PRICING_VERSION);
+    expect(priced?.costNanos).toBe(4_000_000_000n);
+  });
+
+  it('keeps the pro version and rates unchanged across the V4.1 release', () => {
+    for (const at of [shanghaiEpoch(2026, 9, 9, 10, 0), shanghaiEpoch(2026, 9, 10, 10, 0)]) {
+      const priced = resolveDeepSeekPrice('deepseek-v4-pro', at, OUTPUT_MILLION);
+      expect(priced?.pricingVersion).toBe(LEGACY_PRICING_VERSION);
+      expect(priced?.costNanos).toBe(27_000_000_000n);
+    }
+  });
+});
+
+describe('resolveDeepSeekPrice amounts', () => {
+  it('uses the peak and off-peak pro output rate', () => {
+    expect(pricedCny('deepseek-v4-pro', shanghaiEpoch(2026, 9, 7, 10, 0))).toBe('27');
+    expect(pricedCny('deepseek-v4-pro', shanghaiEpoch(2026, 9, 7, 20, 0))).toBe('13.5');
+  });
+
+  it('uses the legacy flash peak and off-peak rates', () => {
+    expect(pricedCny('deepseek-v4-flash', shanghaiEpoch(2026, 9, 7, 10, 0))).toBe('9');
+    expect(pricedCny('deepseek-v4-flash', shanghaiEpoch(2026, 9, 7, 20, 0))).toBe('4.5');
+  });
+
+  it('uses the V4.1 flash peak and off-peak rates', () => {
+    expect(pricedCny('deepseek-flash', shanghaiEpoch(2026, 9, 10, 10, 0))).toBe('8');
+    expect(pricedCny('deepseek-flash', shanghaiEpoch(2026, 9, 10, 20, 0))).toBe('4');
+  });
+
+  it('is off-peak on the weekend', () => {
+    // 2026-09-12 is a Saturday.
+    expect(pricedCny('deepseek-flash', shanghaiEpoch(2026, 9, 12, 10, 0))).toBe('4');
   });
 
   it('counts cache creation as uncached input rather than omitting it', () => {
-    expect(computeCostNanos('pro', true, {
-      inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 1_000_000,
-    })).toBe(9_000_000_000n);
+    const created = {
+      inputOther: 0,
+      output: 0,
+      inputCacheRead: 0,
+      inputCacheCreation: 1_000_000,
+    };
+    expect(pricedCny('deepseek-flash', shanghaiEpoch(2026, 9, 10, 10, 0), created)).toBe('2');
   });
 
-  it('splits cache hit vs miss input against the distinct rates', () => {
+  it('splits cache hit vs miss input against the distinct V4.1 rates', () => {
     const split = {
       inputOther: 1_000_000,
       output: 0,
       inputCacheRead: 2_000_000,
       inputCacheCreation: 0,
     };
-    // pro peak: miss 9000/tok * 1M + hit 300/tok * 2M
-    expect(computeCostNanos('pro', true, split)).toBe(9_000_000_000n + 600_000_000n);
+    // V4.1 flash peak: miss 2000/tok * 1M + hit 40/tok * 2M
+    expect(pricedCny('deepseek-flash', shanghaiEpoch(2026, 9, 10, 10, 0), split)).toBe('2.08');
   });
 });
 

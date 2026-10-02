@@ -27,7 +27,7 @@ import {
   type ToolMessageConversion,
   toolToOpenAI,
 } from './openai-common';
-import { isOpenAIGpt6AstraModel } from './capability-registry';
+import { isOpenAIGpt6Model } from './capability-registry';
 import {
   convertChatCompletionStreamToolCall,
   type BufferedChatCompletionToolCall,
@@ -139,7 +139,7 @@ function usesMaxCompletionTokens(model: string): boolean {
   return (
     /^o\d(?:$|[-.])/.test(normalized) ||
     /^gpt-5(?:$|[-.])/.test(normalized) ||
-    isOpenAIGpt6AstraModel(normalized)
+    isOpenAIGpt6Model(normalized)
   );
 }
 

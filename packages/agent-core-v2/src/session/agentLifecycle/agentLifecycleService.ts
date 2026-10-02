@@ -5,11 +5,30 @@
  * serializing same-id bootstrap and dropping incomplete handles after startup
  * failure. Seeds each agent's identity through `agent` scopeContext, wires
  * per-agent wire records and the wire state machine, the blob store, and MCP,
- * and registers the agent in the session registry. Binds the agent id into the
+ * and registers the agent in the session registry. An id that already has a
+ * persisted record keeps that record verbatim — reuse of an existing record,
+ * not the create options, defines the agent's labels, parentage and fork
+ * provenance. Binds the agent id into the
  * Agent-scoped telemetry view. New logs receive a metadata
- * envelope while non-empty unversioned logs are rejected. Removal awaits the
+ * envelope while non-empty unversioned logs are rejected.
+ *
+ * `restore` re-materializes an agent the session has on disk but that a cold
+ * resume did not bring back (it materializes `main` only) by reusing the
+ * persisted record and the same bootstrap path; an id with no record is never
+ * materialized.
+ *
+ * Removal awaits the
  * agent task manager's graceful exit policy before draining turns and full
- * compaction, then disposing the child scope. Fans session-level
+ * compaction, then disposing the child scope. An id under removal is registered
+ * in the removing set from the moment it leaves the registry until its scope is
+ * disposed, and `create` / `restore` refuse that id for the whole window: the
+ * window spans awaits, so without the guard a caller could materialize a second
+ * scope sharing the same wire journal — and resurrect an agent the session is
+ * closing. The refusal is checked before the in-flight-creation join as well,
+ * so a caller never receives a handle whose bootstrap the removal is about to
+ * dispose. Refusal reuses the not-found code because from a caller's view the
+ * agent is not available; a later create, after the removal settled, is
+ * ordinary. Fans session-level
  * permission-mode switches out to every live agent — except
  * `tower-worker`-profile agents, which TowerSpawn pins to `auto` (they run
  * detached and unattended); the broadcast leaves them on `auto`. Bound at
@@ -75,6 +94,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
   private readonly onDidDisposeEmitter = this._register(new Emitter<string>());
   private readonly interactionBusDisposables = new Map<string, IDisposable>();
   private readonly creating = new Map<string, Promise<IAgentScopeHandle>>();
+  private readonly removing = new Set<string>();
 
   get onDidCreate() {
     return this.onDidCreateEmitter.event;
@@ -121,6 +141,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
 
   async create(opts: CreateAgentOptions = {}): Promise<IAgentScopeHandle> {
     if (opts.agentId !== undefined) {
+      this.assertNotRemoving(opts.agentId);
       const inflight = this.creating.get(opts.agentId);
       if (inflight !== undefined) return inflight;
       const existing = this.handles.get(opts.agentId);
@@ -172,13 +193,17 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     try {
       const wire = handle.accessor.get(IWireService);
       await wire.seal();
-      await this.sessionMetadata.registerAgent(agentId, {
-        homedir: agentHomedir,
-        type: agentId === 'main' ? 'main' : 'sub',
-        parentAgentId: agentId === 'main' ? undefined : 'main',
-        forkedFrom: opts.forkedFrom,
-        labels: opts.labels,
-      });
+      const persisted = (await this.sessionMetadata.read()).agents?.[agentId];
+      await this.sessionMetadata.registerAgent(
+        agentId,
+        persisted ?? {
+          homedir: agentHomedir,
+          type: agentId === 'main' ? 'main' : 'sub',
+          parentAgentId: agentId === 'main' ? undefined : 'main',
+          forkedFrom: opts.forkedFrom,
+          labels: opts.labels,
+        },
+      );
       this.onDidCreateEmitter.fire(handle);
       await wire.restore();
       await this.bindBootstrap(handle, opts);
@@ -253,6 +278,23 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     return this.handles.get(agentId);
   }
 
+  async restore(agentId: string): Promise<IAgentScopeHandle | undefined> {
+    this.assertNotRemoving(agentId);
+    const inflight = this.creating.get(agentId);
+    if (inflight !== undefined) return inflight;
+    if (this.handles.has(agentId)) return this.create({ agentId });
+    const meta = (await this.sessionMetadata.read()).agents?.[agentId];
+    if (meta === undefined) return undefined;
+    return this.create({ agentId });
+  }
+
+  private assertNotRemoving(agentId: string): void {
+    if (!this.removing.has(agentId)) return;
+    throw new Error2(ErrorCodes.AGENT_NOT_FOUND, `Agent instance "${agentId}" is being removed`, {
+      details: { agentId },
+    });
+  }
+
   list(filter?: AgentListFilter): readonly IAgentScopeHandle[] {
     const all = [...this.handles.values()];
     const prefix = filter?.prefix;
@@ -279,21 +321,26 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     const handle = this.handles.get(agentId);
     if (handle === undefined) return;
     this.handles.delete(agentId);
-    await handle.accessor.get(IAgentTaskService).stopAllOnExit('Session closed');
-    const loop = handle.accessor.get(IAgentLoopService);
-    const compaction = handle.accessor.get(IAgentFullCompactionService).compacting;
-    const compactionSettled = compaction?.promise.catch(() => undefined) ?? Promise.resolve();
-    const reason = abortError('Agent removed');
-    for (const turnId of loop.status().pendingTurnIds) {
-      loop.cancel(turnId, reason);
+    this.removing.add(agentId);
+    try {
+      await handle.accessor.get(IAgentTaskService).stopAllOnExit('Session closed');
+      const loop = handle.accessor.get(IAgentLoopService);
+      const compaction = handle.accessor.get(IAgentFullCompactionService).compacting;
+      const compactionSettled = compaction?.promise.catch(() => undefined) ?? Promise.resolve();
+      const reason = abortError('Agent removed');
+      for (const turnId of loop.status().pendingTurnIds) {
+        loop.cancel(turnId, reason);
+      }
+      loop.cancel(undefined, reason);
+      if (compaction !== null && !compaction.abortController.signal.aborted) {
+        compaction.abortController.abort(reason);
+      }
+      await Promise.all([loop.settled(), compactionSettled]);
+      handle.dispose();
+      this.onDidDisposeEmitter.fire(agentId);
+    } finally {
+      this.removing.delete(agentId);
     }
-    loop.cancel(undefined, reason);
-    if (compaction !== null && !compaction.abortController.signal.aborted) {
-      compaction.abortController.abort(reason);
-    }
-    await Promise.all([loop.settled(), compactionSettled]);
-    handle.dispose();
-    this.onDidDisposeEmitter.fire(agentId);
   }
 }
 

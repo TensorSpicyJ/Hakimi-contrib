@@ -59,7 +59,7 @@ export function registerResearchRoutes(app: SessionRouteHost, core: Scope): void
     params: sessionIdParamSchema,
     success: { data: getSessionResearchResponseSchema },
     errors: { [ErrorCode.VALIDATION_FAILED]: { detailsSchema }, [ErrorCode.SESSION_NOT_FOUND]: {} },
-    description: 'Get Research memory-mode visibility (not CLI health)',
+    description: 'Get Research memory-mode state: enabled plus catalog Skill availability',
     tags: ['research'],
   }, async (req, reply) => {
     try {

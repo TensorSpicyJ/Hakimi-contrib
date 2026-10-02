@@ -5,8 +5,9 @@
  *
  * Responsibilities: assert the pure `stripEncryptedReasoningParts` transform
  * (multiple think blocks, no-encrypted identity, adjacent user/tool/media
- * content untouched) and the `projectEncryptedStripped` service projection
- * (history projected then stripped, input never mutated). Wiring: real
+ * content untouched, the stripped reasoning item's Responses identity dropped
+ * while the message-part identity survives) and the projected fidelity of
+ * Responses item metadata. Wiring: real
  * `AgentContextProjectorService` over `TestInstantiationService`. Run:
  * pnpm test -- test/agent/contextProjector/contextProjectorService.test.ts
  */
@@ -126,6 +127,82 @@ describe('stripEncryptedReasoningParts', () => {
       userAfter,
     ]);
     expect(assistant.content).toEqual([{ type: 'think', think: 'summary', encrypted: 'enc-1' }]);
+  });
+});
+
+describe('Responses item metadata through projection', () => {
+  it('drops the reasoning item identity together with the encrypted content it belonged to', () => {
+    const messages: Message[] = [
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'think',
+            think: 'summary',
+            encrypted: 'enc-a',
+            openaiResponses: { itemId: 'rs_1' },
+          },
+          {
+            type: 'text',
+            text: 'visible',
+            openaiResponses: { itemId: 'msg_1', phase: 'final_answer' },
+          },
+        ],
+        toolCalls: [],
+      },
+    ];
+
+    const stripped = stripEncryptedReasoningParts(messages);
+
+    expect(stripped).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          { type: 'think', think: 'summary' },
+          {
+            type: 'text',
+            text: 'visible',
+            openaiResponses: { itemId: 'msg_1', phase: 'final_answer' },
+          },
+        ],
+        toolCalls: [],
+      },
+    ]);
+  });
+
+  it('keeps item identity and phase on the projected wire parts', () => {
+    const { projector } = createProjector();
+    const history: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'hello' }], toolCalls: [] },
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'think',
+            think: 'why',
+            encrypted: 'enc-1',
+            openaiResponses: { itemId: 'rs_1' },
+          },
+          {
+            type: 'text',
+            text: 'answer',
+            openaiResponses: { itemId: 'msg_1', phase: 'final_answer' },
+          },
+        ],
+        toolCalls: [],
+      },
+    ];
+
+    const projected = projector.project(history);
+
+    expect(projected[1]?.content).toEqual([
+      { type: 'think', think: 'why', encrypted: 'enc-1', openaiResponses: { itemId: 'rs_1' } },
+      {
+        type: 'text',
+        text: 'answer',
+        openaiResponses: { itemId: 'msg_1', phase: 'final_answer' },
+      },
+    ]);
   });
 });
 

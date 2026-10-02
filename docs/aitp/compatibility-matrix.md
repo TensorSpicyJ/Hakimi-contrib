@@ -1,5 +1,36 @@
 # Hakimi × AITP compatibility matrix and decisions
 
+## 2026-09-22 AITP Skills remain available across mode changes {#aitp-skill-availability-20260922}
+
+Official AITP Skills are available whenever the enabled plugin supplies them, with Research Mode on or off. The mode controls lightweight research guidance; it does not hide Skills or invalidate their current listing. AITP Skills stay outside the frozen initial system prompt and enter through the existing dynamic listing, which still reflects catalog availability. The visibility contribution reports no hidden reason. Regression coverage now matches this contract instead of expecting mode toggles to hide Skills or emit visibility changes.
+
+Rechecked a fresh checkout of [official AITP source](https://github.com/bhjia-phys/AITP-Research-Protocol/tree/91f4fc6c0bb16fd6ad3b3182c7d5f9683210844a): HEAD `91f4fc6c0bb16fd6ad3b3182c7d5f9683210844a`, clean working tree, manifest `aitp` / `1.1.0+codex.20260919190843`, and the four core Skills `aitp-memory`, `aitp-research`, `aitp-writing`, and `aitp-distill`. There is still no `docs/hakimi/` handoff directory, ledger runtime, CLI, or session hook. This check did not change the installed plugin, external source, or research files. [Validation record](TRACKING.md#aitp-skill-availability-20260922). Earlier mode-gating records below describe their original implementation dates.
+
+## 2026-09-16 Web Research visibility and version {#web-research-skills-20260916}
+
+Web now refreshes session Skills at the authoritative Research snapshot commit boundary, covering HTTP commands, WS updates, initial reads and reconnect/resync reconciliation. Per-session request tokens reject older responses; backend changes invalidate pending Research work, Skills and plugin metadata. Failed side-data reads do not fail a mode toggle or retain a stale Skill list.
+
+The Research panel reads the installed `aitp` version and enabled/error state from the existing `GET /plugins` endpoint, separately from the actual session Skill list. It lists only returned core Skill names (the Skill descriptor does not expose plugin identity) and their `/skill:<name>` invocation; unknown versions, metadata failures, missing/disabled/error plugins are explicit. No core gate, Research snapshot or server protocol changed. The same downloaded upstream archive and its manifest/four core Skills were rechecked; no user-home plugin or upstream file was modified. Validation is recorded in [TRACKING](TRACKING.md#web-research-skills-20260916).
+
+## 2026-09-15 Official AITP plugin 1.1.0 (`aitp`) — CLI and ledger removed {#aitp-plugin-1-1-0-20260915}
+
+**宿主适配层更新；未声称正式发布。** 官方 AITP 已发布 **1.1.0**，其 manifest `name`（也即 registry/plugin id）为 **`aitp`**，并**移除了 CLI、ledger、session hook 与 native adapter**。本地已把该插件作为 managed plugin 安装到 `~/.hakimi/plugins/managed/aitp` 并启用；旧的 `aitp-research-protocol` 条目保留但 `enabled=false`。来源是下载的源码归档（固定 commit `0f6dc4cdea09106a46d53cf6355b09a924d8e21b`，manifest build `1.1.0+codex.20260914182315`），不是 Git checkout 或 release tag。
+
+插件随包提供**四个核心 Skill**：`aitp-memory`、`aitp-research`、`aitp-writing`、`aitp-distill`。记忆是一篇可编辑的 `research.md`（或既有 TeX 主笔记）加上链接的支撑笔记与素材，Agent 用宿主普通文件工具读写；没有 Python runtime、账本 CLI、知识卡片层、hash 协议、搜索/MCP 服务、hook 或后台 daemon。上游 README 亦明确旧 `aitp` 命令与 native ledger 工具不再提供，实现过旧 adapter 的宿主必须显式退役该集成。
+
+本次宿主侧变化：
+
+| 边界 | 更新后状态 |
+| --- | --- |
+| Skill 识别 | Research Mode 以新 id **`aitp`** 门控可见性、`skillsAvailable` 与动态清单；旧 id `aitp-research-protocol` 视为普通插件，既不隐藏也不计入官方可用性 |
+| 契约不变 | `ResearchModeSnapshot = { enabled, skillsAvailable }`、`research_mode.updated`、`Session.getResearch` / `commandResearch`、`EnterAITPMode` / `ExitAITPMode` 与 `/research on|off|status` 均不变 |
+| 无 I/O | 开关、状态读取、恢复与普通轮次边界不运行外部进程、不写记忆文件；`skillsAvailable` 只是 catalog 可见性 |
+| 文案 | 模型注入、工具描述、TUI Board 与 `/research` 输出、Web 中英文文案去除 CLI fallback、CLI health、ledger 写入与 Entry/Note 指引；改为按需调用四个 Skill、普通文件工具维护材料 |
+| 历史数据 | 旧 Entry/Note 文件与 store 不删除、不迁移、不 backfill；生成它们的旧 CLI 已不属于 AITP，不恢复该 CLI |
+| 上游交接 | AITP 当前 tree 已**不再提供 `docs/hakimi/`**，也没有 CLI，故本轮没有上游 checkout 交接文档可同批更新；不重建旧协议 |
+
+验证、构建与 smoke 的时点记录见 [TRACKING 本次说明](TRACKING.md#aitp-plugin-1-1-0-20260915)。以下 2026-09-13 各节及其后的历史原文完整保留为历史证据；其中 0.10.0 / `aitp/adapter-contract-0.3`、CLI、ledger、`.aitp/` store 与仓库边界派生补丁的描述不再代表当前集成。
+
 ## 2026-09-13 Repository boundary followup — one research line, one Git repository {#research-repo-boundary-20260913}
 
 **本地派生补丁，非上游 release；本节为后续补记。下面 memory-lite 0.10 的交付数据仍是此前时点的记录，历史原文不改。**

@@ -3,7 +3,8 @@
 // Wiring: the composable is real; daemon requests and unrelated facade collaborators are stubbed.
 // Run: pnpm --filter @bhjia-phys/hakimi-web exec vitest run test/workspace-state.test.ts
 
-import { computed, ref, type Ref } from 'vue';
+import { computed, effectScope, reactive, ref, type Ref } from 'vue';
+import { useModelProviderState, type UseModelProviderStateDeps } from '../src/composables/client/useModelProviderState';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AppApprovalRequest,
@@ -15,6 +16,8 @@ import type {
 import { DaemonApiError } from '../src/api/errors';
 import { createInitialState, reduceAppEvent } from '../src/api/daemon/eventReducer';
 import { mergeWorkspaces } from '../src/lib/mergeWorkspaces';
+import { autoSubagentPresetEnabled, autoSubagentPresetUnavailableReason } from '../src/lib/subagentPreset';
+import { i18n } from '../src/i18n';
 import { loadWorkspaceNameOverrides, saveWorkspaceNameOverrides } from '../src/lib/storage';
 import { useWorkspaceState, forgetLocalTurnState, type UseWorkspaceStateDeps } from '../src/composables/client/useWorkspaceState';
 import {
@@ -43,6 +46,7 @@ const apiMock = vi.hoisted(() => ({
   getSession: vi.fn(),
   setConfig: vi.fn(),
   activateSubagentPreset: vi.fn(),
+  autoSelectSubagentPreset: vi.fn(),
   getFsHome: vi.fn(),
   getHealth: vi.fn(),
   getMeta: vi.fn(),
@@ -52,6 +56,9 @@ const apiMock = vi.hoisted(() => ({
   commandSessionResearch: vi.fn(),
   listSessions: vi.fn(),
   listWorkspaces: vi.fn(),
+  listSkills: vi.fn(),
+  listSkillsForWorkspace: vi.fn(),
+  listPlugins: vi.fn(),
 }));
 
 vi.mock('../src/api', () => ({
@@ -147,7 +154,11 @@ function createDeps(): UseWorkspaceStateDeps {
   return {
     taskPoller: {},
     sideChat: {},
-    modelProvider: { resolveThinkingForPrompt: async () => undefined },
+    modelProvider: {
+      resolveThinkingForPrompt: async () => undefined,
+      loadSkillsForSession: vi.fn(),
+      loadSkillsForWorkspace: vi.fn(),
+    },
     pushOperationFailure: vi.fn(),
     activity: computed(() => 'running'),
     sessionsKnownEmpty: new Set(),
@@ -494,6 +505,44 @@ describe('mergeWorkspaces', () => {
     });
 
     expect(result.map((w) => w.root)).not.toContain('/agent/A');
+  });
+
+  it('surfaces a cross-project handoff target as its own workspace and keeps it after a reload', () => {
+    // Before the client has re-read `/workspaces`, the target project is
+    // unregistered: the derived path still gives it a sidebar row (carrying the
+    // daemon's real workspace id), so the handed-off session B is reachable
+    // from the list.
+    const beforeReload = mergeWorkspaces({
+      workspaces: [{ id: 'wd_a', root: '/agent/A', name: 'A', sessionCount: 1 }],
+      sessions: [
+        { id: 'a', cwd: '/agent/A', workspaceId: 'wd_a' },
+        { id: 'b', cwd: '/agent/B', workspaceId: 'wd_b' },
+      ],
+      hiddenWorkspaceRoots: [],
+      sessionsHasMoreByWorkspace: { wd_a: false },
+    });
+    expect(beforeReload.map((w) => w.root)).toEqual(['/agent/A', '/agent/B']);
+    expect(beforeReload.find((w) => w.root === '/agent/B')).toMatchObject({
+      id: 'wd_b',
+      sessionCount: 1,
+    });
+
+    // After a refresh the registry lists it as a real workspace, so it stays
+    // visible even when the session page no longer carries B's row.
+    const afterReload = mergeWorkspaces({
+      workspaces: [
+        { id: 'wd_a', root: '/agent/A', name: 'A', sessionCount: 1 },
+        { id: 'wd_b', root: '/agent/B', name: 'B', sessionCount: 1 },
+      ],
+      sessions: [{ id: 'a', cwd: '/agent/A', workspaceId: 'wd_a' }],
+      hiddenWorkspaceRoots: [],
+      sessionsHasMoreByWorkspace: {},
+    });
+    expect(afterReload.map((w) => w.root)).toEqual(['/agent/A', '/agent/B']);
+    expect(afterReload.find((w) => w.root === '/agent/B')).toMatchObject({
+      id: 'wd_b',
+      sessionCount: 1,
+    });
   });
 });
 
@@ -1190,6 +1239,184 @@ describe('useWorkspaceState — config reconciliation', () => {
 
     expect(state.config).toEqual({ providers: {}, defaultModel: 'provider/fresh' });
     expect(state.defaultModel).toBe('provider/fresh');
+  });
+
+  it('evaluates once for the captured session and reports an unchanged preset', async () => {
+    const state = createState();
+    state.config = { providers: {}, defaultModel: 'main/model', subagent: { preset: 'balanced' } };
+    state.defaultModel = 'main/model';
+    let finish!: (value: unknown) => void;
+    apiMock.autoSelectSubagentPreset.mockReset().mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const ws = useWorkspaceState(state, createDeps());
+    const selecting = ws.autoSelectSubagentPreset(state.activeSessionId);
+    state.activeSessionId = 'sess_other';
+    expect(ws.autoPresetAction.pending).toBe(true);
+    expect(await ws.autoSelectSubagentPreset('sess_other')).toBe(false);
+    const status = { evaluatedAt: 1_750_000_000_000, reasonCode: 'current_optimal' };
+    finish({ config: state.config, status });
+    expect(await selecting).toBe(true);
+    expect(apiMock.autoSelectSubagentPreset).toHaveBeenCalledExactlyOnceWith('sess_1');
+    expect(state.autoSubagentPresetStatus).toEqual(status);
+    expect(ws.autoPresetAction.feedback).toContain('balanced');
+    expect(state.warnings.at(-1)).toMatchObject({ severity: 'info', message: ws.autoPresetAction.feedback });
+    expect(ws.autoPresetAction.pending).toBe(false);
+    expect(state.defaultModel).toBe('main/model');
+    expect(state.thinking).toBe('high');
+  });
+
+  it.each(['balanced', 'kimi-heavy'])('reports its own config echo before HTTP resolves to %s', async (preset) => {
+    const state = createState();
+    state.config = { providers: {}, subagent: { preset: 'balanced', autoPreset: { manualLock: true } } };
+    const ws = useWorkspaceState(state, createDeps());
+    let finish!: (value: unknown) => void;
+    apiMock.autoSelectSubagentPreset.mockReset().mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const selecting = ws.autoSelectSubagentPreset('sess_1');
+    const current = {
+      providers: {},
+      subagent: { preset, autoPreset: { enabled: true, manualLock: false } },
+      experimental: { auto_subagent_preset: true },
+    };
+    const status = { evaluatedAt: 2000, reasonCode: 'current_optimal' } as NonNullable<ExtendedState['autoSubagentPresetStatus']>;
+    ws.applyConfig(current);
+    state.autoSubagentPresetStatus = status;
+    finish({
+      config: {
+        experimental: current.experimental,
+        subagent: { autoPreset: { manualLock: false, enabled: true }, preset },
+        providers: {},
+      },
+      status,
+      warning: 'Example evaluation warning',
+    });
+
+    expect(await selecting).toBe(true);
+    expect(state.config).toBe(current);
+    expect(state.autoSubagentPresetStatus).toEqual(status);
+    expect(ws.autoPresetAction.feedback).toContain(preset);
+    expect(ws.autoPresetAction.feedback).toContain('Example evaluation warning');
+    expect(ws.autoPresetAction.feedback).not.toBe(i18n.global.t('header.subagentPresetAutoSuperseded'));
+    expect(state.warnings).toHaveLength(1);
+    expect(state.warnings[0]).toMatchObject({ severity: 'warning', message: ws.autoPresetAction.feedback });
+  });
+
+  it.each(['config', 'status', 'both'])('suppresses stale auto feedback after newer %s arrives', async (race) => {
+    const state = createState();
+    const ws = useWorkspaceState(state, createDeps());
+    let finish!: (value: unknown) => void;
+    apiMock.autoSelectSubagentPreset.mockReset().mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const selecting = ws.autoSelectSubagentPreset('sess_1');
+    const manual = { providers: {}, subagent: { preset: 'manual', autoPreset: { manualLock: true } } };
+    if (race !== 'status') ws.applyConfig(manual);
+    const live = { evaluatedAt: 2000, reasonCode: 'manual_override' } as NonNullable<ExtendedState['autoSubagentPresetStatus']>;
+    if (race !== 'config') state.autoSubagentPresetStatus = live;
+    finish({
+      config: { providers: {}, subagent: { preset: 'obsolete-preset' } },
+      status: { evaluatedAt: 1000, reasonCode: 'current_optimal' },
+      warning: 'Obsolete warning',
+    });
+    await selecting;
+    if (race !== 'status') expect(state.config).toEqual(manual);
+    expect(state.autoSubagentPresetStatus).toEqual(race === 'config' ? undefined : live);
+    expect(ws.autoPresetAction.feedback).toBe(i18n.global.t('header.subagentPresetAutoSuperseded'));
+    expect(ws.autoPresetAction.feedback).not.toContain('obsolete-preset');
+    expect(state.warnings).toEqual([]);
+  });
+
+  it('keeps auto selection retryable while flags are cleared and after metadata failure', async () => {
+    const state = reactive(createState());
+    const config = { providers: {}, experimental: { auto_subagent_preset: true },
+      subagent: { preset: 'balanced', autoPreset: { enabled: true } } };
+    state.config = config;
+    const ws = useWorkspaceState(state, createDeps());
+    const meta = { serverVersion: '1.0.0', openInApps: [], dangerousBypassAuth: false,
+      experimentalFlags: { auto_subagent_preset: true }, backend: 'v2' };
+    apiMock.getMeta.mockResolvedValue(meta);
+    await ws.refreshServerMeta();
+    // The same reactive helper inputs used by App, not a hand-written control.
+    const disabledReason = computed(() => autoSubagentPresetUnavailableReason(
+      state.config, state.experimentalFlags, i18n.global.t, ws.autoPresetAction.supported,
+    ));
+    const automatic = computed(() => autoSubagentPresetEnabled(state.config, state.experimentalFlags));
+    expect(automatic.value).toBe(true);
+    expect(ws.autoPresetAction.supported).toBe(true);
+    let finish!: (value: unknown) => void;
+    apiMock.autoSelectSubagentPreset.mockReset().mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    apiMock.getMeta.mockRejectedValueOnce(new Error('Temporary metadata outage'));
+    const selecting = ws.autoSelectSubagentPreset();
+    expect(state.experimentalFlags).toEqual({});
+    expect(automatic.value).toBe(false);
+    expect(ws.autoPresetAction.pending).toBe(true);
+    expect(ws.autoPresetAction.metaStatus).toBe('refreshing');
+    expect(disabledReason.value).toBeUndefined();
+    finish({ config, status: { evaluatedAt: 1000, reasonCode: 'current_optimal' } });
+    expect(await selecting).toBe(true);
+    expect(ws.autoPresetAction.pending).toBe(false);
+    expect(ws.autoPresetAction.metaStatus).toBe('error');
+    expect(ws.autoPresetAction.supported).toBe(true);
+    expect(state.experimentalFlags).toEqual({});
+    expect(automatic.value).toBe(false);
+    expect(disabledReason.value).toBeUndefined();
+    apiMock.autoSelectSubagentPreset.mockResolvedValueOnce({
+      config, status: { evaluatedAt: 2000, reasonCode: 'current_optimal' },
+    });
+    expect(await ws.autoSelectSubagentPreset()).toBe(true);
+    expect(apiMock.autoSelectSubagentPreset).toHaveBeenCalledTimes(2);
+    expect(ws.autoPresetAction.metaStatus).toBe('ready');
+    expect(automatic.value).toBe(true);
+    expect(disabledReason.value).toBeUndefined();
+  });
+
+  it('distinguishes unknown metadata from confirmed unsupported capabilities', async () => {
+    const state = createState();
+    state.config = { providers: {} };
+    const ws = useWorkspaceState(state, createDeps());
+    const reason = () => autoSubagentPresetUnavailableReason(
+      state.config, state.experimentalFlags, i18n.global.t, ws.autoPresetAction.supported,
+    );
+    expect(reason()).toBeUndefined();
+    apiMock.getMeta.mockRejectedValueOnce(new Error('Temporary metadata outage'));
+    await ws.refreshServerMeta(true);
+    expect(ws.autoPresetAction.metaStatus).toBe('error');
+    expect(reason()).toBeUndefined();
+    await ws.refreshServerMeta();
+    expect(ws.autoPresetAction.metaStatus).toBe('ready');
+    expect(ws.autoPresetAction.supported).toBe(false);
+    expect(reason()).toBe(i18n.global.t('header.subagentPresetAutoUnsupported'));
+  });
+
+  it('evaluates without a session and never creates one', async () => {
+    const state = createState();
+    state.activeSessionId = undefined;
+    apiMock.createSession.mockClear();
+    apiMock.autoSelectSubagentPreset.mockReset().mockResolvedValue({
+      config: { providers: {}, subagent: { preset: 'balanced' } },
+      status: { evaluatedAt: 1_750_000_000_000, reasonCode: 'no_healthy_candidate' },
+      warning: 'No selectable candidate',
+    });
+    const ws = useWorkspaceState(state, createDeps());
+    expect(await ws.autoSelectSubagentPreset()).toBe(true);
+    expect(apiMock.autoSelectSubagentPreset).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(apiMock.createSession).not.toHaveBeenCalled();
+    expect(ws.autoPresetAction.feedback).toContain('No selectable candidate');
+    expect(state.warnings.at(-1)).toMatchObject({ severity: 'warning' });
+  });
+
+  it.each([404, 40410, 500])('reports auto-selection failure %s without a config-patch fallback', async (code) => {
+    const state = createState();
+    const deps = createDeps();
+    apiMock.setConfig.mockClear();
+    apiMock.autoSelectSubagentPreset.mockReset().mockRejectedValue(new DaemonApiError({
+      code, msg: 'Selection unavailable', requestId: 'req-auto',
+    }));
+    const ws = useWorkspaceState(state, deps);
+    expect(await ws.autoSelectSubagentPreset()).toBe(false);
+    expect(ws.autoPresetAction.pending).toBe(false);
+    expect(ws.autoPresetAction.unsupported).toBe(code === 404);
+    expect(ws.autoPresetAction.feedback).not.toBe('');
+    expect(state.autoSubagentPresetStatus).toBeUndefined();
+    expect(state.warnings).toEqual([]);
+    expect(deps.pushOperationFailure).toHaveBeenCalled();
+    expect(apiMock.setConfig).not.toHaveBeenCalled();
   });
 
   it('commits a serialized manual preset activation through the config mutation funnel', async () => {
@@ -3244,5 +3471,204 @@ describe('useWorkspaceState — Research', () => {
       applyResearchResponseIfCurrent(state, 'sess_1', firstMutationToken, snapshot(3)),
     ).toBe(false);
     expect(state.researchBySession['sess_1']).toBe(secondMutationSnapshot);
+  });
+});
+
+describe('Research-driven skill and plugin refresh', () => {
+  const coreSkills = ['aitp-memory', 'aitp-research', 'aitp-writing', 'aitp-distill'].map((name) => ({
+    name, description: name, source: 'plugin',
+  }));
+  const plugin = { id: 'aitp', version: '1.1.0+example', enabled: true, state: 'ok' };
+  const scopes: ReturnType<typeof effectScope>[] = [];
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  function setupSkills() {
+    const state = reactive(createState());
+    const scope = effectScope();
+    scopes.push(scope);
+    const modelProvider = scope.run(() => useModelProviderState(state, {
+      activity: computed(() => 'idle'),
+    } as UseModelProviderStateDeps))!;
+    const deps = createDeps();
+    deps.modelProvider = modelProvider;
+    deps.refreshSessionResearch = (sid) => deps.researchRequests.read(state, sid, () => apiMock.getSessionResearch(sid));
+    return { state, modelProvider, deps, ws: useWorkspaceState(state, deps) };
+  }
+
+  beforeEach(() => {
+    apiMock.listSkills.mockReset().mockResolvedValue([]);
+    apiMock.listSkillsForWorkspace.mockReset().mockResolvedValue([]);
+    apiMock.listPlugins.mockReset().mockResolvedValue([plugin]);
+    apiMock.getSessionResearch.mockReset().mockImplementation(async () => ({ enabled: true, skillsAvailable: true }));
+    apiMock.commandSessionResearch.mockReset();
+  });
+  afterEach(() => { scopes.splice(0).forEach((scope) => scope.stop()); });
+
+  it('refreshes on HTTP on/off and rejects a slower pre-toggle skill response', async () => {
+    const { state, modelProvider, ws } = setupSkills();
+    const old = deferred<typeof coreSkills>();
+    apiMock.listSkills.mockReturnValueOnce(old.promise).mockResolvedValueOnce(coreSkills);
+    const pending = modelProvider.loadSkillsForSession('sess_1');
+    apiMock.commandSessionResearch.mockResolvedValue({ enabled: true, skillsAvailable: true });
+    await ws.commandResearch({ kind: 'enter_mode', actor: 'user' });
+    await vi.waitFor(() => expect(modelProvider.skillsBySession.value.sess_1).toEqual(coreSkills));
+    old.resolve([]);
+    await pending;
+    expect(modelProvider.skillsBySession.value.sess_1).toEqual(coreSkills);
+    expect(modelProvider.aitpPlugin.value).toEqual(plugin);
+
+    apiMock.listSkills.mockResolvedValue([]);
+    apiMock.commandSessionResearch.mockResolvedValue({ enabled: false, skillsAvailable: true });
+    await ws.commandResearch({ kind: 'exit_mode' });
+    expect(state.researchBySession.sess_1?.enabled).toBe(false);
+    expect(modelProvider.skillsBySession.value.sess_1).toEqual([]);
+  });
+
+  it('restores draft and legacy skill menus after reconnect clears backend caches', async () => {
+    const { state, modelProvider, ws } = setupSkills();
+    state.activeWorkspaceId = 'workspace';
+    apiMock.getMeta.mockResolvedValue({ backend: 'v1', experimentalFlags: {}, serverVersion: '1', openInApps: [] });
+    apiMock.listSkills.mockResolvedValue(coreSkills);
+    apiMock.listSkillsForWorkspace.mockResolvedValue(coreSkills);
+    await ws.refreshServerMeta(true, true);
+    expect(modelProvider.skillsBySession.value.sess_1).toEqual(coreSkills);
+    expect(modelProvider.skillsByWorkspace.value.workspace).toEqual(coreSkills);
+    state.activeSessionId = undefined;
+    apiMock.getMeta.mockResolvedValue({ backend: 'v2', experimentalFlags: {}, serverVersion: '2', openInApps: [] });
+    await ws.refreshServerMeta(true, true);
+    await Promise.resolve();
+    expect(modelProvider.skillsByWorkspace.value.workspace).toEqual(coreSkills);
+    expect(apiMock.getSessionResearch).not.toHaveBeenCalled();
+  });
+
+  it('uses WS commits and repeated GET reconciliation without redirecting another session', async () => {
+    const { state, modelProvider, deps } = setupSkills();
+    const old = deferred<typeof coreSkills>();
+    apiMock.listSkills.mockReturnValueOnce(old.promise).mockResolvedValue(coreSkills);
+    const pending = modelProvider.loadSkillsForSession('sess_1');
+    state.activeSessionId = 'sess_2';
+    const next = reduceAppEvent(state, {
+      type: 'researchUpdated', sessionId: 'sess_2', snapshot: { enabled: true, skillsAvailable: true },
+    }, { sessionId: 'sess_2', seq: 1 });
+    state.researchBySession = next.researchBySession;
+    await vi.waitFor(() => expect(modelProvider.skillsBySession.value.sess_2).toEqual(coreSkills));
+    old.resolve([]);
+    await pending;
+    expect(modelProvider.skillsBySession.value.sess_2).toEqual(coreSkills);
+    // Reconnect/resync can return the same flags but a newly discovered catalog.
+    apiMock.listSkills.mockResolvedValue([coreSkills[0]!]);
+    apiMock.getSessionResearch.mockImplementation(async () => ({ enabled: true, skillsAvailable: true }));
+    await deps.refreshSessionResearch('sess_2');
+    await deps.refreshSessionResearch('sess_2');
+    expect(modelProvider.skillsBySession.value.sess_2).toEqual([coreSkills[0]]);
+    expect(apiMock.listSkills.mock.calls.map(([sid]) => sid)).toEqual(['sess_1', 'sess_2', 'sess_2', 'sess_2']);
+  });
+
+  it('recovers Research sidecars when configChanged supersedes reconnect metadata without resync', async () => {
+    const { state, modelProvider, ws } = setupSkills();
+    const meta = { backend: 'v2', experimentalFlags: {}, serverVersion: '1', openInApps: [] };
+    const reconnectReply = deferred<typeof meta>();
+    apiMock.getMeta.mockReset().mockReturnValueOnce(reconnectReply.promise).mockResolvedValue(meta);
+    apiMock.listSkills.mockResolvedValue(coreSkills);
+    const reconnect = ws.refreshServerMeta(true, true);
+    expect(state.backend).toBe('v1');
+    // The configChanged handler issues this flags-only meta read while the
+    // reconnect read is pending. No resync or session switch follows.
+    await ws.refreshServerMeta(true);
+    reconnectReply.resolve(meta);
+    await reconnect;
+    expect(state.backend).toBe('v2');
+    expect(apiMock.getSessionResearch).toHaveBeenCalledExactlyOnceWith('sess_1');
+    expect(modelProvider.skillsBySession.value.sess_1).toEqual(coreSkills);
+    expect(modelProvider.aitpPlugin.value).toEqual(plugin);
+    await ws.refreshServerMeta(true);
+    expect(apiMock.getSessionResearch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['v1', 'v2'] as const)('keeps reconnect recovery pending after latest meta fails, then recovers on %s', async (backend) => {
+    const { state, modelProvider, ws } = setupSkills();
+    const meta = { backend, experimentalFlags: {}, serverVersion: '1', openInApps: [] };
+    const oldReply = deferred<typeof meta>();
+    apiMock.getMeta.mockReset().mockReturnValueOnce(oldReply.promise).mockRejectedValueOnce(new Error('offline'));
+    apiMock.listSkills.mockResolvedValue(coreSkills);
+    const reconnect = ws.refreshServerMeta(true, true);
+    await ws.refreshServerMeta(true);
+    oldReply.resolve(meta);
+    await reconnect;
+    expect(state.backend).toBe('v1');
+    expect(apiMock.getSessionResearch).not.toHaveBeenCalled();
+    expect(apiMock.listSkills).not.toHaveBeenCalled();
+    apiMock.getMeta.mockResolvedValue(meta);
+    await ws.refreshServerMeta();
+    expect(modelProvider.skillsBySession.value.sess_1).toEqual(coreSkills);
+    expect(apiMock.getSessionResearch).toHaveBeenCalledTimes(backend === 'v2' ? 1 : 0);
+    expect(state.backend).toBe(backend);
+  });
+
+  it('reconciles the active session after reconnect metadata even without a resync frame', async () => {
+    const { modelProvider, ws } = setupSkills();
+    apiMock.getMeta.mockResolvedValue({ backend: 'v2', experimentalFlags: {}, serverVersion: '1', openInApps: [] });
+    apiMock.listSkills.mockResolvedValue(coreSkills);
+    await ws.refreshServerMeta(true, true);
+    expect(apiMock.getSessionResearch).toHaveBeenCalledWith('sess_1');
+    expect(modelProvider.skillsBySession.value.sess_1).toEqual(coreSkills);
+  });
+
+  it('clears stale lists on backend changes and ignores old session/workspace/plugin replies', async () => {
+    const { state, modelProvider, deps } = setupSkills();
+    const skillReply = deferred<typeof coreSkills>();
+    const workspaceReply = deferred<typeof coreSkills>();
+    const pluginReply = deferred<typeof plugin[]>();
+    apiMock.listSkills.mockReturnValueOnce(skillReply.promise);
+    apiMock.listSkillsForWorkspace.mockReturnValueOnce(workspaceReply.promise);
+    apiMock.listPlugins.mockReturnValueOnce(pluginReply.promise);
+    await deps.refreshSessionResearch('sess_1');
+    const workspacePending = modelProvider.loadSkillsForWorkspace('workspace');
+    state.backend = 'v1';
+    state.backend = 'v2';
+    await deps.refreshSessionResearch('sess_1');
+    skillReply.resolve(coreSkills);
+    workspaceReply.resolve(coreSkills);
+    pluginReply.resolve([{ ...plugin, version: 'stale' }]);
+    await workspacePending;
+    await Promise.resolve();
+    expect(modelProvider.skillsBySession.value.sess_1).toEqual([]);
+    expect(modelProvider.skillsByWorkspace.value).toEqual({});
+    expect(modelProvider.aitpPlugin.value).toEqual(plugin);
+  });
+
+  it('does not fail toggles on metadata errors or advertise stale skills after a failed refresh', async () => {
+    const { modelProvider, ws } = setupSkills();
+    apiMock.listSkills.mockResolvedValue(coreSkills);
+    await modelProvider.loadSkillsForSession('sess_1');
+    apiMock.listSkills.mockRejectedValue(new Error('skills unavailable'));
+    apiMock.listPlugins.mockRejectedValue(new Error('plugins unavailable'));
+    apiMock.commandSessionResearch.mockResolvedValue({ enabled: false, skillsAvailable: true });
+    await expect(ws.commandResearch({ kind: 'exit_mode' })).resolves.toEqual({ enabled: false, skillsAvailable: true });
+    expect(modelProvider.skillsBySession.value.sess_1).toEqual([]);
+    expect(modelProvider.aitpPlugin.value).toBeNull();
+    expect(modelProvider.pluginMetadataStatus.value).toBe('error');
+  });
+
+  it('invalidates old Research GETs and queued POSTs across a backend epoch', async () => {
+    const state = createState();
+    const coordinator = createResearchRequestCoordinator();
+    const reply = deferred<ResearchModeSnapshot>();
+    const oldRead = coordinator.read(state, 'sess_1', () => reply.promise).catch(() => null);
+    const oldPost = coordinator.mutate(state, 'sess_1', () => reply.promise).catch(() => null);
+    const queuedRequest = vi.fn();
+    const queuedPost = coordinator.mutate(state, 'sess_1', queuedRequest).catch(() => null);
+    await Promise.resolve();
+    coordinator.reset();
+    await coordinator.read(state, 'sess_1', async () => ({ enabled: false, skillsAvailable: false }));
+    reply.resolve({ enabled: true, skillsAvailable: true });
+    expect(await Promise.all([oldRead, oldPost, queuedPost])).toEqual([null, null, null]);
+    expect(queuedRequest).not.toHaveBeenCalled();
+    expect(state.researchBySession.sess_1).toEqual({ enabled: false, skillsAvailable: false });
   });
 });

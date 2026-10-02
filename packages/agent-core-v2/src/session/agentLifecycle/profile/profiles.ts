@@ -10,6 +10,7 @@
 import { collectGitContext } from './gitContext';
 import { registerAgentProfile } from '#/app/agentProfileCatalog/contribution';
 import {
+  renderCompactSystemPromptResult,
   renderSystemPromptResult,
   skillActiveFor,
   TASK_AGENT_ROLE_PREFIX,
@@ -22,6 +23,7 @@ const AGENT_TOOLS = [
   'Read',
   'Write',
   'Edit',
+  'apply_patch',
   'Grep',
   'Glob',
   'Bash',
@@ -52,6 +54,7 @@ const AGENT_TOOLS = [
   'TowerInit',
   'GetProviderUsage',
   'SetSubagentPreset',
+  'StartSession',
   'mcp__*',
 ] as const;
 
@@ -61,6 +64,7 @@ const CODER_TOOLS = [
   'CronDelete',
   'CronList',
   'Edit',
+  'apply_patch',
   'EnterPlanMode',
   'ExitPlanMode',
   'Glob',
@@ -102,12 +106,21 @@ const DEFAULT_SUMMARY_POLICY = {
   retries: 1,
 } as const;
 
+const COMPACT_CODER_ROLE =
+  `${CODER_ROLE}\n\n` +
+  'For software engineering work, inspect existing architecture and dependencies before editing. ' +
+  'Trace bugs to their cause; preserve behavior outside the requested change. ' +
+  'Use local patterns, update affected callers, and run focused tests covering the changed behavior. ' +
+  'Do not weaken checks to hide failures or introduce unrelated refactors.';
+
 registerAgentProfile({
   name: 'agent',
   description: 'Default agent',
   tools: AGENT_TOOLS,
   renderSystemPrompt: (context) =>
     renderSystemPromptResult('', context, { skillActive: skillActiveFor(AGENT_TOOLS) }),
+  renderCompactSystemPrompt: (context) =>
+    renderCompactSystemPromptResult('', context, { skillActive: skillActiveFor(AGENT_TOOLS) }),
 });
 
 registerAgentProfile({
@@ -119,6 +132,8 @@ registerAgentProfile({
   tools: CODER_TOOLS,
   renderSystemPrompt: (context) =>
     renderSystemPromptResult(CODER_ROLE, context, { skillActive: skillActiveFor(CODER_TOOLS) }),
+  renderCompactSystemPrompt: (context) =>
+    renderCompactSystemPromptResult(COMPACT_CODER_ROLE, context, { skillActive: skillActiveFor(CODER_TOOLS) }),
   summaryPolicy: DEFAULT_SUMMARY_POLICY,
 });
 
@@ -130,6 +145,8 @@ registerAgentProfile({
   tools: EXPLORE_TOOLS,
   renderSystemPrompt: (context) =>
     renderSystemPromptResult(EXPLORE_ROLE, context, { skillActive: skillActiveFor(EXPLORE_TOOLS) }),
+  renderCompactSystemPrompt: (context) =>
+    renderCompactSystemPromptResult(EXPLORE_ROLE, context, { skillActive: skillActiveFor(EXPLORE_TOOLS) }),
   promptPrefix: async ({ cwd, process, log }) => {
     try {
       return await collectGitContext(process, cwd, log);

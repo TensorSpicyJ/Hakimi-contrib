@@ -2,7 +2,8 @@
  * `aitpResearch` domain — `IAgentAitpModeService` contract.
  *
  * Agent-scope, main-only toggle for local knowledge and official AITP Skills.
- * getSnapshot awaits catalog readiness and reports visibility, not CLI health.
+ * getSnapshot awaits catalog readiness and reports Skill availability, never
+ * runtime health or any external process probe.
  * onDidChange signals only active/inactive transitions. Only enabled is persisted;
  * general Goal, Plan, permissions, and conversation undo remain independent.
  * Legacy phase/adapter/loop members are retained as retired source contracts

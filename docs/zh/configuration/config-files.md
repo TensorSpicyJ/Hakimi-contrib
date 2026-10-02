@@ -266,14 +266,27 @@ circuit_breaker_cooldown_ms = 900000
 refresh_interval_ms = 300000
 query_timeout_ms = 5000
 allow_extra_usage = false
+role_weights = {}
+deepseek_peak_policy = "penalize"
+deepseek_peak_penalty = 60
+reset_priority_window_ms = 259200000
+reset_priority_exponent = 3
+reset_priority_max_bonus = 200
 ```
 
 `auto_preset` 字段说明：
 
 - `enabled`：打开自动评估；默认 `false`。此外还必须启用实验 flag，评估才会运行。
-- `manual_lock`：保留当前人工选择并跳过自动评估；默认 `false`。手动激活 preset 会把它设为 `true`；**恢复自动切换**或 `/preset auto` 只会清除该锁，不改变 active preset。
-- `candidates`：参与评估的 preset 名称列表，按偏好从高到低排列。列表位置提供线性优先级加分，而不是绝对顺序。缺省时所有已配置 preset 按文件顺序参与；显式空数组会暂停自动切换。
-- `quota_floor_percent`：候选被视为健康所需的最低 provider 剩余配额（`25`）。此外还要求路由可解析、有配额证据且熔断器关闭；评分加分不能把低于 floor 的候选救活。
+- `manual_lock`：保留当前人工选择并跳过自动评估；默认 `false`。手动激活 preset 会把它设为 `true`。Web 自动选择会清除该锁并立即评估；TUI `/preset auto` 只清除手动锁。
+- `candidates`：参与评估的 preset 名称列表，按偏好从高到低排列。列表位置提供线性优先级加分，而不是绝对顺序。缺省时所有已配置 preset 按文件顺序参与。显式空数组表示没有可自动派发的目标：保留已存储的 preset，但拒绝建立新的自动绑定，不会使用候选列表外的 preset。若要继续使用固定 preset 派发，请设置 `manual_lock` 或关闭自动选择。
+- `role_weights`：可选的角色权重，例如 `{ coder = 2, reviewer = 2 }`。未指定的角色权重为 1，值必须为有限非负数；零权重角色仍显示。总角色权重为零的 preset 不可选。
+- `deepseek_peak_policy`：可选 `block`、`penalize` 或 `off`。`block` 在高峰时段禁用官方 DeepSeek；`penalize` 允许其他条件正常的 DeepSeek 路由，但扣除加权策略分；`off` 不处理高峰时段。显式选择 `penalize` 表示允许高峰时段的付费调用。
+- `deepseek_peak_penalty`：`penalize` 模式下每个 DeepSeek 角色的高峰惩罚（默认 `60` 分），必须为有限非负数。这是策略分，不是人民币费用；整体扣分按有效 DeepSeek 角色权重占比汇总。
+- `deepseek_avoid_peak_hours`：兼容旧配置，默认 `true`，仅在未指定 `deepseek_peak_policy` 时使用：true 对应 `block`，false 对应 `off`。旧的硬禁用不会未经选择就变成软惩罚。余额证据仍需要 `deepseek_usage`；关闭查询不会被当作账户有余额。
+- `quota_floor_percent`：通常保留的订阅剩余额度门槛（`25`）。有效临期额度具有正的指数优先加分时，可以使用低于该保留门槛的剩余额度，但不能绕过任何已耗尽的配额窗口、未知资源证据、能力校验或熔断。
+- `reset_priority_window_ms`：订阅重置前进入指数优先策略的窗口（`259200000`，即 72 小时），不超过额度自身声明的周期。只有至少一天的周期参与；5 小时限流窗口不会冒充周额度到期。
+- `reset_priority_exponent`：指数曲线系数（`3`）；值越大，加分增长越集中在临近重置的阶段。
+- `reset_priority_max_bonus`：逐角色临期优先加分上限（`200` 分，不是配额百分比）。设为 `0` 会同时关闭加分及其保留门槛例外。
 - `switch_margin_percent`：当前 preset 健康时，最高分候选必须领先多少分才允许普通切换（`10`）。
 - `local_usage_window_ms`：统计本地运行证据的回溯窗口（`3600000`，即 1 小时）。
 - `local_usage_weight_percent`：归一化本地 token 用量的最大惩罚（`10`）。
@@ -285,17 +298,35 @@ allow_extra_usage = false
 - `circuit_breaker_cooldown_ms`：熔断器打开后，从最近一次失败起保持不可选的时间（`900000`，即 15 分钟）。
 - `refresh_interval_ms`：provider 配额答案在两次派生之间的缓存时长（`300000`，即 5 分钟）；subagent 运行结束时缓存会立即失效。
 - `query_timeout_ms`：单个 provider 配额查询的超时（`5000`）。
-- `allow_extra_usage`：为 `true` 时，余额为正的 Kimi Extra Usage 钱包可在 plan 配额耗尽时补足：provider 的有效剩余百分比取 plan 窗口最低剩余与钱包剩余份额的较大者。Extra Usage 永远不会被自动消耗；默认 `false` 完全不考虑钱包。钱包提供有效配额时，plan reset 时间视为未知，因此没有 reset 加分。
+- `allow_extra_usage`：为 `true` 时，余额为正的 Kimi Extra Usage 钱包可在 plan 配额耗尽时补足：provider 的有效剩余百分比取 plan 窗口最低剩余与钱包剩余份额的较大者。Extra Usage 永远不会被自动消耗；默认 `false` 完全不考虑钱包。钱包本身没有订阅临期加分。原始订阅已耗尽、只有显式允许的钱包使路由可用时，不给予临期奖励；仍可实际消费的订阅可以保留自身有效的临期优先级。
 
-评估时，每个候选都会以自己作为 active preset 来解析路由，最终模型的 provider 决定使用哪份配额与本地证据。provider 剩余百分比取所有有效用量窗口中的最低剩余百分比，除非显式允许计入且余额为正的 Extra Usage 钱包提供了更高值。耗尽的窗口会保持零配额，直到刷新后的用量确认恢复；即使其他窗口仍然健康，或 reset 时间已经到达，也不会改变这一点。仅凭 reset 时间不会恢复配额或候选的可选资格。固定评分公式为 `剩余配额 + 优先级加分 + reset 加分 + 路由 / 模型匹配加分 − token 惩罚 − 可靠性惩罚 − 延迟惩罚`。未来 24 小时内的有效 reset 最多加 2 分；模型来自 preset 专用路由时加 2 分；已知模型能力与请求的 Thinking 设置相符时加 1 分。模型能力未知时不扣分。
+评分覆盖整套 preset，不再只看下一次 `coder` 路由。所有已配置 preset 都会展示，包括不在 `candidates` 中的项；非候选只供查看，不参与自动选择。各 preset 使用同一组角色，由已配置 profile 以及默认 coder、Swarm、Tower 路由组成。每个角色按正常的 preset → 基础配置 → caller 顺序解析实际模型与 Thinking。`main` 不计入，因为自动选择不会修改主模型。
 
-本地证据会优先采用当前请求 profile 的历史；该 profile 少于 3 个样本时，回退到同一 provider 的全部近期运行。失败率与首 token 延迟在样本较少时会降低置信度，直到 5 个运行样本或 LLM 请求才使用完整权重；取消的运行不算可靠性失败。token 用量按最繁忙的候选 provider 归一化，延迟按有 timing 证据的最慢候选归一化。因此，只要加权证据足以抵消较少的优先级加分，低优先级 preset 就可以越级。
+角色权重默认均为 1；权重为 0 的角色仍显示，但不参与平均。角色原始分为 `资源分 + reset 加分 + 路由匹配分 − token 扣分 − 可靠性扣分 − 延迟扣分 − 高峰扣分`。健康原路由的有效贡献是 `max(0, 原始分)`；临时补位的贡献是 `max(0, 替代路由原始分 − 10)`。补位后仍不可用的角色贡献为零，但不从分母中删除。整体分等于这些有效角色分的加权平均，再加一次 preset 顺序加分。评分表还展示补位前原生分、角色覆盖情况和仍不可用的角色。这是路由策略分，不是模型能力百分制。
 
-候选只有在路由可解析、有不低于 `quota_floor_percent` 的配额证据且熔断器关闭时才可选。评分最高的可选候选胜出；同分时尽量保持当前 preset，否则按候选顺序。当前 preset 不在 `candidates` 中时，会被视为显式选择并保持不变。当前 preset 健康时，胜出者必须领先至少 `switch_margin_percent`，并且切换冷却已经结束。当前 preset 不健康或已熔断时，即使仍在冷却期也可立即逃生。没有健康候选时保持当前 preset。daemon 重启后会从本地运行台账重建熔断状态；仅存在于进程内的切换冷却会清零。
+订阅 provider 的资源分采用有效配额窗口中最低的剩余百分比。通常的保留门槛只会对已确认、仍有正剩余额度的临期订阅放宽；仅凭 reset 时间不会恢复已耗尽的配额。
 
-手动使用 `/preset`、Web Preset 选择器或 `SetSubagentPreset` 时，会原子地保存 preset 并设置 `manual_lock = true`，手动选择基础路由也一样。该锁只保存在本机，并且 daemon 重启后仍然有效；锁定期间，自动评估会在查询 provider 用量前直接返回。可在 Web header 或 **设置 > Agent** 中选择**恢复自动切换**，也可在 TUI 中运行 `/preset auto`，只清除手动锁。当前 preset 会继续生效，直到下一次相关派生或 resume 触发评估。
+临期优先使用已声明且至少一天的额度周期；短期限流窗口仍约束可用性，但不能冒充周额度到期。进入临期窗口后，`u = 1 − 距重置时间 / 临期窗口`，加分为 `最大加分 × (exp(指数系数 × u) − 1) / (exp(指数系数) − 1)`；实际窗口取配置提前量和额度周期的较小值。默认情况下，周额度距重置 48 小时约加 18.01 分、24 小时加 66.95 分、12 小时加 117.18 分、1 小时加 191.41 分，在重置前趋近 200 分，不再是原来的最多线性加 2 分。
 
-自动激活是 best-effort 且 fail-open：证据不足、查询失败、路由模型无法解析或持久化失败都不会阻塞派生或 resume。它只写 `[subagent].preset`——绝不触碰 main/default model、全局 Thinking 或手动锁，也不产生审批请求。评估发生在新的 `Agent` 派生、允许重绑定的 `Agent` resume、`AgentSwarm` 新 item 使用的路由、仅 resume 与混合 `AgentSwarm` 批次中每个允许重绑定的 child，以及 Tower worker/reviewer 派生解析 binding 之前；保留 binding 的 profile 会跳过评估。人工激活与自动激活共享同一个串行写入边界，因此自动评估进行期间出现的人工选择最终胜出。
+正的临期加分允许把尚余 12% 的额度用于任务，而不受通常 25% 保留门槛阻挡；但任一适用窗口已耗尽、证据非法或未知、熔断或模型不兼容时仍不可用。缺少周期/reset 证据不加分，多个周期不会叠加临期奖励，按量付费余额也不会获得到期奖励。缓存跨过 reset 边界必须刷新，刷新失败不代表恢复额度。加分只计入实际使用临期额度的角色，再进入整体加权评分；不会为了消耗额度创建空闲任务或模型调用。
+
+官方 DeepSeek 则在 CNY 余额有效且为正、账户可用时获得固定 **100 分的按量账户可用分**，不代表 100% 配额，也不是余额可支撑任务数的估算；人民币金额单独显示。零余额、非法金额、缺失证据和查询失败分别标识；未知费用不会记为零。高峰时段为 `Asia/Shanghai` 时区周一至周五的 `[09:00,12:00)`、`[14:00,18:00)`。`block` 策略会禁用这些路由并显示解除时间；`penalize` 策略允许其他条件正常的路由被调用，并对每个有效 DeepSeek 角色扣除配置的分值；`off` 则不作这两种处理。这是 Hakimi 的路由策略，不表示供应商停服，也不是人民币价格估算。
+
+默认软惩罚为 60 分时，有效 DeepSeek 角色权重占比为 0%、25%、50%、100%，对应整体策略扣分为 0、15、30、60 分。原 DeepSeek 角色已补位成 Kimi 时不再扣此项，实际补位到 DeepSeek 时同样扣分。该惩罚已进入角色原始分，不会在汇总后再扣一次；有效贡献仍以零为下限。余额较多或分数较高都不能绕过真实耗尽、未知证据、能力检查或熔断。
+
+本地运行证据按角色参与可靠性、首 token 延迟和 token 用量扣分；角色样本不足时使用 provider 级证据，并明确标识回退。小样本降低置信度，取消的运行不算可靠性失败。没有样本并不代表可靠性完美或费用为零。查询和 provider 资源摘要按已验证的实际账户去重，不会因为同一账户出现在多个角色中就重复累计余额或历史运行。同账户的 provider 别名不能绕过熔断；模型级凭证或端点覆盖没有对应的账户证据时保持未知。provider 配置或用量开关变化会使缓存和在途证据失效。
+
+账户归属在实际观察到运行开始时捕获，不随之后的 alias 配置变化；运行中身份发生变化时，该次归属证据失效。未观察到开始事件的旧记录仍保留在账本中，但不会套用今天的凭据，也不会在重启后用它们重建账户熔断。因此，“暂无可用的账户历史证据”不表示账本为空。按量统计合并的是当前等价配置别名的本地记录，未知费用和不完整标记仍保留，不是官方账户账单。
+
+原角色不可用时，自动模式优先从允许的 preset 中找健康的同角色路由，再考虑这些 preset 或基础 `agents` 表已使用的兼容模型；不会启用仅出现在被排除 preset 中的 provider。补位必须满足工具和模态要求，图像角色不能换成纯文本或能力未知的模型。账户限制、熔断、禁用模型和时段限制仍然有效。10 分补位扣分用于体现偏离原配置，不是对替代模型能力的评价。
+
+补位只改变本次调用的绑定，不改 preset/agents 表，也不写全局 Memory 覆盖。后续调用重新评估，原路由恢复后自然回归；正在运行的任务不会中途换模型。全局可以选择部分可用的 preset，但实际 Agent、Swarm 或 Tower 派发时，本次角色必须有可用绑定。找不到兼容且有可用资源的替代时，会明确报告无法派发的原因，不会偷偷继续使用不可用路由。普通自动切换仍保留评分余量、冷却和手动选择保护；当前绑定不可用时可以不等冷却直接切换。
+
+手动使用 `/preset` 或 Web Preset 选择器时，会原子地保存 preset 并设置 `manual_lock = true`，手动选择基础路由也一样。相比之下，Agent 调用 `SetSubagentPreset` 只修改 preset，保留原有锁状态：自动模式保持自动，已有手动锁也不会被清除。该锁只保存在本机，并且 daemon 重启后仍然有效；锁定期间，自动评估会在查询 provider 用量前直接返回。
+
+Web Preset 菜单、移动端 Preset 面板和 **设置 > Agent** 始终提供自动选择入口。点击会启用自动切换、清除手动锁，并立即评估整套 preset 及可能的角色补位；已自动时再次点击会重新评估。该主动操作刷新资源证据，跳过普通切换的评分余量和冷却，但不绕过候选资格、资源下限、模型能力、配置的高峰策略或熔断。当前 preset 不在候选列表中不构成隐式锁：自动已启用且未锁定时，普通派发评估也可以将它换成合格候选。只有 `manual_lock` 保护人工选择，高峰时段不会强制某个 preset 名称。结果不变时仍显示原因；环境强制关闭时明确提示，不绕过限制。TUI `/preset auto` 仍只解锁，等待下一次相关调用。
+
+自动激活只修改 `[subagent].preset`，临时角色补位作为本次调用的绑定返回，不覆盖路由表；main/default model 和全局 Thinking 不变。已开启且未锁定的自动模式下，实际派发必须使用验证过的绑定；原路由和补位均不可用时会拒绝该角色，包括无法确认资源证据的情况。手动锁定会停用自动选择和临时补位。新 Agent、可重绑定的 Agent/Swarm resume、新 Swarm item、Tower worker/reviewer 共用此绑定路径；保留 binding 的 profile 跳过该路径。人工激活与自动提交继续串行执行，更晚的人工选择优先。
 
 评分器固定、仅在本机运行且结果可复现：它不会训练模型，不会上传 prompt、路径、错误消息或其他用户内容，也不会在空闲时轮询。交互式 TUI footer 和 Web 聊天 header 会显示 active preset。Hakimi Web 的 Preset 菜单与 **设置 > Agent** 还会展示最近一次结构化原因、触发 profile 和时间、候选评分拆解、配额、冷却、熔断状态以及缺失证据。每次自动切换成功后，触发切换的会话会增加一条带本地化原因的状态标记。程序化客户端可从 [`GET /api/v1/config/subagent-preset/status`](../reference/server-api.md#配置) 读取最近一次进程级全局判断，并订阅该页说明的 evaluated / changed 事件。路由优先级和派生覆盖范围见 [Agent 与 subagent](../customization/agents.md#subagent-模型路由)。
 
@@ -445,15 +476,33 @@ disabled = ["EnterPlanMode", "ExitPlanMode", "mcp__github__*"]
 
 `max_edge_px` 可被环境变量 `KIMI_IMAGE_MAX_EDGE_PX` 覆盖，`read_byte_budget` 可被 `KIMI_IMAGE_READ_BYTE_BUDGET` 覆盖，优先级均高于配置文件。
 
-<!--
 ## `experimental`
 
-`experimental` 存放实验功能 flag 的持久化覆盖。目前 `micro_compaction` 是唯一用户可见的字段，默认值为 `false`；如需自动清理较旧的大型工具结果，把它设为 `true`。
+`experimental` 保存实验功能开关的持久化覆盖。以下开关可以分别比较按需工具、精简内置系统提示词和上下文连续性。它们均默认关闭；启用其中一个不会自动启用其他开关，也不会改变执行权限。
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `micro_compaction` | `boolean` | `false` | 清理较旧的大型工具结果内容，同时保留最近对话 |
--->
+| `tool_catalog` | `boolean` | `false` | 常用工具立即可用，其他工具先通过简短目录发现，再加载完整定义 |
+| `profile_compact_prompt` | `boolean` | `false` | 为明确支持精简版本的内置 profile 使用精简提示词；保留项目指令、Skills、插件内容和模式提醒 |
+| `context_continuity` | `boolean` | `false` | 在完整上下文压缩中使用结构化交接和保守的溢出重试策略 |
+| `apply_patch` | `boolean` | `false` | 启用可选的[批量文件补丁工具](../reference/tools.md#文件类)，与上述三项策略独立 |
+
+要组合试用三项策略，在现有 `config.toml` 中添加：
+
+```toml
+[experimental]
+tool_catalog = true
+profile_compact_prompt = true
+context_continuity = true
+```
+
+进行 A/B 对比时，先将三项设为 `false` 作为基线，再分别启用单项，最后测试组合。保持模型、推理强度、任务、权限、可用工具和预算一致。修改提示词设置后，请使用新会话或重新应用 profile：已经渲染的系统提示词不会在每次请求时重写。自定义 Agent 文件和 `SYSTEM.md` 保留自己的提示词渲染方式，除非其 profile 明确提供了精简版本。
+
+对应的环境变量为 `KIMI_CODE_EXPERIMENTAL_TOOL_CATALOG`、`KIMI_CODE_EXPERIMENTAL_PROFILE_COMPACT_PROMPT` 和 `KIMI_CODE_EXPERIMENTAL_CONTEXT_CONTINUITY`，各项环境变量优先于本节配置。受控对比时应取消设置 `KIMI_CODE_EXPERIMENTAL_FLAG`：总开关为真时会启用所有实验，即使单项设为 `false`。开关作用于运行中的引擎，并非仅影响某个会话。这些实验不会自动替用户启用配置。
+
+诊断时可在引擎的 Agent 状态中查看 `toolSelect.diagnostics`（选择模式和工具数量）、`profile.promptDiagnostics`（最近的渲染策略和系统提示词字节数）以及 `fullCompaction.continuityLastRun`（最近的压缩策略、结果、请求次数和缩减数量）。这些是运行时快照，不是持久化的 benchmark 报告；字段不包含提示词原文、工具参数、路径或凭据，也不会加入模型上下文。恢复的提示词或显式覆盖的提示词会单独标记，不会从文本猜测其策略。
+
+具体行为和边界见[按需工具目录](../reference/tools.md#按需工具目录)和[上下文压缩](../guides/sessions.md#上下文压缩)。提示词字节数或工具定义数减少，并不能单独证明费用更低、完成更快或回答更好；选择工具会增加请求，也可能影响提示词缓存复用。
 
 ## `services`
 

@@ -45,7 +45,13 @@ import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import { type FinishReason } from '#/kosong/contract/provider';
-import { mergeInPlace, type ContentPart, type StreamedMessagePart } from '#/kosong/contract/message';
+import {
+  applyLateResponsesPartTo,
+  isLateResponsesPart,
+  mergeInPlace,
+  type ContentPart,
+  type StreamedMessagePart,
+} from '#/kosong/contract/message';
 import { type TokenUsage } from '#/kosong/contract/usage';
 import { BugIndicatingError, ErrorCodes, Error2, isError2, toKimiErrorPayload } from '#/errors';
 import { OrderedHookSlot } from '#/hooks';
@@ -107,6 +113,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
   readonly hooks: IAgentLoopService['hooks'] = {
     onWillBeginStep: new OrderedHookSlot(),
     onDidFinishStep: new OrderedHookSlot(),
+    onWillCompleteTurn: new OrderedHookSlot(),
   };
 
   private readonly standaloneStepQueue = new StepRequestQueue();
@@ -627,6 +634,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
 
   async run(options: LoopRunOptions): Promise<LoopRunResult> {
     const runtime = this.createLoopRuntime(options);
+    let allowCompletion = true;
     try {
       while (true) {
         try {
@@ -644,7 +652,22 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
           );
           const completed = this.completeLoopStep(runtime, result);
           if (completed !== undefined) return completed;
+          allowCompletion &&= !result.toolStopTurn && !result.afterStepFailed &&
+            result.stopReason !== 'truncated';
+          const maxSteps = this.config.get<LoopControl>(LOOP_CONTROL_SECTION)?.maxStepsPerTurn;
+          if (allowCompletion && result.stopReason === 'completed' &&
+            !runtime.queue.hasPendingRequests() &&
+            (maxSteps === undefined || maxSteps <= 0 || runtime.steps < maxSteps)) {
+            runtime.turnSignal.throwIfAborted();
+            await this.hooks.onWillCompleteTurn.run({
+              turnId: runtime.turnId,
+              step: runtime.steps,
+              signal: runtime.turnSignal,
+              seed: runtime.job?.seed,
+            });
+          }
         } catch (error) {
+          allowCompletion = false;
           const disposition = await this.handleLoopStepError(runtime, error);
           if (disposition.type === 'return') return disposition.result;
         }
@@ -846,7 +869,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     }
     this.lastRequestTraceId = request.trace.traceId;
     this.appendResponseContent(turnId, currentStep, stepUuid, response);
-    const finishReason = await this.executeStepTools(
+    const { finishReason, toolStopTurn } = await this.executeStepTools(
       turnId,
       signal,
       currentStep,
@@ -855,7 +878,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
       request.trace,
     );
     this.finishStep(turnId, signal, currentStep, stepUuid, response, finishReason, markStepStarted);
-    const hookStopTurn = await this.runAfterStep(
+    const afterStep = await this.runAfterStep(
       turnId,
       signal,
       currentStep,
@@ -863,7 +886,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
       response.usage,
       finishReason,
     );
-    return { stopReason: finishReason, hookStopTurn };
+    return { stopReason: finishReason, toolStopTurn, ...afterStep };
   }
 
   private beginStep(
@@ -934,10 +957,16 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     stepUuid: string,
     response: AgentLLMRequestFinish,
     trace: LLMRequestTrace,
-  ): Promise<FinishReason> {
+  ): Promise<{ finishReason: FinishReason; toolStopTurn: boolean }> {
     let finishReason = response.providerFinishReason ?? 'completed';
+    if (finishReason === 'filtered') {
+      return { finishReason, toolStopTurn: false };
+    }
     if (response.message.toolCalls.length === 0) {
-      return finishReason === 'tool_calls' ? 'other' : finishReason;
+      return {
+        finishReason: finishReason === 'tool_calls' ? 'other' : finishReason,
+        toolStopTurn: false,
+      };
     }
     const toolCallUuids = new Map<string, string>();
     let stopTurn = false;
@@ -970,7 +999,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
       if (result.stopTurn === true) stopTurn = true;
     }
     finishReason = stopTurn ? 'completed' : 'tool_calls';
-    return finishReason;
+    return { finishReason, toolStopTurn: stopTurn };
   }
 
   private finishStep(
@@ -1020,7 +1049,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     firstStepOfTurn: boolean,
     usage: TokenUsage,
     finishReason: FinishReason,
-  ): Promise<boolean> {
+  ): Promise<{ hookStopTurn: boolean; afterStepFailed: boolean }> {
     const context: AfterStepContext = {
       turnId,
       step: currentStep,
@@ -1034,8 +1063,9 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
       await this.hooks.onDidFinishStep.run(context);
     } catch (error) {
       if (isAbortError(error) || signal.aborted) throw error;
+      return { hookStopTurn: context.stopTurn, afterStepFailed: true };
     }
-    return context.stopTurn;
+    return { hookStopTurn: context.stopTurn, afterStepFailed: false };
   }
 
   private emitStepCompleted(
@@ -1088,8 +1118,12 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     const partialContent: ContentPart[] = [];
     let forceContentPartBoundary = false;
     const accumulate = (part: ContentPart): void => {
+      if (applyLateResponsesPartTo(partialContent, part)) return;
       const last = partialContent.at(-1);
       if (!forceContentPartBoundary && last !== undefined && mergeInPlace(last, part)) return;
+      if (isLateResponsesPart(part) && (part.type === 'text' || part.encrypted === undefined)) {
+        return;
+      }
       forceContentPartBoundary = false;
       partialContent.push({ ...part });
     };
@@ -1228,7 +1262,9 @@ function interruptReasonFor(
 
 type StepExecutionResult = {
   readonly stopReason: FinishReason;
+  readonly toolStopTurn: boolean;
   readonly hookStopTurn: boolean;
+  readonly afterStepFailed: boolean;
 };
 
 type LoopErrorDisposition =

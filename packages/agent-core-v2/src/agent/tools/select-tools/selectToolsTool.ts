@@ -61,6 +61,10 @@ export class SelectToolsTool implements ISelectToolsTool {
         for (const name of unknown) {
           lines.push(`Unknown tool: ${name}. Pick from the latest announced tools list.`);
         }
+        if (unknown.length > 0) {
+          const catalog = this.toolSelect.loadableToolsAnnouncement(false, true);
+          if (catalog !== undefined) lines.push(catalog);
+        }
         const isError = toLoad.length === 0 && alreadyAvailable.length === 0;
         return isError ? { output: lines.join('\n'), isError } : { output: lines.join('\n') };
       },

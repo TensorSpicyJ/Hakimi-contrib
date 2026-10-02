@@ -4,6 +4,21 @@ Built-in tools are the tool set provided by Hakimi alongside its core engine —
 
 Compared to MCP tools, built-in tools are managed directly by the runtime, their lifecycle is bound to the session, and no external process is required. Both follow the same unified approval mechanism: **read-only tools** (such as `Read`, `Grep`, `Glob`) are automatically allowed by default, while **write and execution tools** (such as `Write`, `Edit`, `Bash`) require user approval by default. In YOLO mode, approval for regular tool calls is skipped; Plan mode exit approval is not affected.
 
+## On-demand tool catalog
+
+The experimental tool catalog keeps less frequently used capabilities available on demand. Enable it in `config.toml`:
+
+```toml
+[experimental]
+tool_catalog = true
+```
+
+Alternatively, set `KIMI_CODE_EXPERIMENTAL_TOOL_CATALOG=true` when starting Hakimi. It is off by default. Common file, search, shell, question, and Skill tools remain immediately available; `apply_patch` remains immediate when its own flag is enabled. Other built-in tools and MCP tools are listed with names and short purpose descriptions. The Agent calls the read-only `select_tools` tool to load their full definitions before using them. Explicitly deferred user tools follow the same path; other user tools remain immediate.
+
+The catalog refreshes when available tools or their descriptions change, and is rediscovered after compression removes its announcement. A failed selection includes the current catalog so the Agent can recover from an unknown name or a disconnected server. A disconnected tool cannot be treated as successfully loaded; reconnection and permission changes are checked against the current registry. The catalog contains brief summaries rather than repeating full schemas.
+
+Loading a definition does not grant execution permission: profile restrictions, disabled tools, approval rules, and Plan mode still apply. Loaded definitions survive session restore while their history remains, and can be selected again after undo or compaction removes that history. Loading changes the tool table and can reduce prompt-cache reuse. Models that need many different tools may incur extra selection requests, so compare representative tasks before enabling this by default. This mode takes precedence over native `tool-select` when both are active and the catalog loader is allowed.
+
 ## File Tools
 
 File tools handle reading, writing, and searching the local filesystem — the foundation for code analysis and modification tasks.
@@ -13,6 +28,7 @@ File tools handle reading, writing, and searching the local filesystem — the f
 | `Read` | Auto-allow | Read a text file's contents |
 | `Write` | Requires approval | Create or overwrite a file |
 | `Edit` | Requires approval | Precise string replacement |
+| `apply_patch` | Requires approval | Batch Add/Update/Delete patches; experimental and disabled by default |
 | `Grep` | Auto-allow | Full-text search powered by ripgrep |
 | `Glob` | Auto-allow | Find files by glob pattern |
 | `ReadMediaFile` | Auto-allow | Read an image or video file |
@@ -22,6 +38,23 @@ File tools handle reading, writing, and searching the local filesystem — the f
 **`Write`** accepts `path`, `content`, and an optional `mode` (`overwrite` or `append`; defaults to overwrite). Missing parent directories are created automatically; `append` mode appends content to the end of the file without automatically adding a newline.
 
 **`Edit`** accepts `path`, `old_string` (the exact text to replace), and `new_string` (the replacement text). By default it replaces only one unique match; if the same content appears multiple times in the file, the tool returns an error and suggests using `replace_all: true`. `old_string` and `new_string` must not be identical.
+
+**`apply_patch`** accepts patch text as `input`, with `Add File`, `Update File`, and `Delete File` sections. One call can change several files or apply several changes to one file. The tool is experimental and disabled by default. Enable it when starting Hakimi:
+
+```sh
+KIMI_CODE_EXPERIMENTAL_APPLY_PATCH=true hakimi
+```
+
+Or add this to [`config.toml`](../configuration/config-files.md#experimental):
+
+```toml
+[experimental]
+apply_patch = true
+```
+
+Before writing, the tool checks every target file and patch context. Syntax, path, or matching errors found during this check leave all files unchanged. Cross-file writes are not atomic (they do not all succeed or roll back together): a filesystem error can leave some changes applied, and the result identifies completed files, the failing file, and files not attempted. Inspect those results before retrying.
+
+`Add File` refuses to overwrite an existing path. File moves, symlink paths, and updates to files with mixed line endings are unsupported; existing files with consistent LF or CRLF endings keep that style. In [Plan mode](#plan-mode), every file in a patch must be the current plan file; including another file rejects the whole call before execution.
 
 **`Grep`** invokes ripgrep to search file contents, supporting regular expressions (`pattern`), a search path (`path`), file type filtering (`type`, e.g., `ts`, `py`), glob filtering (`glob`), and output mode (`output_mode`: `files_with_matches` / `content` / `count_matches`; defaults to `files_with_matches`). `content` mode supports context lines (`-A`, `-B`, `-C`), case-insensitive matching (`-i`), line numbers (`-n`, default true), and multiline matching (`multiline`). All modes support `offset` + `head_limit` pagination; `head_limit` defaults to 250 and `0` means unlimited. Sensitive files such as `.env` files and private keys are automatically filtered out; set `include_ignored=true` to search files ignored by `.gitignore`, though sensitive files remain filtered.
 
@@ -64,7 +97,7 @@ Foreground mode blocks the current turn until the command completes or times out
 | `EnterPlanMode` | Auto-allow | Enter Plan mode |
 | `ExitPlanMode` | Auto-allow (requires user to confirm the plan) | Exit Plan mode and submit the plan |
 
-Plan mode is a constrained working state: once entered, `Write` and `Edit` are restricted to writing the current plan file only, and `TaskStop` is blocked entirely. All other tools (including `Bash`) are still governed by the current permission rules.
+Plan mode is a constrained working state: once entered, `Write`, `Edit`, and `apply_patch` (when enabled) are restricted to writing the current plan file only. A patch that also targets any other file is rejected. `TaskStop`, `CronCreate`, `CronDelete`, and `StartSession` are blocked entirely, so a plan cannot start work in another session. Other tools (including `Bash`) are still governed by the current permission rules.
 
 **`EnterPlanMode`** accepts no parameters; upon success it returns workflow guidance and the plan file path.
 
@@ -96,6 +129,18 @@ Collaboration tools handle inter-Agent coordination, user interaction, and Skill
 **`AskUserQuestion`** asks the user a structured multiple-choice question — useful for disambiguation or option selection. The `questions` parameter accepts 1–4 questions; each question requires `question` (ending with `?`), `options` (2–4 choices, each with a `label` and `description`), and optional `header` (max 12 characters) and `multi_select` (defaults to false). An "Other" option is appended automatically. Setting `background` to true starts a background question task and returns a task ID immediately. When the host does not support interactive questioning, a failure message is returned and the Agent should ask the user directly in a text reply instead.
 
 **`Skill`** allows the Agent to actively invoke a registered inline-type Skill. Accepts `skill` (the Skill name) and optional `args` (additional argument text). Only `type = "inline"` Skills can be called via this tool; Skills with `disableModelInvocation: true` are rejected. Maximum nesting depth is 3 levels. See [Agent Skills](../customization/skills.md) for details.
+
+## Cross-project sessions
+
+| Tool | Default approval | Description |
+| --- | --- | --- |
+| `StartSession` | Requires approval | Create an independent session in another project and submit its first task |
+
+**`StartSession`** accepts `work_dir` (an absolute path to an existing project directory on the host), `prompt` (a self-contained task), and optional `title`. It is main-agent-only and enabled by default in hosts that can present the target session's interactions. The agent may propose a handoff, but must ask for your confirmation before creating it; an explicit request to create that session already counts as confirmation. Ordinary tool approval rules still apply. Set `cross_project_sessions = false` under `[experimental]` to disable it. Plan mode blocks it, regardless of permission mode. The target project must already be trusted; the tool never grants trust itself.
+
+The new session uses its own project instructions and normal new-session defaults, not the source session's history, temporary directory access, permission overrides, or subagent preset. The result includes the session ID, prompt ID when submitted, and actual state: `pending`, `running`, `completed`, `blocked`, `failed`, or `aborted`. Creating a session is not proof that its task finished. A failed start leaves the session available for inspection rather than deleting or recreating it automatically.
+
+Unlike `Agent`, this creates a separately accessible session, not a subagent or a `TaskList` entry. See [Cross-project task handoff](../guides/sessions.md#cross-project-task-handoff) for usage and following the target session.
 
 ## Background Tasks
 
@@ -144,7 +189,7 @@ These two main-agent-only tools report provider usage and steer subagent model r
 
 With the experimental `deepseek_usage` flag enabled, `GetProviderUsage` also includes official DeepSeek providers. Their `meteredUsage` reports locally recorded daily/monthly tokens and estimated CNY spend, with the official account balance queried separately. These figures are not remaining quota percentages or a complete account bill; records start after the feature is enabled, and missing usage or prices are marked incomplete. A failed balance query does not discard the local statistics. See [DeepSeek configuration](../configuration/providers.md#deepseek).
 
-**`SetSubagentPreset`** activates a configured routing preset so the next [subagent model/effort resolution](../configuration/config-files.md#subagent) uses its routes immediately. It accepts `preset` (a name from `[subagent.presets]`), validates that the preset exists and that every route model it references resolves, then persists `[subagent].preset`. It never changes the main or default model or the thinking mode, never reloads the session, and reports `main_model_changed: false` on success. The change affects subsequent fresh `Agent`, `AgentSwarm`, and Tower spawns, plus rebindable `Agent` and `AgentSwarm` resumes; profiles that preserve their binding remain unchanged. Requires approval by default — add a permission rule to allow this tool itself automatically, see [Approval rules](../configuration/config-files.md#permission). The engine's experimental automatic preset switching (see [Automatic preset switching](../configuration/config-files.md#automatic-preset-switching)) is a separate mechanism: it evaluates those same Agent, AgentSwarm, and Tower routes, activates a preset without this tool, and never requests approval.
+**`SetSubagentPreset`** activates a configured routing preset so the next [subagent model/effort resolution](../configuration/config-files.md#subagent) uses its routes immediately. It accepts `preset` (a name from `[subagent.presets]`), validates that the preset exists and that every route model it references resolves, then persists `[subagent].preset` without changing the manual lock. Automatic selection remains active if enabled and unlocked; an existing manual lock is preserved. To lock a preset explicitly, select it in Hakimi Web or the TUI `/preset` menu. It never changes the main or default model or the thinking mode, never reloads the session, and reports `main_model_changed: false` on success. The change affects subsequent fresh `Agent`, `AgentSwarm`, and Tower spawns, plus rebindable `Agent` and `AgentSwarm` resumes; profiles that preserve their binding remain unchanged. Requires approval by default — add a permission rule to allow this tool itself automatically, see [Approval rules](../configuration/config-files.md#permission). The engine's experimental automatic preset switching (see [Automatic preset switching](../configuration/config-files.md#automatic-preset-switching)) is a separate mechanism: it evaluates those same Agent, AgentSwarm, and Tower routes, activates a preset without this tool, and never requests approval.
 
 ## Next steps
 

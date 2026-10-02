@@ -98,6 +98,13 @@ describe('estimateTokensForMessage(s)', () => {
 });
 
 describe('estimateTokensForTools', () => {
+  it('includes the grammar budget for text-input tools', () => {
+    expect(estimateTokensForTools([{
+      name: 'read', description: '', parameters: {},
+      inputFormat: { type: 'text', grammar: { syntax: 'lark', definition: 'start: /.+/' } },
+    }])).toBe(20);
+  });
+
   it('counts name, description, and serialized parameters', () => {
     const tool = { name: 'read', description: 'Read a file', parameters: { type: 'object' } };
     const expected =

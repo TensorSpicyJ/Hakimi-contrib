@@ -987,6 +987,7 @@ function stubAgentLifecycle(agents: readonly IAgentScopeHandle[]): IAgentLifecyc
     onDidCreate: noopEvent,
     onDidDispose: noopEvent,
     create: async () => agents[0]!,
+    restore: async (agentId) => agents.find((agent) => agent.id === agentId),
     fork: async () => agents[0]!,
     get: (agentId) => agents.find((agent) => agent.id === agentId),
     list: () => agents,

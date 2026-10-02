@@ -150,23 +150,40 @@ describe('getModelCapability: openai', () => {
     expect(cap.tool_use).toBe(true);
   });
 
-  it('gpt-6-astra → image_in + thinking + tool_use', () => {
-    const cap = getModelCapability('openai', 'gpt-6-astra');
-    expect(cap.image_in).toBe(true);
-    expect(cap.thinking).toBe(true);
-    expect(cap.tool_use).toBe(true);
+  it('gpt-6 family (astra/sol/luna) → image_in + thinking + tool_use', () => {
+    for (const model of ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']) {
+      const cap = getModelCapability('openai', model);
+      expect(cap.image_in).toBe(true);
+      expect(cap.thinking).toBe(true);
+      expect(cap.tool_use).toBe(true);
+    }
   });
 
-  it('gpt-6-astra date suffix → image_in + thinking + tool_use', () => {
-    const cap = getModelCapability('openai', 'gpt-6-astra-2026-08-01');
-    expect(cap.image_in).toBe(true);
-    expect(cap.thinking).toBe(true);
-    expect(cap.tool_use).toBe(true);
+  it('gpt-6 family matches date, dot, and uppercase suffixes', () => {
+    for (const model of [
+      'gpt-6-astra-2026-08-01',
+      'gpt-6-sol-2026-08-01',
+      'gpt-6-luna.2026-08-01',
+      'GPT-6-SOL',
+    ]) {
+      const cap = getModelCapability('openai', model);
+      expect(cap.image_in).toBe(true);
+      expect(cap.thinking).toBe(true);
+      expect(cap.tool_use).toBe(true);
+    }
   });
 
-  it('gpt-6-astral / gpt-6-astraX are not mistaken for the gpt-6-astra family', () => {
-    expect(getModelCapability('openai', 'gpt-6-astral')).toEqual(UNKNOWN_CAPABILITY);
-    expect(getModelCapability('openai', 'gpt-6-astraX')).toEqual(UNKNOWN_CAPABILITY);
+  it('lookalike and uncatalogued gpt-6 slugs stay UNKNOWN_CAPABILITY', () => {
+    for (const model of [
+      'gpt-6-astral',
+      'gpt-6-astraX',
+      'gpt-6-solar',
+      'gpt-6-lunar',
+      'gpt-6-solstice',
+      'gpt-6-terra',
+    ]) {
+      expect(getModelCapability('openai', model)).toEqual(UNKNOWN_CAPABILITY);
+    }
   });
 
   it('unknown OpenAI-legacy model → UNKNOWN_CAPABILITY', () => {
@@ -192,22 +209,33 @@ describe('getModelCapability: openai_responses', () => {
     expect(cap.thinking).toBe(true);
   });
 
-  it('gpt-6-astra → image_in + thinking + tool_use', () => {
-    const cap = getModelCapability('openai_responses', 'gpt-6-astra');
-    expect(cap.image_in).toBe(true);
-    expect(cap.thinking).toBe(true);
-    expect(cap.tool_use).toBe(true);
+  it('gpt-6 family (astra/sol/luna) → image_in + thinking + tool_use', () => {
+    for (const model of ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']) {
+      const cap = getModelCapability('openai_responses', model);
+      expect(cap.image_in).toBe(true);
+      expect(cap.thinking).toBe(true);
+      expect(cap.tool_use).toBe(true);
+    }
   });
 
-  it('gpt-6-astra date suffix → image_in + thinking + tool_use', () => {
-    const cap = getModelCapability('openai_responses', 'gpt-6-astra-2026-08-01');
-    expect(cap.image_in).toBe(true);
-    expect(cap.thinking).toBe(true);
-    expect(cap.tool_use).toBe(true);
+  it('gpt-6 family matches date, dot, and uppercase suffixes', () => {
+    for (const model of [
+      'gpt-6-astra-2026-08-01',
+      'gpt-6-sol-2026-08-01',
+      'gpt-6-luna.2026-08-01',
+      'GPT-6-LUNA',
+    ]) {
+      const cap = getModelCapability('openai_responses', model);
+      expect(cap.image_in).toBe(true);
+      expect(cap.thinking).toBe(true);
+      expect(cap.tool_use).toBe(true);
+    }
   });
 
-  it('gpt-6-astral is not mistaken for the gpt-6-astra family', () => {
-    expect(getModelCapability('openai_responses', 'gpt-6-astral')).toEqual(UNKNOWN_CAPABILITY);
+  it('lookalike and uncatalogued gpt-6 slugs stay UNKNOWN_CAPABILITY', () => {
+    for (const model of ['gpt-6-astral', 'gpt-6-solar', 'gpt-6-lunar', 'gpt-6-terra']) {
+      expect(getModelCapability('openai_responses', model)).toEqual(UNKNOWN_CAPABILITY);
+    }
   });
 
   it('unknown Responses model → UNKNOWN_CAPABILITY', () => {

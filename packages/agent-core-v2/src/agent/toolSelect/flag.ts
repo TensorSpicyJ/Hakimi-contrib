@@ -1,12 +1,14 @@
 /**
- * `toolSelect` domain — registers the `tool-select` experimental flag into
- * `flag`.
+ * `toolSelect` domain — registers native disclosure and ordinary tool-catalog
+ * experimental flags into `flag`.
  *
  * Gates progressive tool disclosure: MCP tool schemas stay out of the
  * immutable top-level tools[] and are loaded on demand through the
  * `select_tools` tool. Off by default; enable via
  * `KIMI_CODE_EXPERIMENTAL_TOOL_SELECT`, the master
  * `KIMI_CODE_EXPERIMENTAL_FLAG`, or the `[experimental]` config section.
+ * The separate `tool_catalog` flag enables on-demand built-in/MCP loading
+ * through ordinary tool calls, without requiring native dynamic schemas.
  */
 
 import { type FlagDefinitionInput, registerFlagDefinition } from '#/app/flag/flagRegistry';
@@ -25,3 +27,15 @@ export const toolSelectFlag: FlagDefinitionInput = {
 };
 
 registerFlagDefinition(toolSelectFlag);
+
+export const TOOL_CATALOG_FLAG_ID = 'tool_catalog';
+export const TOOL_CATALOG_FLAG_ENV = 'KIMI_CODE_EXPERIMENTAL_TOOL_CATALOG';
+
+registerFlagDefinition({
+  id: TOOL_CATALOG_FLAG_ID,
+  title: 'On-demand tool catalog',
+  description: 'Keep common workspace tools immediately available; load other built-in and MCP tool definitions through select_tools on demand. Uses ordinary tool calling on all protocols.',
+  env: TOOL_CATALOG_FLAG_ENV,
+  default: false,
+  surface: 'core',
+});

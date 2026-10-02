@@ -40,6 +40,9 @@ export function estimateTokensForTools(tools: readonly Tool[]): number {
     total += estimateTokens(tool.name);
     total += estimateTokens(tool.description);
     total += estimateTokens(JSON.stringify(tool.parameters));
+    if (tool.inputFormat !== undefined) {
+      total += estimateTokens(JSON.stringify(tool.inputFormat));
+    }
   }
   return total;
 }

@@ -206,7 +206,11 @@ Hakimi can also use a ChatGPT subscription through the OpenAI Codex OAuth provid
 hakimi login --provider openai-codex
 ```
 
-The command opens the device authorization page and provisions `openai-codex/gpt-5.6-sol`, `openai-codex/gpt-5.6-terra`, `openai-codex/gpt-5.6-luna`, and `openai-codex/gpt-6-astra` as the available Codex model aliases. On a headless machine or WSL environment where browser launching is unavailable, add `--no-open`; Hakimi prints the URL and user code without trying to open a browser.
+The command opens the device authorization page and provisions `openai-codex/gpt-6-sol`, `openai-codex/gpt-6-luna`, and `openai-codex/gpt-6-astra`, alongside the existing `openai-codex/gpt-5.6-sol`, `openai-codex/gpt-5.6-terra`, and `openai-codex/gpt-5.6-luna` aliases. The first Codex login through the CLI or TUI sets GPT-6 Sol as the default model with `medium` reasoning. For an already-configured Codex OAuth provider, startup and model-list refresh automatically add missing built-in aliases without reading credentials, contacting OpenAI, or logging in again. Existing model settings, the default model, Thinking mode settings, and subagent presets are preserved. An explicit `model_source = "static"` keeps the model list manually managed and disables this automatic addition.
+
+GPT-6 Sol and Luna support image input and default to `medium` reasoning. Sol offers `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`; Luna offers the same levels except `ultra`. Both new aliases use the official Codex catalog's default context window of 272,000 tokens. The catalog also advertises a maximum context window of 872,000 tokens, but does not specify a separate maximum input or output size; Hakimi does not infer those limits.
+
+On a headless machine or WSL environment where browser launching is unavailable, add `--no-open`; Hakimi prints the URL and user code without trying to open a browser.
 
 ```sh
 hakimi login --provider openai-codex --no-open

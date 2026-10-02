@@ -22,6 +22,12 @@ export interface SessionRow {
   readonly work_dir: string;
   readonly updated_at: number;
   readonly metadata?: Readonly<Record<string, unknown>> | undefined;
+  /**
+   * Set for a session this process adopted from a cross-project handoff: the
+   * row is marked live and selecting it opens the read-only viewer instead of
+   * resuming it into this process's foreground.
+   */
+  readonly background?: { readonly status: string };
 }
 
 const ELLIPSIS = '…';
@@ -396,6 +402,9 @@ export class SessionPickerComponent extends Container implements Focusable {
     if (time.length > 0) header += '  ' + currentTheme.fg('textDim', time);
     if (badge.length > 0) header += '  ' + currentTheme.fg('success', badge);
     const card: string[] = [header];
+    if (session.background !== undefined) {
+      card.push(indent + currentTheme.fg('accent', `live in this process · ${session.background.status}`));
+    }
 
     // Session id is rendered in full at normal widths (the final clamp in
     // `render()` truncates it only when the terminal is narrower than the id).

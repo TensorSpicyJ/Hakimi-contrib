@@ -144,6 +144,8 @@ vi.mock('../../src/tui/index', () => ({
     getStartupMcpMs = mocks.tuiGetStartupMcpMs;
     getCurrentSessionId = mocks.tuiGetCurrentSessionId;
     hasSessionContent = mocks.tuiHasSessionContent;
+    /** No handed-off background session in these scenarios. */
+    getBackgroundSessionExitHint = (): string | undefined => undefined;
   },
 }));
 
@@ -883,6 +885,54 @@ describe('runShell', () => {
     } finally {
       exitSpy.mockRestore();
       stdout.restore();
+      stderr.restore();
+    }
+  });
+
+  it('warns on exit that background sessions stop with the process', async () => {
+    mocks.loadTuiConfig.mockResolvedValue({
+      theme: 'dark',
+      editorCommand: null,
+      notifications: { enabled: true, condition: 'unfocused' },
+    });
+    mocks.tuiStart.mockResolvedValue(undefined);
+    mocks.tuiGetCurrentSessionId.mockReturnValue('ses-1');
+    mocks.tuiHasSessionContent.mockReturnValue(false);
+
+    const stderr = captureProcessWrite('stderr');
+    const exitSpy = mockProcessExit();
+
+    try {
+      await runShell(
+        {
+          session: undefined,
+          continue: false,
+          yolo: false,
+          auto: false,
+          plan: false,
+          model: undefined,
+          outputFormat: undefined,
+          prompt: undefined,
+          skillsDirs: [],
+          agent: undefined,
+          agentFiles: [],
+        },
+        '1.2.3-test',
+      );
+      const [tui] = mocks.kimiTuiConstructor.mock.calls[0]!;
+      (tui as { getBackgroundSessionExitHint: () => string | undefined })
+        .getBackgroundSessionExitHint = () =>
+        'Background session will stop with this process: ses-b';
+
+      await expect((tui as { onExit: () => Promise<void> }).onExit()).rejects.toBeInstanceOf(
+        ExitCalled,
+      );
+
+      expect(stderr.text()).toContain(
+        ' Background session will stop with this process: ses-b',
+      );
+    } finally {
+      exitSpy.mockRestore();
       stderr.restore();
     }
   });

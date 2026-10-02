@@ -7,10 +7,19 @@ import type {
 
 import type { QuestionController } from './controller';
 
-export function createQuestionAskHandler(controller: QuestionController): QuestionHandler {
+/** See `ApprovalRequestContext`: the session identity the handler answers for. */
+export interface QuestionRequestContext {
+  readonly sessionId: string;
+  readonly sessionLabel?: string;
+}
+
+export function createQuestionAskHandler(
+  controller: QuestionController,
+  context?: QuestionRequestContext,
+): QuestionHandler {
   return async (event): Promise<QuestionResult> => {
     try {
-      const answers = await controller.show(adaptQuestionRequest(event));
+      const answers = await controller.show(adaptQuestionRequest(event, context));
       return adaptQuestionAnswers(event, answers);
     } catch {
       return null;
@@ -18,13 +27,18 @@ export function createQuestionAskHandler(controller: QuestionController): Questi
   };
 }
 
-export function adaptQuestionRequest(event: QuestionRequest): QuestionPanelData {
+export function adaptQuestionRequest(
+  event: QuestionRequest,
+  context?: QuestionRequestContext,
+): QuestionPanelData {
   const id =
     event.toolCallId ??
     (event.turnId === undefined ? 'question' : `question-${String(event.turnId)}`);
   return {
     id,
     tool_call_id: id,
+    session_id: context?.sessionId,
+    session_label: context?.sessionLabel,
     questions: event.questions.map((question) => ({
       question: question.question,
       header: question.header,

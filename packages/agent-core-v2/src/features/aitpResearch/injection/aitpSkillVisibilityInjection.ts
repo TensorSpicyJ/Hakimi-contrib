@@ -18,9 +18,9 @@ import { IAgentSkillVisibilityService } from '#/agent/skillVisibility/skillVisib
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { systemReminderContent } from '#/agent/systemReminder/systemReminder';
 
+import { AITP_PLUGIN_ID } from '../aitpPlugin';
 import { IAitpSkillVisibilityInjection } from './aitpSkillVisibilityInjectionContract';
 
-const AITP_PLUGIN_ID = 'aitp-research-protocol';
 const AITP_SKILL_VISIBILITY_VARIANT = 'aitp_skill_visibility';
 const SUPERSEDES_SUFFIX =
   'This supersedes any earlier aitp_skill_visibility reminder in this session.';
@@ -52,6 +52,9 @@ export class AitpSkillVisibilityInjection
     await this.skillCatalog.ready;
     const listing = this.skillCatalog.catalog.getModelSkillListing((skill) =>
       skill.plugin?.id === AITP_PLUGIN_ID && this.visibility.isSkillVisible(skill),
+    ).replace(
+      'DISREGARD any earlier skill listings. Current available skills:',
+      'Current official AITP Skills (Research Mode on or off). Other Skill listings remain valid:',
     );
     const previous = context.lastInjection === undefined
       ? undefined

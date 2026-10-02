@@ -12,6 +12,41 @@
  * through without re-consulting). The developer-role model detection lives
  * here.
  *
+ * Decoding keeps output-item identity: each output item owns one mutable
+ * metadata object (its server item id, and the phase its `added` or `done`
+ * event reports — whichever arrives) that every part decoded for that item
+ * shares by reference. Identity, phase and encrypted content come only from
+ * the events the decoder parses (`item_id` / `output_index`, plus the item
+ * object's own `id` / `phase` / `encrypted_content`); there is no
+ * whole-response fallback that would reconstruct an item after the fact. What
+ * only the item's `done` event reveals is delivered as a late update part
+ * (body-less text with the phase, or body-less reasoning with the encrypted
+ * content) so a consumer holding copies of the streamed parts — not the live
+ * objects — sees it too; the merge driver folds that update into the part
+ * already accumulated for the same item. Replay groups text and reasoning by
+ * the item each part belongs to (a part with no declared id stays anonymous
+ * rather than borrowing an adjacent item's id), emits only ids the server
+ * minted — a prefix-less legacy id is stored but not replayed — and never
+ * emits the same item id twice.
+ * Refusals are visible text in the shared message contract, with a private
+ * content-type marker that preserves their original Responses replay shape.
+ * Explicit refusal events or output content normalize to a shared `filtered`
+ * finish, so generic consumers need no knowledge of the private replay marker.
+ * A failed response still follows the provider error path.
+ * Text-input tools use native custom calls; the runtime still receives JSON
+ * `{ input }` arguments. A persisted `extras.openaiResponses.type` marker
+ * retains custom call/result identity across replay and provider switches.
+ *
+ * Every request asks for `reasoning.encrypted_content` (the next turn replays
+ * it) without implying a reasoning effort: a `reasoning` block is sent only
+ * when the turn resolves to a concrete effort. On the official ChatGPT Codex
+ * backend the turn's cache key is additionally sent as the per-request
+ * `session-id` header the backend derives cache affinity from — never baked
+ * into the cached SDK client, and never overriding a configured header. A
+ * stream that ends without a terminal `response.completed` /
+ * `response.incomplete` event is a connection failure, not a success. A
+ * terminal event closes decoding immediately without waiting for transport EOF.
+ *
  * The SDK client is built with `maxRetries: 0`: the SDK's internal backoff
  * sleep never observes the turn's AbortSignal, so rate-limit / server /
  * connection retry is owned by the engine's step-retry layer (observable and
@@ -22,6 +57,7 @@ import OpenAI from 'openai';
 
 import { Error2 } from '#/_base/errors/errors';
 import {
+  APIConnectionError,
   APIContextOverflowError,
   APIProviderQuotaExhaustedError,
   APIProviderRateLimitError,
@@ -31,6 +67,7 @@ import {
 import type {
   ContentPart,
   Message,
+  OpenAIResponsesPartMetadata,
   StreamedMessagePart,
   ToolCall,
 } from '#/kosong/contract/message';
@@ -53,7 +90,7 @@ import {
   convertOpenAIError,
   hasModelPrefix,
   isMediaPart,
-  isOpenAIGpt6AstraModel,
+  isOpenAIGpt6Model,
   isOpenAIInsufficientQuotaCode,
   isOpenAIReasoningModel,
   OPENAI_REASONING_CAPABILITY,
@@ -108,6 +145,8 @@ const OPENAI_RESPONSES_TOOL_CALL_ID_POLICY: ToolCallIdPolicy = {
 type ResponseOutputItemView =
   | {
       type: 'message';
+      itemId?: string;
+      phase?: string;
       content: RawObject[];
     }
   | {
@@ -119,8 +158,16 @@ type ResponseOutputItemView =
     }
   | {
       type: 'reasoning';
+      itemId?: string;
       encryptedContent?: string;
       summary: RawObject[];
+    }
+  | {
+      type: 'custom_tool_call';
+      itemId?: string;
+      callId?: string;
+      name?: string;
+      input?: string;
     }
   | {
       type: 'other';
@@ -197,6 +244,8 @@ function readResponseOutputItem(value: unknown, context: string): ResponseOutput
   if (type === 'message') {
     return {
       type,
+      itemId: readStringField(item, 'id'),
+      phase: readStringField(item, 'phase'),
       content: readObjectArrayField(item, 'content') ?? [],
     };
   }
@@ -214,12 +263,43 @@ function readResponseOutputItem(value: unknown, context: string): ResponseOutput
   if (type === 'reasoning') {
     return {
       type,
+      itemId: readStringField(item, 'id'),
       encryptedContent: readStringField(item, 'encrypted_content'),
       summary: readObjectArrayField(item, 'summary') ?? [],
     };
   }
 
+  if (type === 'custom_tool_call') {
+    return {
+      type,
+      itemId: readStringField(item, 'id'),
+      callId: readStringField(item, 'call_id'),
+      name: readStringField(item, 'name'),
+      input: readStringField(item, 'input'),
+    };
+  }
+
   return { type: 'other' };
+}
+
+function responsesMetadata(
+  itemId: string | undefined,
+  phase?: string,
+): OpenAIResponsesPartMetadata | undefined {
+  if (itemId === undefined && phase === undefined) return undefined;
+  const metadata: OpenAIResponsesPartMetadata = {};
+  if (itemId !== undefined) metadata.itemId = itemId;
+  if (phase !== undefined) metadata.phase = phase;
+  return metadata;
+}
+
+function isReplayableResponsesItemId(id: string): boolean {
+  const separator = id.indexOf('_');
+  return separator > 0 && separator < id.length - 1;
+}
+
+function replayableResponsesItemId(id: string | undefined): string | undefined {
+  return id !== undefined && isReplayableResponsesItemId(id) ? id : undefined;
 }
 
 function responseStreamIndex(
@@ -394,7 +474,6 @@ export interface OpenAIResponsesGenerationKwargs {
   max_output_tokens?: number | undefined;
   temperature?: number | undefined;
   top_p?: number | undefined;
-  reasoning_effort?: string | undefined;
   [key: string]: unknown;
 }
 
@@ -412,16 +491,48 @@ export function isChatGptCodexBackend(baseUrl: string | undefined): boolean {
   }
 }
 
+const CODEX_SESSION_ID_HEADER = 'session-id';
+
 interface ResponseInputItem {
   [key: string]: unknown;
 }
 
-interface ResponseToolParam {
-  type: string;
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-  strict: boolean;
+type ResponseToolParam =
+  | {
+      type: 'function';
+      name: string;
+      description: string;
+      parameters: Record<string, unknown>;
+      strict: boolean;
+    }
+  | {
+      type: 'custom';
+      name: string;
+      description: string;
+      format: { type: 'text' } | { type: 'grammar'; syntax: 'lark'; definition: string };
+    };
+
+function isCustomToolCall(toolCall: ToolCall): boolean {
+  return asRawObject(toolCall.extras?.['openaiResponses'])?.['type'] === 'custom_tool_call';
+}
+
+function customToolInput(toolCall: ToolCall, partial: boolean | undefined): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(toolCall.arguments ?? '{}');
+  } catch (error) {
+    if (!partial) throw error;
+    parsed = JSON.parse(`${toolCall.arguments ?? ''}"}`);
+  }
+  const input = asRawObject(parsed)?.['input'];
+  if (typeof input !== 'string') {
+    throw new ChatProviderError('OpenAI Responses custom tool history must contain a string input.');
+  }
+  return input;
+}
+
+function escapeCustomInput(input: string): string {
+  return JSON.stringify(input).slice(1, -1);
 }
 
 function responseFormatToResponsesText(format: ResponseFormat): Record<string, unknown> {
@@ -477,7 +588,11 @@ function contentPartsToOutputItems(parts: ContentPart[]): unknown[] {
   const items: unknown[] = [];
   for (const part of parts) {
     if (part.type === 'text' && part.text) {
-      items.push({ type: 'output_text', text: part.text, annotations: [] });
+      items.push(
+        part.openaiResponses?.contentType === 'refusal'
+          ? { type: 'refusal', refusal: part.text }
+          : { type: 'output_text', text: part.text, annotations: [] },
+      );
     }
   }
   return items;
@@ -551,7 +666,7 @@ const OPENAI_RESPONSES_DEVELOPER_ROLE_MODELS = new Set([
 
 export function usesOpenAIResponsesDeveloperRole(modelName: string): boolean {
   const normalized = modelName.toLowerCase();
-  if (isOpenAIGpt6AstraModel(normalized)) return true;
+  if (isOpenAIGpt6Model(normalized)) return true;
   if (OPENAI_RESPONSES_DEVELOPER_ROLE_MODELS.has(normalized)) return true;
   for (const cataloguedModel of OPENAI_RESPONSES_DEVELOPER_ROLE_MODELS) {
     if (normalized.startsWith(cataloguedModel + '-')) return true;
@@ -563,6 +678,7 @@ function convertMessage(
   message: Message,
   modelName: string,
   toolMessageConversion: ToolMessageConversion,
+  customCallIds: ReadonlySet<string>,
 ): ResponseInputItem[] {
   let role: string = message.role;
   if (usesOpenAIResponsesDeveloperRole(modelName) && role === 'system') {
@@ -585,7 +701,7 @@ function convertMessage(
       {
         call_id: callId,
         output,
-        type: 'function_call_output',
+        type: customCallIds.has(callId) ? 'custom_tool_call_output' : 'function_call_output',
       },
     ];
   }
@@ -593,59 +709,119 @@ function convertMessage(
   const result: ResponseInputItem[] = [];
 
   if (message.content.length > 0) {
-    const pendingParts: ContentPart[] = [];
+    interface TextSlot {
+      itemId?: string;
+      phase?: string;
+      readonly parts: ContentPart[];
+    }
+    interface ReasoningSlot {
+      itemId?: string;
+      encrypted?: string;
+      readonly summaries: string[];
+    }
+    type ContentSlot =
+      | { readonly kind: 'text'; readonly slot: TextSlot }
+      | { readonly kind: 'reasoning'; readonly slot: ReasoningSlot };
 
-    const flushPendingParts = (): void => {
-      if (pendingParts.length === 0) return;
-      if (role === 'assistant') {
-        result.push({
-          content: contentPartsToOutputItems(pendingParts),
-          role,
-          type: 'message',
-        });
-      } else {
-        result.push({
-          content: contentPartsToInputItems(pendingParts),
-          role,
-          type: 'message',
-        });
+    const slots: ContentSlot[] = [];
+    const textSlotsByItemId = new Map<string, TextSlot>();
+    const reasoningSlotsByItemId = new Map<string, ReasoningSlot>();
+    let openTextSlot: TextSlot | undefined;
+    let openReasoningSlot: ReasoningSlot | undefined;
+
+    const takeTextSlot = (part: ContentPart): TextSlot => {
+      const metadata = part.type === 'text' ? part.openaiResponses : undefined;
+      const itemId = metadata?.itemId;
+      if (itemId !== undefined) {
+        let slot = textSlotsByItemId.get(itemId);
+        if (slot === undefined) {
+          slot = { itemId, parts: [] };
+          textSlotsByItemId.set(itemId, slot);
+          slots.push({ kind: 'text', slot });
+        }
+        slot.phase ??= metadata?.phase;
+        openTextSlot = undefined;
+        return slot;
       }
-      pendingParts.length = 0;
+      if (openTextSlot === undefined || openTextSlot.phase !== metadata?.phase) {
+        openTextSlot = { parts: [], phase: metadata?.phase };
+        slots.push({ kind: 'text', slot: openTextSlot });
+      }
+      return openTextSlot;
     };
 
-    let i = 0;
-    const n = message.content.length;
-    while (i < n) {
-      const part = message.content[i];
-      if (part === undefined) break;
-      if (part.type === 'think') {
-        flushPendingParts();
-        const encryptedValue = part.encrypted;
-        const summaries: unknown[] = [{ type: 'summary_text', text: part.think }];
-        i += 1;
-        while (i < n) {
-          const nextPart = message.content[i];
-          if (nextPart === undefined) break;
-          if (nextPart.type !== 'think') break;
-          if (nextPart.encrypted !== encryptedValue) break;
-          summaries.push({ type: 'summary_text', text: nextPart.think });
-          i += 1;
+    const takeReasoningSlot = (part: ContentPart & { type: 'think' }): ReasoningSlot => {
+      const itemId = part.openaiResponses?.itemId;
+      if (itemId !== undefined) {
+        let slot = reasoningSlotsByItemId.get(itemId);
+        if (slot === undefined) {
+          slot = { itemId, summaries: [] };
+          reasoningSlotsByItemId.set(itemId, slot);
+          slots.push({ kind: 'reasoning', slot });
         }
-        result.push({
-          summary: summaries,
-          type: 'reasoning',
-          encrypted_content: encryptedValue,
-        });
-      } else {
-        pendingParts.push(part);
-        i += 1;
+        slot.encrypted ??= part.encrypted;
+        openReasoningSlot = undefined;
+        return slot;
       }
+      if (openReasoningSlot === undefined || openReasoningSlot.encrypted !== part.encrypted) {
+        openReasoningSlot = { summaries: [], encrypted: part.encrypted };
+        slots.push({ kind: 'reasoning', slot: openReasoningSlot });
+      }
+      return openReasoningSlot;
+    };
+
+    for (const part of message.content) {
+      if (part.type === 'think') {
+        openTextSlot = undefined;
+        takeReasoningSlot(part).summaries.push(part.think);
+        continue;
+      }
+      openReasoningSlot = undefined;
+      takeTextSlot(part).parts.push(part);
     }
 
-    flushPendingParts();
+    for (const slot of slots) {
+      if (slot.kind === 'reasoning') {
+        const reasoningItem: ResponseInputItem = {
+          summary: slot.slot.summaries.map((text) => ({ type: 'summary_text', text })),
+          type: 'reasoning',
+          encrypted_content: slot.slot.encrypted,
+        };
+        const itemId = replayableResponsesItemId(slot.slot.itemId);
+        if (itemId !== undefined) reasoningItem['id'] = itemId;
+        result.push(reasoningItem);
+        continue;
+      }
+      if (role === 'assistant') {
+        const item: ResponseInputItem = {
+          content: contentPartsToOutputItems(slot.slot.parts),
+          role,
+          type: 'message',
+        };
+        const itemId = replayableResponsesItemId(slot.slot.itemId);
+        if (itemId !== undefined) item['id'] = itemId;
+        if (slot.slot.phase !== undefined) item['phase'] = slot.slot.phase;
+        result.push(item);
+      } else {
+        result.push({
+          content: contentPartsToInputItems(slot.slot.parts),
+          role,
+          type: 'message',
+        });
+      }
+    }
   }
 
   for (const toolCall of message.toolCalls) {
+    if (isCustomToolCall(toolCall)) {
+      result.push({
+        type: 'custom_tool_call',
+        call_id: toolCall.id,
+        name: toolCall.name,
+        input: customToolInput(toolCall, message.partial),
+      });
+      continue;
+    }
     result.push({
       arguments: toolCall.arguments ?? '{}',
       call_id: toolCall.id,
@@ -658,6 +834,17 @@ function convertMessage(
 }
 
 function convertTool(tool: Tool): ResponseToolParam {
+  if (tool.inputFormat?.type === 'text') {
+    const grammar = tool.inputFormat.grammar;
+    return {
+      type: 'custom',
+      name: tool.name,
+      description: tool.description,
+      format: grammar === undefined
+        ? { type: 'text' }
+        : { type: 'grammar', syntax: grammar.syntax, definition: grammar.definition },
+    };
+  }
   return {
     type: 'function',
     name: tool.name,
@@ -674,6 +861,9 @@ function convertHistoryMessages(
 ): unknown[] {
   const input: unknown[] = [];
   const pendingToolResultMedia: unknown[] = [];
+  const customCallIds = new Set(
+    history.flatMap((message) => message.toolCalls.filter(isCustomToolCall).map((call) => call.id)),
+  );
 
   const flushPendingMedia = (): void => {
     if (pendingToolResultMedia.length === 0) return;
@@ -690,7 +880,7 @@ function convertHistoryMessages(
     if (msg.role !== 'tool') {
       flushPendingMedia();
     }
-    input.push(...convertMessage(msg, modelName, toolMessageConversion));
+    input.push(...convertMessage(msg, modelName, toolMessageConversion, customCallIds));
     if (msg.role === 'tool' && toolMessageConversion === 'extract_text') {
       pendingToolResultMedia.push(
         ...messageContentToFunctionOutputItems(msg.content.filter(isMediaPart)),
@@ -707,6 +897,7 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
   private _usage: TokenUsage | null = null;
   private _finishReason: FinishReason | null = null;
   private _rawFinishReason: string | null = null;
+  private _sawRefusal = false;
   private readonly _iter: AsyncGenerator<StreamedMessagePart>;
 
   constructor(
@@ -748,8 +939,11 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
     const incomplete = readObjectField(response, 'incomplete_details');
     const incompleteReason = incomplete ? readStringField(incomplete, 'reason') : null;
     const normalized = normalizeResponsesFinishReason(status, incompleteReason);
-    this._finishReason = normalized.finishReason;
-    this._rawFinishReason = normalized.rawFinishReason;
+    const output = readObjectArrayField(response, 'output') ?? [];
+    const refused = this._sawRefusal || output.some((item) =>
+      item['type'] === 'message' && (readObjectArrayField(item, 'content') ?? []).some((part) => part['type'] === 'refusal'));
+    this._finishReason = refused && status !== 'failed' ? 'filtered' : normalized.finishReason;
+    this._rawFinishReason = refused && status !== 'failed' ? 'refusal' : normalized.rawFinishReason;
   }
 
   private _extractUsage(usage: RawObject): void {
@@ -782,14 +976,32 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
       const outputItem = readResponseOutputItem(item, 'response.output item');
 
       if (outputItem.type === 'message') {
+        const metadata = responsesMetadata(outputItem.itemId, outputItem.phase);
         for (const contentItem of outputItem.content) {
           if (contentItem['type'] === 'output_text') {
             const text = readStringField(contentItem, 'text');
             if (text !== undefined) {
-              yield { type: 'text', text };
+              yield { type: 'text', text, openaiResponses: metadata };
+            }
+          } else if (contentItem['type'] === 'refusal') {
+            const refusal = readStringField(contentItem, 'refusal');
+            if (refusal !== undefined) {
+              yield {
+                type: 'text',
+                text: refusal,
+                openaiResponses: { ...metadata, contentType: 'refusal' },
+              };
             }
           }
         }
+      } else if (outputItem.type === 'custom_tool_call') {
+        yield {
+          type: 'function',
+          id: functionCallId(outputItem.callId),
+          name: requireFunctionCallName(outputItem),
+          arguments: JSON.stringify({ input: outputItem.input ?? '' }),
+          extras: { openaiResponses: { type: 'custom_tool_call' } },
+        } satisfies ToolCall;
       } else if (outputItem.type === 'function_call') {
         yield {
           type: 'function',
@@ -798,6 +1010,7 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
           arguments: outputItem.arguments ?? null,
         } satisfies ToolCall;
       } else if (outputItem.type === 'reasoning') {
+        const metadata = responsesMetadata(outputItem.itemId);
         let hasReasoningSummary = false;
         for (const summary of outputItem.summary) {
           const text = readStringField(summary, 'text');
@@ -806,6 +1019,7 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
           const thinkPart: StreamedMessagePart = {
             type: 'think',
             think: text,
+            openaiResponses: metadata,
           };
           if (outputItem.encryptedContent !== undefined) {
             (thinkPart as { encrypted: string }).encrypted = outputItem.encryptedContent;
@@ -813,7 +1027,11 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
           yield thinkPart;
         }
         if (!hasReasoningSummary) {
-          const thinkPart: StreamedMessagePart = { type: 'think', think: '' };
+          const thinkPart: StreamedMessagePart = {
+            type: 'think',
+            think: '',
+            openaiResponses: metadata,
+          };
           if (outputItem.encryptedContent !== undefined) {
             (thinkPart as { encrypted: string }).encrypted = outputItem.encryptedContent;
           }
@@ -826,6 +1044,47 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
   private async *_convertStreamResponse(
     response: AsyncIterable<RawObject>,
   ): AsyncGenerator<StreamedMessagePart> {
+    interface CustomCallState {
+      readonly streamIndex: string | number | undefined;
+      input: string;
+      closed: boolean;
+    }
+    const customCallsByItemId = new Map<string, CustomCallState>();
+    const customCallsByOutputIndex = new Map<number, CustomCallState>();
+    const customCalls = new Set<CustomCallState>();
+    let unindexedCustomCall: CustomCallState | undefined;
+
+    const customCallState = (
+      itemId: string | undefined,
+      outputIndex: number | undefined,
+      context: string,
+    ): CustomCallState => {
+      const state =
+        (itemId === undefined ? undefined : customCallsByItemId.get(itemId)) ??
+        (outputIndex === undefined ? undefined : customCallsByOutputIndex.get(outputIndex)) ??
+        (itemId === undefined && outputIndex === undefined ? unindexedCustomCall : undefined);
+      if (state === undefined) {
+        failResponsesDecode(context, 'received custom-tool input for an unknown output item.');
+      }
+      if (itemId !== undefined) customCallsByItemId.set(itemId, state);
+      if (outputIndex !== undefined) customCallsByOutputIndex.set(outputIndex, state);
+      return state;
+    };
+
+    const finishCustomInput = function* (
+      state: CustomCallState,
+      input: string,
+    ): Generator<StreamedMessagePart> {
+      if (!input.startsWith(state.input) || (state.closed && input !== state.input)) {
+        failResponsesDecode('custom_tool_call.input', 'does not match the streamed input deltas.');
+      }
+      if (state.closed) return;
+      const suffix = escapeCustomInput(input.slice(state.input.length));
+      state.input = input;
+      state.closed = true;
+      yield { type: 'tool_call_part', argumentsPart: `${suffix}"}`, index: state.streamIndex };
+    };
+
     const functionCallArgumentsByIndex = new Map<number | string, string>();
     let unindexedFunctionCallArguments: string | undefined;
 
@@ -905,6 +1164,41 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
       yield part;
     };
 
+    interface ResponsesItemState {
+      readonly metadata: OpenAIResponsesPartMetadata;
+      readonly refusalMetadata: OpenAIResponsesPartMetadata;
+      textStreamed?: boolean;
+    }
+
+    const itemStatesByOutputIndex = new Map<number, ResponsesItemState>();
+    const itemStatesByItemId = new Map<string, ResponsesItemState>();
+
+    const itemState = (
+      outputIndex: number | undefined,
+      itemId: string | undefined,
+    ): ResponsesItemState | undefined => {
+      let state = outputIndex === undefined ? undefined : itemStatesByOutputIndex.get(outputIndex);
+      if (state === undefined && itemId !== undefined) {
+        state = itemStatesByItemId.get(itemId);
+      }
+      if (state === undefined) {
+        if (outputIndex === undefined && itemId === undefined) return undefined;
+        state = { metadata: {}, refusalMetadata: { contentType: 'refusal' } };
+      }
+      if (outputIndex !== undefined) {
+        itemStatesByOutputIndex.set(outputIndex, state);
+      }
+      if (itemId !== undefined) {
+        state.metadata.itemId ??= itemId;
+        state.refusalMetadata.itemId ??= itemId;
+        itemStatesByItemId.set(itemId, state);
+      }
+      return state;
+    };
+
+    const chunkItemState = (chunk: RawObject): ResponsesItemState | undefined =>
+      itemState(readNumberField(chunk, 'output_index'), readStringField(chunk, 'item_id'));
+
     try {
       for await (const chunk of response) {
         const type = readStringField(chunk, 'type');
@@ -920,7 +1214,24 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
 
         switch (type) {
           case 'response.output_text.delta':
-            yield { type: 'text', text: requireStringField(chunk, 'delta', type) };
+          case 'response.refusal.delta': {
+            if (type === 'response.refusal.delta') this._sawRefusal = true;
+            const state = chunkItemState(chunk);
+            if (state !== undefined) {
+              state.textStreamed = true;
+            }
+            yield {
+              type: 'text',
+              text: requireStringField(chunk, 'delta', type),
+              openaiResponses:
+                type === 'response.refusal.delta'
+                  ? (state?.refusalMetadata ?? { contentType: 'refusal' })
+                  : state?.metadata,
+            };
+            break;
+          }
+          case 'response.refusal.done':
+            this._sawRefusal = true;
             break;
           case 'response.created':
           case 'response.in_progress': {
@@ -933,7 +1244,13 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
           }
           case 'response.output_item.added': {
             const item = readResponseOutputItem(chunk['item'], `${type}.item`);
+            if (item.type === 'message' && item.content.some((part) => part['type'] === 'refusal')) this._sawRefusal = true;
             const outputIndex = readNumberField(chunk, 'output_index');
+            const state = itemState(outputIndex, item.type === 'other' ? undefined : item.itemId);
+            if (state !== undefined && item.type === 'message' && item.phase !== undefined) {
+              state.metadata.phase ??= item.phase;
+              state.refusalMetadata.phase ??= item.phase;
+            }
             if (item.type === 'function_call') {
               const streamIndex = responseStreamIndex(item.itemId, outputIndex);
               setFunctionCallArguments(streamIndex, item.arguments ?? '');
@@ -947,21 +1264,60 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
                 tc._streamIndex = streamIndex;
               }
               yield tc;
+            } else if (item.type === 'custom_tool_call') {
+              const streamIndex = responseStreamIndex(item.itemId, outputIndex);
+              const customState: CustomCallState = {
+                streamIndex,
+                input: item.input ?? '',
+                closed: false,
+              };
+              if (item.itemId !== undefined) customCallsByItemId.set(item.itemId, customState);
+              if (outputIndex !== undefined) customCallsByOutputIndex.set(outputIndex, customState);
+              if (streamIndex === undefined) unindexedCustomCall = customState;
+              customCalls.add(customState);
+              yield {
+                type: 'function',
+                id: functionCallId(item.callId),
+                name: requireFunctionCallName(item),
+                arguments: `{"input":"${escapeCustomInput(customState.input)}`,
+                extras: { openaiResponses: { type: 'custom_tool_call' } },
+                _streamIndex: streamIndex,
+              };
             }
             break;
           }
           case 'response.output_item.done': {
             const item = readResponseOutputItem(chunk['item'], `${type}.item`);
+            if (item.type === 'message' && item.content.some((part) => part['type'] === 'refusal')) this._sawRefusal = true;
             const outputIndex = readNumberField(chunk, 'output_index');
-            if (item.type === 'reasoning') {
-              const thinkPart: StreamedMessagePart = { type: 'think', think: '' };
-              if (item.encryptedContent !== undefined) {
-                (thinkPart as { encrypted: string }).encrypted = item.encryptedContent;
+            const state = itemState(outputIndex, item.type === 'other' ? undefined : item.itemId);
+            if (state !== undefined && item.type === 'message' && item.phase !== undefined) {
+              const learnedPhase = state.metadata.phase === undefined;
+              state.metadata.phase ??= item.phase;
+              state.refusalMetadata.phase ??= item.phase;
+              if (learnedPhase && state.textStreamed === true) {
+                yield {
+                  type: 'text',
+                  text: '',
+                  openaiResponses: state.metadata,
+                };
               }
-              yield thinkPart;
+            }
+            if (item.type === 'reasoning') {
+              if (item.encryptedContent !== undefined) {
+                yield {
+                  type: 'think',
+                  think: '',
+                  encrypted: item.encryptedContent,
+                  openaiResponses: state?.metadata,
+                };
+              }
             } else if (item.type === 'function_call' && typeof item.arguments === 'string') {
               const streamIndex = responseStreamIndex(item.itemId, outputIndex);
               yield* yieldFinalArgumentsSuffix(streamIndex, item.arguments, type);
+            } else if (item.type === 'custom_tool_call') {
+              const customState = customCallState(item.itemId, outputIndex, type);
+              yield* finishCustomInput(customState, item.input ?? customState.input);
             }
             break;
           }
@@ -991,11 +1347,44 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             yield* yieldFinalArgumentsSuffix(streamIndex, functionArguments, type);
             break;
           }
+          case 'response.custom_tool_call_input.delta': {
+            const state = customCallState(
+              readStringField(chunk, 'item_id'),
+              readNumberField(chunk, 'output_index'),
+              type,
+            );
+            if (state.closed) failResponsesDecode(type, 'received input after custom-tool completion.');
+            const delta = requireStringField(chunk, 'delta', type);
+            state.input += delta;
+            yield {
+              type: 'tool_call_part',
+              argumentsPart: escapeCustomInput(delta),
+              index: state.streamIndex,
+            };
+            break;
+          }
+          case 'response.custom_tool_call_input.done': {
+            const state = customCallState(
+              readStringField(chunk, 'item_id'),
+              readNumberField(chunk, 'output_index'),
+              type,
+            );
+            yield* finishCustomInput(state, requireStringField(chunk, 'input', type));
+            break;
+          }
           case 'response.reasoning_summary_part.added':
-            yield { type: 'think', think: '' };
+            yield {
+              type: 'think',
+              think: '',
+              openaiResponses: chunkItemState(chunk)?.metadata,
+            };
             break;
           case 'response.reasoning_summary_text.delta':
-            yield { type: 'think', think: requireStringField(chunk, 'delta', type) };
+            yield {
+              type: 'think',
+              think: requireStringField(chunk, 'delta', type),
+              openaiResponses: chunkItemState(chunk)?.metadata,
+            };
             break;
           case 'response.completed':
           case 'response.incomplete': {
@@ -1009,7 +1398,10 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
               this._extractUsage(usage);
             }
             this._captureFinishReasonFromResponse(responseObject);
-            break;
+            for (const state of customCalls) {
+              yield* finishCustomInput(state, state.input);
+            }
+            return;
           }
           case 'error': {
             const message = requireStringField(chunk, 'message', type);
@@ -1041,6 +1433,10 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             break;
         }
       }
+      throw new APIConnectionError(
+        'OpenAI Responses stream ended without a terminal event ' +
+          '(response.completed / response.incomplete).',
+      );
     } catch (error: unknown) {
       throw convertOpenAIError(error, this._convertErrorHook);
     }
@@ -1129,6 +1525,7 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
     const thinking =
       options?.thinking ??
       (this._thinkingEffort !== undefined ? { effort: this._thinkingEffort } : undefined);
+    kwargs = { ...kwargs, include: ['reasoning.encrypted_content'] };
     if (thinking !== undefined) {
       const effort =
         thinking.effort === 'off'
@@ -1136,7 +1533,9 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
           : thinking.effort === 'on'
             ? undefined
             : thinking.effort;
-      kwargs = { ...kwargs, reasoning_effort: effort };
+      if (effort !== undefined) {
+        kwargs = { ...kwargs, reasoning: { effort, summary: 'auto' } };
+      }
     }
 
     if (
@@ -1152,18 +1551,6 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
         cap = Math.min(cap, options.maxContextTokens - options.usedContextTokens);
       }
       kwargs = { ...kwargs, max_output_tokens: Math.max(1, cap) };
-    }
-
-    const reasoningEffort = kwargs['reasoning_effort'] as string | undefined;
-    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
-    delete kwargs['reasoning_effort'];
-
-    if (reasoningEffort !== undefined) {
-      kwargs['reasoning'] = {
-        effort: reasoningEffort,
-        summary: 'auto',
-      };
-      kwargs['include'] = ['reasoning.encrypted_content'];
     }
 
     for (const key of Object.keys(kwargs)) {
@@ -1203,16 +1590,39 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
         );
       }
 
+      const requestOptions: { signal?: AbortSignal; headers?: Record<string, string> } = {};
+      if (options?.signal !== undefined) {
+        requestOptions.signal = options.signal;
+      }
+      const codexSessionId = this._codexSessionId(options);
+      if (codexSessionId !== undefined) {
+        requestOptions.headers = { [CODEX_SESSION_ID_HEADER]: codexSessionId };
+      }
+
       options?.onRequestSent?.();
       const response = await (
         client.responses as {
           create(params: unknown, opts?: unknown): Promise<unknown>;
         }
-      ).create(createParams, options?.signal ? { signal: options.signal } : undefined);
+      ).create(
+        createParams,
+        Object.keys(requestOptions).length > 0 ? requestOptions : undefined,
+      );
       return new OpenAIResponsesStreamedMessage(response, this._stream, this._convertErrorHook);
     } catch (error: unknown) {
       throw convertOpenAIError(error, this._convertErrorHook);
     }
+  }
+
+  private _codexSessionId(options: GenerateOptions | undefined): string | undefined {
+    if (!isChatGptCodexBackend(this._baseUrl)) return undefined;
+    const cacheKey = options?.cacheKey;
+    if (cacheKey === undefined || cacheKey.length === 0) return undefined;
+    const configured = mergeRequestHeaders(this._defaultHeaders, options?.auth?.headers);
+    const reserved = Object.keys(configured ?? {}).some(
+      (key) => key.toLowerCase() === CODEX_SESSION_ID_HEADER,
+    );
+    return reserved ? undefined : cacheKey;
   }
 
   private _createClient(auth: ProviderRequestAuth | undefined): OpenAI {
@@ -1247,7 +1657,7 @@ export function getOpenAIResponsesModelCapability(modelName: string) {
   if (isOpenAIReasoningModel(normalized)) {
     return OPENAI_REASONING_CAPABILITY;
   }
-  if (isOpenAIGpt6AstraModel(normalized)) {
+  if (isOpenAIGpt6Model(normalized)) {
     return OPENAI_THINKING_VISION_TOOL_CAPABILITY;
   }
   if (hasModelPrefix(normalized, OPENAI_VISION_TOOL_PREFIXES)) {

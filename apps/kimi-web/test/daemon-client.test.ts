@@ -177,7 +177,230 @@ const WIRE_AUTO_PRESET_STATUS = {
   },
 };
 
+function aggregateWirePresetStatus() {
+  const base = WIRE_AUTO_PRESET_STATUS.candidates[0]!;
+  const period = {
+    start_at: '2025-06-15T16:00:00.000Z', end_at: '2025-06-16T16:00:00.000Z',
+    request_count: 1, measured_request_count: 1, pending_request_count: 0,
+    missing_usage_request_count: 0, unpriced_request_count: 1,
+    input_tokens: 90, output_tokens: 10, cache_read_tokens: 20, total_tokens: 100,
+    estimated_cost: null, is_partial: true,
+  };
+  const original = {
+    model: 'deepseek-flash', thinking: 'low', provider: 'deepseek',
+    source: 'preset', model_source: 'preset', thinking_source: 'preset',
+    availability: 'time_restricted', score: 100,
+    contributions: { ...base.contributions, resource_score: 100 }, local_evidence: base.local_evidence,
+    resource: {
+      kind: 'metered', currency: 'CNY', balance_cny: '12.34567890123456789', is_available: true,
+      balance_status: 'known', resource_score: 100, resource_score_basis: 'funded_account', blocked_until: 1_750_003_600_000,
+      metered_usage: { source: 'local', cost_source: 'estimated', currency: 'CNY', timezone: 'Asia/Shanghai',
+        tracking_started_at: null, degraded: true, today: period,
+        month: { ...period, estimated_cost: '0.0000123456789' } },
+    },
+  };
+  const effective = { ...original, provider: 'subscription', model: 'subscription-model',
+    source: 'auto-fallback', model_source: 'auto-fallback', thinking_source: 'auto-fallback',
+    availability: 'healthy', resource: { kind: 'subscription', resource_score: 80, quota_remaining_percent: 80,
+      reset_priority: { window: { duration: 1, unit: 'week' }, reset_at: 1_750_003_600_000,
+        remaining_percent: 12, horizon_ms: 43_200_000, bonus: 117.5, floor_relaxed: true } } };
+  return {
+    ...WIRE_AUTO_PRESET_STATUS, evaluation_scope: 'preset', profile_name: undefined,
+    policy: { ...WIRE_AUTO_PRESET_STATUS.policy, role_weights: { custom_role: 1, tower_worker: 1, zero_weight: 0 },
+      deepseek_avoid_peak_hours: true, fallback_penalty: 10, metered_funded_resource_score: 100,
+      reset_priority_window_ms: 259_200_000, reset_priority_exponent: 3, reset_priority_max_bonus: 200 },
+    candidates: [{ ...base, participating: true, native_score: 40, score: 75,
+      role_count: 2, native_available_role_count: 1, fallback_role_count: 1, unavailable_role_count: 0, total_role_weight: 2,
+      coverage: { resource_provider_count: 2, total_provider_count: 2, local_evidence_role_count: 2, total_role_count: 2 },
+      role_scores: [
+        { key: 'custom_role', route: 'agent', profile_name: 'custom_role', weight: 1, original, effective,
+          effective_score: 70, fallback_penalty: 10,
+          fallback: { source_preset: 'peak-safe', source_role: 'tower_worker', reason: 'time_restricted' } },
+        { key: 'tower_worker', route: 'tower_worker', weight: 1, original: effective, effective,
+          effective_score: 80, fallback_penalty: 0 },
+      ],
+    }],
+  };
+}
+
 describe('automatic-preset status mapper boundaries', () => {
+  it('maps aggregate role scores, native/final bindings, fallback and monetary evidence explicitly', () => {
+    const wire = aggregateWirePresetStatus();
+    const result = toAppAutoSubagentPresetStatus(wire)!;
+    expect(result).toMatchObject({ evaluationScope: 'preset', policy: {
+      roleWeights: { custom_role: 1, tower_worker: 1, zero_weight: 0 },
+      deepseekAvoidPeakHours: true, fallbackPenalty: 10, meteredFundedResourceScore: 100,
+      resetPriorityWindowMs: 259_200_000, resetPriorityExponent: 3, resetPriorityMaxBonus: 200,
+    }, candidates: [{ participating: true, nativeScore: 40, roleCount: 2, nativeAvailableRoleCount: 1,
+      fallbackRoleCount: 1, unavailableRoleCount: 0, totalRoleWeight: 2,
+      coverage: { resourceProviderCount: 2, totalProviderCount: 2, localEvidenceRoleCount: 2, totalRoleCount: 2 },
+      roleScores: [
+        { key: 'custom_role', profileName: 'custom_role', original: { model: 'deepseek-flash', source: 'preset',
+          availability: 'time_restricted', contributions: { resourceScore: 100 },
+          resource: { kind: 'metered', balanceCny: '12.34567890123456789', resourceScore: 100,
+            resourceScoreBasis: 'funded_account', blockedUntil: 1_750_003_600_000,
+            meteredUsage: { source: 'local', costSource: 'estimated', trackingStartedAt: null, degraded: true,
+              today: { estimatedCost: null }, month: { estimatedCost: '0.0000123456789' } } } },
+          effective: { source: 'auto-fallback', modelSource: 'auto-fallback', thinkingSource: 'auto-fallback',
+            resource: { kind: 'subscription', quotaRemainingPercent: 80,
+              resetPriority: { window: { duration: 1, unit: 'week' }, resetAt: 1_750_003_600_000,
+                remainingPercent: 12, horizonMs: 43_200_000, bonus: 117.5, floorRelaxed: true } } },
+          effectiveScore: 70, fallbackPenalty: 10,
+          fallback: { sourcePreset: 'peak-safe', sourceRole: 'tower_worker', reason: 'time_restricted' } },
+        { key: 'tower_worker', route: 'tower_worker', fallbackPenalty: 0 },
+      ] }],
+    });
+    expect(result.candidates[0]?.roleScores?.[0]?.original.resource).not.toHaveProperty('quotaRemainingPercent');
+    expect(result.policy.roleWeights).not.toBe(wire.policy.role_weights);
+    expect(toAppAutoSubagentPresetStatus(WIRE_AUTO_PRESET_STATUS)?.evaluationScope).toBeUndefined();
+    expect(toAppAutoSubagentPresetStatus(WIRE_AUTO_PRESET_STATUS)?.candidates[0]?.roleScores).toBeUndefined();
+  });
+
+  it('strips credentials, endpoints, and raw diagnostics throughout aggregate snapshots', () => {
+    function taint(value: unknown): unknown {
+      if (Array.isArray(value)) return value.map(taint);
+      if (typeof value !== 'object' || value === null) return value;
+      return { ...Object.fromEntries(Object.entries(value).map(([key, child]) =>
+        [key, key === 'role_weights' ? child : taint(child)])),
+        api_key: 'SECRET_SENTINEL', endpoint: 'https://example.test/private', raw_error: 'SECRET_SENTINEL' };
+    }
+    const result = toAppAutoSubagentPresetStatus(taint(aggregateWirePresetStatus()));
+    expect(result).toBeDefined();
+    expect(JSON.stringify(result)).not.toMatch(/SECRET_SENTINEL|api_key|endpoint|raw_error/);
+  });
+
+  it('validates soft peak evidence without reinterpreting legacy blocks or leaking extras', () => {
+    const wire = aggregateWirePresetStatus();
+    const candidate = wire.candidates[0]!;
+    const role = candidate.role_scores[0]!;
+    const soft = { ...wire, policy: { ...wire.policy, deepseek_peak_policy: 'penalize', deepseek_peak_penalty: 60 },
+      candidates: [{ ...candidate, deepseek_role_share: 0.25,
+        contributions: { ...candidate.contributions, peak_penalty: 15 },
+        role_scores: [{ ...role, original: { ...role.original, availability: 'healthy',
+          contributions: { ...role.original.contributions, peak_penalty: 60 },
+          resource: { ...role.original.resource, blocked_until: undefined,
+            peak_penalty: { points: 60, until: 1_750_003_600_000, api_key: 'SECRET_SENTINEL' } } } }],
+      }] };
+    const mapped = toAppAutoSubagentPresetStatus(soft)!;
+    expect(mapped).toMatchObject({ policy: { deepseekPeakPolicy: 'penalize', deepseekPeakPenalty: 60 },
+      candidates: [{ deepseekRoleShare: 0.25, contributions: { peakPenalty: 15 }, roleScores: [{
+        original: { availability: 'healthy', contributions: { peakPenalty: 60 },
+          resource: { peakPenalty: { points: 60, until: 1_750_003_600_000 } } },
+      }] }] });
+    expect(JSON.stringify(mapped)).not.toContain('SECRET_SENTINEL');
+    const legacy = toAppAutoSubagentPresetStatus(wire)!;
+    expect(legacy.policy.deepseekPeakPolicy).toBeUndefined();
+    expect(legacy.candidates[0]?.deepseekRoleShare).toBeUndefined();
+    expect(legacy.candidates[0]?.roleScores?.[0]?.original).toMatchObject({ availability: 'time_restricted',
+      resource: { blockedUntil: 1_750_003_600_000 } });
+    const invalid: unknown[] = [
+      ...[-0.1, 1.1, NaN, Infinity, null, '0.25'].map((deepseek_role_share) => ({ ...wire, candidates: [{ ...candidate, deepseek_role_share }] })),
+      ...[-1, NaN, Infinity, null, '60'].flatMap((points) => [
+        { ...wire, policy: { ...wire.policy, deepseek_peak_penalty: points } },
+        { ...wire, candidates: [{ ...candidate, contributions: { ...candidate.contributions, peak_penalty: points } }] },
+        { ...wire, candidates: [{ ...candidate, role_scores: [{ ...role, effective: { ...role.effective,
+          contributions: { ...role.effective.contributions, peak_penalty: points } } }] }] },
+      ]),
+      ...['allow', null, 0].map((deepseek_peak_policy) => ({ ...wire, policy: { ...wire.policy, deepseek_peak_policy } })),
+      ...[null, {}, { points: -1, until: 0 }, { points: NaN, until: 0 }, { points: Infinity, until: 0 },
+        ...[-1, 1.5, Infinity, NaN, 9e15, 'later', null].map((until) => ({ points: 60, until }))]
+        .map((peak_penalty) => ({ ...wire, candidates: [{ ...candidate, role_scores: [{ ...role,
+          original: { ...role.original, resource: { ...role.original.resource, peak_penalty } } }] }] })),
+    ];
+    for (const value of invalid) expect(toAppAutoSubagentPresetStatus(value)).toBeUndefined();
+    for (const deepseek_peak_policy of ['block', 'penalize', 'off']) {
+      expect(toAppAutoSubagentPresetStatus({ ...soft, policy: { ...soft.policy, deepseek_peak_policy } })?.policy.deepseekPeakPolicy).toBe(deepseek_peak_policy);
+    }
+  });
+
+  it('keeps reset-priority evidence optional and rejects malformed expiring-window data', () => {
+    const wire = aggregateWirePresetStatus();
+    const candidate = wire.candidates[0]!;
+    const role = candidate.role_scores[0]!;
+    const resource = role.effective.resource as Record<string, unknown>;
+    const resetPriority = resource['reset_priority'] as Record<string, unknown>;
+    expect(resetPriority).toBeDefined();
+    // Absent evidence stays absent (older daemons) without breaking the snapshot.
+    const legacyWire = aggregateWirePresetStatus();
+    const legacyRole = legacyWire.candidates[0]!.role_scores[0]!;
+    (legacyRole.effective.resource as Record<string, unknown>)['reset_priority'] = undefined;
+    const legacy = toAppAutoSubagentPresetStatus(legacyWire)!;
+    const legacyResource = legacy.candidates[0]?.roleScores?.[0]?.effective.resource;
+    expect(legacyResource).toMatchObject({ kind: 'subscription', resetPriority: undefined });
+    expect(JSON.stringify(legacyResource)).not.toContain('resetPriority');
+    const invalid = [
+      { ...resetPriority, window: { duration: 1, unit: 'month' } },
+      { ...resetPriority, window: { duration: 0, unit: 'week' } },
+      { ...resetPriority, window: { duration: -1, unit: 'week' } },
+      { ...resetPriority, window: { duration: 'week', unit: 'week' } },
+      { ...resetPriority, reset_at: Infinity },
+      { ...resetPriority, reset_at: 1.5 },
+      { ...resetPriority, remaining_percent: 101 },
+      { ...resetPriority, remaining_percent: '12' },
+      { ...resetPriority, horizon_ms: -1 },
+      { ...resetPriority, bonus: NaN },
+      { ...resetPriority, bonus: -0.5 },
+      { ...resetPriority, floor_relaxed: 'yes' },
+      'expiring',
+    ];
+    for (const reset_priority of invalid) {
+      expect(toAppAutoSubagentPresetStatus({ ...wire, candidates: [{ ...candidate, role_scores: [
+        { ...role, effective: { ...role.effective, resource: { ...resource, reset_priority } } },
+      ] }] })).toBeUndefined();
+    }
+    for (const patch of [{ reset_priority_window_ms: -1 }, { reset_priority_exponent: NaN },
+      { reset_priority_max_bonus: Infinity }, { reset_priority_window_ms: '72h' }]) {
+      expect(toAppAutoSubagentPresetStatus({ ...wire, policy: { ...wire.policy, ...patch } })).toBeUndefined();
+    }
+    // Legacy policy snapshots keep absent knobs absent — never fabricated defaults.
+    const legacyPolicy = toAppAutoSubagentPresetStatus(WIRE_AUTO_PRESET_STATUS)?.policy;
+    expect(legacyPolicy?.resetPriorityWindowMs).toBeUndefined();
+    expect(legacyPolicy?.resetPriorityExponent).toBeUndefined();
+    expect(legacyPolicy?.resetPriorityMaxBonus).toBeUndefined();
+    expect(JSON.stringify(legacyPolicy)).not.toContain('resetPriority');
+  });
+
+  it('rejects malformed aggregate/resource fields instead of silently using the legacy shape', () => {
+    const wire = aggregateWirePresetStatus();
+    const candidate = wire.candidates[0]!;
+    const role = candidate.role_scores[0]!;
+    const resource = role.original.resource;
+    const invalid = [
+      ...[12, '-1', 'NaN', '1e3', ' 12 '].map((balance_cny) => ({ ...resource, balance_cny })),
+      { ...resource, resource_score: 50 }, { ...resource, balance_status: 'raw_error' },
+      ...[Infinity, -1, 1.5, 9e15].map((blocked_until) => ({ ...resource, blocked_until })),
+      { ...resource, metered_usage: { ...resource.metered_usage, source: 'remote' } },
+      { ...resource, metered_usage: { ...resource.metered_usage, today: { ...resource.metered_usage.today, estimated_cost: 0 } } },
+      { ...resource, metered_usage: { ...resource.metered_usage, today: { ...resource.metered_usage.today, start_at: '2025-02-30T00:00:00Z' } } },
+    ].map((resource) => ({ ...wire, candidates: [{ ...candidate, role_scores: [{ ...role, original: { ...role.original, resource } }] }] }));
+    const otherInvalid: unknown[] = [
+      ...['source', 'model_source', 'thinking_source'].map((key) => ({ ...wire, candidates: [{ ...candidate,
+        role_scores: [{ ...role, effective: { ...role.effective, [key]: 'raw-secret' } }] }] })),
+      { ...wire, evaluation_scope: 'route' },
+      { ...wire, candidates: [{ ...candidate, role_scores: null }] },
+      { ...wire, candidates: [{ ...candidate, role_count: 1.5 }] },
+      { ...wire, candidates: [{ ...candidate, coverage: { ...candidate.coverage, total_role_count: -1 } }] },
+      { ...wire, candidates: [{ ...candidate, role_scores: [{ ...role, fallback: { ...role.fallback, reason: 'healthy' } }] }] },
+      { ...wire, policy: { ...wire.policy, role_weights: { custom_role: NaN } } },
+      { ...wire, policy: { ...wire.policy, role_weights: { custom_role: { api_key: 'SECRET' } } } },
+    ];
+    for (const value of [...invalid, ...otherInvalid]) expect(toAppAutoSubagentPresetStatus(value)).toBeUndefined();
+  });
+
+  it('preserves unavailable balances and null estimated costs without manufacturing zero', () => {
+    const wire = aggregateWirePresetStatus();
+    const candidate = wire.candidates[0]!;
+    const role = candidate.role_scores[0]!;
+    const result = toAppAutoSubagentPresetStatus({ ...wire, candidates: [{ ...candidate, role_scores: [{
+      ...role, original: { ...role.original, resource: {
+        kind: 'metered', currency: 'CNY', balance_status: 'query_failed', resource_score_basis: 'funded_account',
+      } }, effective: { ...role.effective, resource: { kind: 'unknown', reason: 'unsupported' } },
+    }] }] });
+    expect(result?.candidates[0]?.roleScores?.[0]?.original.resource).toEqual({
+      kind: 'metered', currency: 'CNY', balanceStatus: 'query_failed', resourceScoreBasis: 'funded_account',
+    });
+  });
+
   it('rejects invalid count, rate, percent, and contribution values', () => {
     const candidate = WIRE_AUTO_PRESET_STATUS.candidates[0]!;
     const invalidStatuses: unknown[] = [
@@ -230,6 +453,28 @@ function createApi(): DaemonKimiWebApi {
     clientUiMode: 'test',
   });
 }
+
+describe('DaemonKimiWebApi.listPlugins', () => {
+  beforeEach(() => vi.stubGlobal('location', { search: '?debug=1' }));
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('reads installed versions and disabled/error states without inventing missing versions', async () => {
+    const plugins = [
+      { id: 'aitp', version: '1.1.0+example.20260916', enabled: true, state: 'ok' },
+      { id: 'disabled', enabled: false, state: 'ok' },
+      { id: 'broken', version: '2.0.0', enabled: true, state: 'error' },
+    ];
+    const fetcher = vi.fn().mockResolvedValue(envelope({ plugins }));
+    vi.stubGlobal('fetch', fetcher);
+    expect(await createApi().listPlugins()).toEqual(plugins);
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe('http://daemon.test/api/v1/plugins');
+  });
+
+  it('propagates metadata failures so the UI can distinguish unknown from not installed', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('unavailable', { status: 503 })));
+    await expect(createApi().listPlugins()).rejects.toThrow();
+  });
+});
 
 describe('DaemonKimiWebApi.exportSession', () => {
   beforeEach(() => {
@@ -622,6 +867,36 @@ describe('DaemonKimiWebApi config and provider usage', () => {
         },
       },
     });
+  });
+
+  it.each(['sess-captured', undefined])('posts an immediate automatic evaluation for session %s', async (sessionId) => {
+    vi.mocked(fetch).mockResolvedValue(envelope({
+      config: { providers: {}, default_model: 'main/model', subagent: { preset: 'kimi-heavy' } },
+      status: WIRE_AUTO_PRESET_STATUS,
+      warning: 'Example diagnostic',
+    }));
+    await expect(createApi().autoSelectSubagentPreset(sessionId)).resolves.toMatchObject({
+      config: { defaultModel: 'main/model', subagent: { preset: 'kimi-heavy' } },
+      status: { evaluatedAt: 1_750_000_000_000, reasonCode: 'higher_score' },
+      warning: 'Example diagnostic',
+    });
+    const [url, init] = vi.mocked(fetch).mock.calls[0]!;
+    expect(url).toBe('http://daemon.test/api/v1/config/subagent-preset/auto');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(String(init?.body))).toEqual(sessionId ? { session_id: sessionId } : {});
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([404, 500])('does not fall back to config writes after auto-selection HTTP %s', async (status) => {
+    vi.mocked(fetch).mockResolvedValue(new Response('Unavailable', { status }));
+    await expect(createApi().autoSelectSubagentPreset()).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([null, { ...WIRE_AUTO_PRESET_STATUS, reason_code: 'unknown_reason' }])('rejects a missing or invalid evaluation rather than claiming success', async (status) => {
+    vi.mocked(fetch).mockResolvedValue(envelope({ config: { providers: {} }, status }));
+    await expect(createApi().autoSelectSubagentPreset()).rejects.toThrow('Invalid automatic preset');
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('reads and strictly maps the latest automatic-preset status', async () => {

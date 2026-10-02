@@ -7,8 +7,11 @@
  * existing Memory overlay. The public `activate` (manual boundary, including a
  * manual clear) commits the preset together with `auto_preset.manual_lock =
  * true` in one patch so the automatic decider defers to it; the serialized
- * transaction `activate` (automatic boundary) patches only the preset. Bound at
- * App scope.
+ * transaction methods patch only the preset. `activate` validates all native
+ * aliases; `activateEvaluated` trusts the automatic decider's resource/role
+ * decision made under the same writer lock and checks structure plus main
+ * routes instead. Both share the same atomic commit and Memory alignment.
+ * Bound at App scope.
  */
 
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
@@ -16,7 +19,11 @@ import { ConfigTarget, IConfigService } from '#/app/config/config';
 import { LifecycleScope } from '#/app/scopes';
 import { IModelCatalog } from '#/kosong/model/catalog';
 
-import { SUBAGENT_SECTION, type SubagentConfig } from './configSection';
+import {
+  assertValidEvaluatedSubagentPreset,
+  SUBAGENT_SECTION,
+  type SubagentConfig,
+} from './configSection';
 import {
   ISubagentPresetActivationService,
   type SubagentPresetActivationResult,
@@ -34,6 +41,10 @@ export class SubagentPresetActivationService implements ISubagentPresetActivatio
   private _manualRevision = 0;
   private readonly transaction: SubagentPresetActivationTransaction = {
     activate: (preset, signal) => this.activateLocked(preset, signal, false),
+    activateEvaluated: (preset, signal) => this.activateLocked(preset, signal, false, () => {
+      assertValidEvaluatedSubagentPreset(this.config, this.modelCatalog, preset);
+      return undefined;
+    }),
   };
 
   constructor(
@@ -71,12 +82,13 @@ export class SubagentPresetActivationService implements ISubagentPresetActivatio
     preset: string,
     signal: AbortSignal | undefined,
     manual: boolean,
+    validate: () => string | undefined = () => validateSubagentPreset(this.config, this.modelCatalog, preset),
   ): Promise<SubagentPresetActivationResult> {
     if (signal?.aborted === true) return { kind: 'cancelled', message: CANCELLED_MESSAGE };
 
     let hasMemoryOverlay: boolean;
     try {
-      const invalid = validateSubagentPreset(this.config, this.modelCatalog, preset);
+      const invalid = validate();
       if (invalid !== undefined) {
         return { kind: 'failed', message: invalid, commitStarted: false };
       }
@@ -86,6 +98,7 @@ export class SubagentPresetActivationService implements ISubagentPresetActivatio
       return { kind: 'failed', message: FAILED_MESSAGE, commitStarted: false };
     }
 
+    if (signal?.aborted) return { kind: 'cancelled', message: CANCELLED_MESSAGE };
     const patch = manual ? { preset, autoPreset: { manualLock: true } } : { preset };
 
     try {
@@ -104,7 +117,7 @@ export class SubagentPresetActivationService implements ISubagentPresetActivatio
     }
 
     try {
-      const postInvalid = validateSubagentPreset(this.config, this.modelCatalog, preset);
+      const postInvalid = validate();
       if (postInvalid !== undefined) {
         warning = appendWarning(warning, `The saved preset is no longer valid: ${postInvalid}`);
       } else if (this.config.get<SubagentConfig | undefined>(SUBAGENT_SECTION)?.preset !== preset) {

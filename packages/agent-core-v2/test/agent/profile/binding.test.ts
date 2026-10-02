@@ -17,6 +17,8 @@ import { BuiltinAgentProfileLoaderService } from '#/app/agentProfileCatalog/buil
 import { registerAgentProfile } from '#/app/agentProfileCatalog/contribution';
 import type { ToolCall } from '#/kosong/contract/message';
 import { IAgentProfileService, type ResolvedAgentProfile } from '#/agent/profile/profile';
+import { PROFILE_COMPACT_PROMPT_FLAG_ID } from '#/agent/profile/flag';
+import { IFlagService } from '#/app/flag/flag';
 import { IHostClock } from '#/os/interface/hostClock';
 import { IAgentAgentsMdReminderService } from '#/agent/agentsMdReminder/agentsMdReminder';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
@@ -160,6 +162,25 @@ describe('AgentProfileService.bind', () => {
         value: { localDate: '2026-07-29', timeZone: 'Asia/Shanghai' },
       },
     });
+  });
+
+  it('binds a compact builtin prompt when the owning experimental config enables it', async () => {
+    ctx = createTestAgent(
+      hostEnvironmentServices(homeDir),
+      { initialConfig: { experimental: { [PROFILE_COMPACT_PROMPT_FLAG_ID]: true } } },
+    );
+    const svc = ctx.get(IAgentProfileService);
+
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
+
+    expect(ctx.get(IFlagService).explain(PROFILE_COMPACT_PROMPT_FLAG_ID)).toMatchObject({
+      enabled: true,
+      source: 'config',
+    });
+    expect(svc.getSystemPrompt()).toContain('# Working principles');
+    expect(svc.getSystemPrompt()).not.toContain('# General Guidelines for Coding');
+    expect(svc.getActiveToolNames()).toContain('Bash');
+    expect(svc.getActiveToolNames()).toContain('Skill');
   });
 
   it('persists the complete binding in one journal record', async () => {

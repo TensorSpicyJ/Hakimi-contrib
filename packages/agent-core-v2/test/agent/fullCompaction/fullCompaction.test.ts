@@ -7,7 +7,7 @@
  * wire/telemetry effects. Wiring: testAgent harness with fake providers,
  * filesystem sandboxes, real compaction services, and stubs at external model /
  * telemetry boundaries. Run:
- * ../../node_modules/.bin/vitest run test/fullCompaction/full.test.ts
+ * pnpm --filter @moonshot-ai/agent-core-v2 test test/agent/fullCompaction/fullCompaction.test.ts
  */
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -18,6 +18,7 @@ import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import {
   APIConnectionError,
   APIContextOverflowError,
+  APIEmptyResponseError,
   APIRequestTooLargeError,
   APIStatusError,
 } from '#/kosong/contract/errors';
@@ -30,6 +31,9 @@ import {
   DefaultCompactionStrategy,
 } from '#/agent/fullCompaction/strategy';
 import { COMPACTION_SUMMARY_PREFIX } from '#/agent/contextMemory/compactionHandoff';
+import type { ContextMessage } from '#/agent/contextMemory/types';
+import { prepareContinuityHistory, shrinkContinuityHistory } from '#/agent/fullCompaction/continuity';
+import { contextContinuityFlag } from '#/agent/fullCompaction/flag';
 import { makeHookRunner } from '../externalHooks/runner-stub';
 import type { IExternalHooksRunnerService } from '#/app/externalHooksRunner/externalHooksRunner';
 import { MASTER_ENV } from '#/app/flag/flagService';
@@ -303,7 +307,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         agent_id: 'main',
         source: 'manual',
-        tokens_before: 3_484,
+        tokens_before: 3_497,
         tokens_after: expect.any(Number),
         duration_ms: expect.any(Number),
         compacted_count: 6,
@@ -582,7 +586,7 @@ describe('FullCompaction', () => {
       session_id: 'test-session',
       cwd: dir,
       trigger: 'auto',
-      token_count: 3_484,
+      token_count: 3_497,
     });
     expect(post).toMatchObject({
       hook_event_name: 'PostCompact',
@@ -668,7 +672,7 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 18_543,
+        tokens_before: 18_587,
         retry_count: 1,
         trace_id: 'trace-compact-1',
       }),
@@ -1051,7 +1055,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         agent_id: 'main',
         source: 'manual',
-        tokens_before: 18_543,
+        tokens_before: 18_587,
         duration_ms: expect.any(Number),
         round: 1,
         retry_count: 0,
@@ -1276,7 +1280,7 @@ describe('FullCompaction', () => {
       event: 'compaction_failed',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 18_543,
+        tokens_before: 18_587,
         duration_ms: expect.any(Number),
         retry_count: 4,
         error_type: 'APIConnectionError',
@@ -1652,12 +1656,12 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'auto',
-        tokens_before: 3_491,
-        // 3461 estimated request-overhead tokens (system prompt + tools) +
+        tokens_before: 3_504,
+        // 3458 estimated request-overhead tokens (system prompt + tools) +
         // 9 measured summary output tokens (scripted compaction exchange) +
         // 21 estimated tokens for the kept user messages — the summary
         // component is the REAL provider count, not a text estimate.
-        tokens_after: 3_475,
+        tokens_after: 3_488,
         compacted_count: 7,
         retry_count: 0,
       }),
@@ -3215,6 +3219,219 @@ function inputHistorySnapshot(history: readonly Message[]): string[] {
 function normalizeInputText(text: string): string {
   return text.includes('first-person handoff note') ? '<compaction-instruction>' : text;
 }
+
+describe('experimental context continuity', () => {
+  it.each([
+    ['false', 'refusal'], ['true', 'refusal'],
+    ['false', 'filtered'], ['true', 'filtered'],
+    ['false', 'filtered-empty'], ['true', 'filtered-empty'],
+  ] as const)('retains the full history without retrying a %s-policy %s response', async (enabled, response) => {
+    vi.stubEnv(MASTER_ENV, '');
+    vi.stubEnv(contextContinuityFlag.env, enabled);
+    let requests = 0;
+    const ctx = testAgent({ generate: async () => {
+      requests += 1;
+      if (response === 'filtered-empty') {
+        throw new APIEmptyResponseError('The provider filtered the response.', { finishReason: 'filtered' });
+      }
+      const result = textResult('I cannot provide a handoff.');
+      return response === 'filtered'
+        ? { ...result, finishReason: 'filtered', rawFinishReason: 'content_filter' }
+        : { ...result, finishReason: 'filtered', rawFinishReason: 'refusal' };
+    } });
+    ctx.appendExchange(1, 'Goal: retain all evidence.', 'Checked one: failed.', 100);
+    ctx.appendExchange(2, 'Constraint: do not discard failed checks.', 'Checked two: still unrun.', 200);
+    const original = [...ctx.context.get()];
+    const service = ctx.get(IAgentFullCompactionService);
+    service.begin({ source: 'manual' });
+    await expect(service.compacting?.promise).rejects.toMatchObject({ code: 'compaction.failed' });
+    expect(requests).toBe(1);
+    expect(ctx.context.get()).toEqual(original);
+    expect(service.diagnostics().lastRun).toMatchObject({ outcome: 'failed', requestCount: 1, retryDroppedMessageCount: 0 });
+    await ctx.expectResumeMatches();
+  });
+
+  it('keeps the baseline compaction instruction and tool output when disabled', async () => {
+    vi.stubEnv(MASTER_ENV, '');
+    vi.stubEnv(contextContinuityFlag.env, 'false');
+    const histories: Message[][] = [];
+    const output = `${'unchanged diagnostic line\n'.repeat(12)}tests failed: exit 1`;
+    const ctx = testAgent({ generate: async (_provider, _system, _tools, history) => {
+      histories.push([...history]);
+      return textResult('Baseline handoff.');
+    } });
+    ctx.context.append(
+      textMessage('user', 'Preserve my files.'),
+      { role: 'assistant', content: [], toolCalls: [{ type: 'function', id: 'baseline-call', name: 'Shell', arguments: '{}' }] },
+      { role: 'tool', content: [{ type: 'text', text: output }], toolCalls: [], toolCallId: 'baseline-call' },
+    );
+    const service = ctx.get(IAgentFullCompactionService);
+    service.begin({ source: 'manual' });
+    await service.compacting?.promise;
+    expect(histories[0]?.map(messageText).join('\n')).toContain(output);
+    expect(histories[0]?.at(-1)?.content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: expect.stringContaining('first-person handoff note') }),
+    ]));
+    expect(service.diagnostics()).toMatchObject({ enabled: false, lastRun: {
+      policy: 'baseline', outcome: 'completed', duplicateReminderCount: 0, repeatedToolLineCount: 0,
+    } });
+  });
+
+  it('preserves user constraints and verified evidence through compaction and replay', async () => {
+    vi.stubEnv(MASTER_ENV, '');
+    vi.stubEnv(contextContinuityFlag.env, 'true');
+    const constraint = 'Keep the existing fixtures. Do not publish or overwrite user changes.';
+    const verification = 'Ran pnpm test: 7 passed, 1 failed. Typecheck was not run. Next: fix the failing case.';
+    const inputs: Message[][] = [];
+    const ctx = testAgent({ generate: async (_provider, _system, _tools, history) => {
+      inputs.push([...history]);
+      return textResult(verification);
+    } });
+    ctx.context.append(
+      { ...textMessage('user', constraint), origin: { kind: 'user' } },
+      { ...textMessage('user', 'Project constraint: keep public exports stable.'), origin: { kind: 'injection', variant: 'project' } },
+      { ...textMessage('user', 'Project constraint: keep public exports stable.'), origin: { kind: 'injection', variant: 'project' } },
+      { role: 'assistant', content: [], toolCalls: [{ type: 'function', id: 'verified-call', name: 'Shell', arguments: '{}' }] },
+      { role: 'tool', content: [{ type: 'text', text: `${'identical progress report\n'.repeat(40)}7 passed, 1 failed; exit 1` }], toolCalls: [], toolCallId: 'verified-call', isError: true },
+      textMessage('assistant', 'The failure remains unresolved; typecheck is still unrun.'),
+    );
+    const service = ctx.get(IAgentFullCompactionService);
+    service.begin({ source: 'manual' });
+    await service.compacting?.promise;
+
+    const input = inputs[0]!.map(messageText).join('\n');
+    expect(input).toContain(constraint);
+    expect(input.split('Project constraint: keep public exports stable.')).toHaveLength(2);
+    expect(input).toContain('[previous line repeated 39 more times]');
+    expect(input).toContain('7 passed, 1 failed; exit 1');
+    expect(input).toContain('Never turn an intention or an unrun check');
+    expect(ctx.compactHistory()).toEqual([
+      { role: 'user', text: constraint },
+      { role: 'user', text: expect.stringContaining(verification) },
+    ]);
+    expect(service.diagnostics()).toEqual({ enabled: true, lastRun: {
+      policy: 'continuity', outcome: 'completed', inputMessageCount: 6, preparedMessageCount: 5,
+      duplicateReminderCount: 1, repeatedToolLineCount: 39, retryDroppedMessageCount: 0, requestCount: 1,
+    } });
+    await ctx.expectResumeMatches();
+  });
+
+  it('never rewrites provider-identified text, encrypted reasoning, or parallel call metadata', () => {
+    const repeated = 'repeated line with provider identity\n'.repeat(10);
+    const messages: ContextMessage[] = [
+      {
+        role: 'assistant',
+        providerMessageId: 'response-example',
+        content: [
+          { type: 'think', think: '', encrypted: 'opaque-reasoning', openaiResponses: { itemId: 'rs_example' } },
+          { type: 'text', text: 'Running both checks.', openaiResponses: { itemId: 'msg_example', phase: 'commentary' } },
+        ],
+        toolCalls: [
+          { type: 'function', id: 'check-a', name: 'Shell', arguments: '{}', extras: { itemId: 'fc_a' } },
+          { type: 'function', id: 'check-b', name: 'Shell', arguments: '{}', extras: { itemId: 'fc_b' } },
+        ],
+      },
+      { role: 'tool', toolCallId: 'check-a', content: [{ type: 'text', text: repeated, openaiResponses: { itemId: 'tool_example' } }], toolCalls: [] },
+      { role: 'tool', toolCallId: 'check-b', providerMessageId: 'provider-example', content: [{ type: 'text', text: repeated }], toolCalls: [] },
+    ];
+    const prepared = prepareContinuityHistory(messages);
+    expect(prepared.messages).toEqual(messages);
+    for (let index = 0; index < messages.length; index += 1) expect(prepared.messages[index]).toBe(messages[index]);
+    expect(prepared.repeatedToolLineCount).toBe(0);
+  });
+
+  it('retries overflow without dropping instructions, the prior handoff, or recent verification', async () => {
+    vi.stubEnv(MASTER_ENV, '');
+    vi.stubEnv(contextContinuityFlag.env, 'true');
+    const inputs: Message[][] = [];
+    const ctx = testAgent({ generate: async (_provider, _system, _tools, history) => {
+      inputs.push([...history]);
+      if (inputs.length === 1) throw new APIContextOverflowError(400, 'Context length exceeded');
+      return textResult('Retained constraints; recent check failed; continue fixing it.');
+    } });
+    ctx.context.append(
+      { ...textMessage('user', 'Goal: fix the regression. Constraint: never delete fixtures.'), origin: { kind: 'user' } },
+      { ...textMessage('user', 'Previous handoff: do not change public API; preserve the unresolved failure.'), origin: { kind: 'compaction_summary' } },
+      { role: 'assistant', content: [{ type: 'text', text: 'Old inspection.' }], toolCalls: [
+        { type: 'function', id: 'old-a', name: 'Read', arguments: '{}' },
+        { type: 'function', id: 'old-b', name: 'Read', arguments: '{}' },
+      ] },
+      { role: 'tool', toolCallId: 'old-a', content: [{ type: 'text', text: 'old source '.repeat(600) }], toolCalls: [] },
+      { role: 'tool', toolCallId: 'old-b', content: [{ type: 'text', text: 'old output '.repeat(600) }], toolCalls: [] },
+      { role: 'assistant', content: [], toolCalls: [{ type: 'function', id: 'recent-check', name: 'Shell', arguments: '{}' }] },
+      { role: 'tool', toolCallId: 'recent-check', content: [{ type: 'text', text: 'verification: exit 1; expected 2 but got 3' }], toolCalls: [], isError: true },
+      textMessage('assistant', 'The regression is still unresolved.'),
+    );
+    const service = ctx.get(IAgentFullCompactionService);
+    service.begin({ source: 'manual' });
+    await service.compacting?.promise;
+    expect(inputs).toHaveLength(2);
+    const retry = inputs[1]!;
+    expect(retry.map(messageText).join('\n')).toContain('Constraint: never delete fixtures.');
+    expect(retry.map(messageText).join('\n')).toContain('Previous handoff: do not change public API');
+    expect(retry.map(messageText).join('\n')).toContain('verification: exit 1; expected 2 but got 3');
+    expect(retry.flatMap((message) => message.toolCalls.map((call) => call.id))).toEqual(['recent-check']);
+    expect(retry.filter((message) => message.role === 'tool').map((message) => message.toolCallId)).toEqual(['recent-check']);
+    expect(service.diagnostics().lastRun).toMatchObject({ outcome: 'completed', retryDroppedMessageCount: 3, requestCount: 2 });
+    await ctx.expectResumeMatches();
+  });
+
+  it.each(['overflow', 'empty'] as const)('fails %s compaction without losing protected context or retrying forever', async (failure) => {
+    vi.stubEnv(MASTER_ENV, '');
+    vi.stubEnv(contextContinuityFlag.env, 'true');
+    let requests = 0;
+    const ctx = testAgent({ generate: async () => {
+      requests += 1;
+      if (failure === 'overflow') throw new APIContextOverflowError(400, 'Context length exceeded');
+      return textResult('');
+    } });
+    ctx.context.append(
+      { ...textMessage('user', 'Keep every user constraint.'), origin: { kind: 'user' } },
+      textMessage('assistant', 'Only recent evidence.'),
+    );
+    const original = [...ctx.context.get()];
+    const service = ctx.get(IAgentFullCompactionService);
+    service.begin({ source: 'manual' });
+    await expect(service.compacting?.promise).rejects.toMatchObject({ code: 'compaction.failed' });
+    expect(requests).toBe(1);
+    expect(ctx.context.get()).toEqual(original);
+    expect(service.diagnostics().lastRun).toMatchObject({ outcome: 'failed', requestCount: 1, retryDroppedMessageCount: 0 });
+  });
+
+  it('preserves incomplete parallel exchanges and distinct reminders during preparation', () => {
+    const messages: ContextMessage[] = [
+      { ...textMessage('user', 'Do not change the API.'), origin: { kind: 'injection', variant: 'project' } },
+      { ...textMessage('user', 'The API change is now authorized.'), origin: { kind: 'injection', variant: 'project' } },
+      { role: 'assistant', content: [], toolCalls: [
+        { type: 'function', id: 'a', name: 'Read', arguments: '{}' },
+        { type: 'function', id: 'b', name: 'Read', arguments: '{}' },
+      ] },
+      { role: 'tool', toolCallId: 'a', content: [{ type: 'text', text: 'Only the first result arrived.' }], toolCalls: [] },
+    ];
+    expect(prepareContinuityHistory(messages).messages).toEqual(messages);
+    expect(shrinkContinuityHistory(messages, 0, () => 1)).toBe(messages);
+  });
+
+  it('retains Skill instructions and their call results when an older exchange must be discarded', () => {
+    const skillOutput = 'Keep this repeated instruction exactly.\n'.repeat(5);
+    const messages: ContextMessage[] = [
+      { role: 'assistant', content: [], toolCalls: [{ type: 'function', id: 'skill-load', name: 'Skill', arguments: '{"skill":"example-method"}' }] },
+      { role: 'tool', content: [{ type: 'text', text: skillOutput }], toolCalls: [], toolCallId: 'skill-load' },
+      {
+        ...textMessage('user', 'Skill instruction: preserve the reference data and record failed checks.'),
+        origin: { kind: 'skill_activation', activationId: 'example-activation', skillName: 'example-method', trigger: 'model-tool' },
+      },
+      textMessage('assistant', 'Obsolete exploration.'),
+      textMessage('user', 'Continue with the same constraints.'),
+      textMessage('assistant', 'The validation is still pending.'),
+    ];
+    const prepared = prepareContinuityHistory(messages);
+    const shrunk = shrinkContinuityHistory(prepared.messages, 0, () => 1);
+    expect(prepared.repeatedToolLineCount).toBe(0);
+    expect(shrunk).toEqual([messages[0], messages[1], messages[2], messages[4], messages[5]]);
+    expect(shrunk[1]).toBe(messages[1]);
+  });
+});
 
 describe('prompt deferral during full compaction', () => {
   it('defers a prompt submitted mid-compaction and replays it after completion', async () => {

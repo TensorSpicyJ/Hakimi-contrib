@@ -7,12 +7,11 @@
  * per-subagent XML result. Reads persisted swarm item labels through the
  * Session-scoped coordinator so later `resume_agent_ids` calls relabel
  * resumed subagents like v1. When the caller has a model bound, the tool
- * resolves the canonical `[subagent]` preset/agents route up front via
- * `resolveSubagentBinding` and threads that binding through the swarm tasks;
- * otherwise the service keeps its own "no model bound" check and inherit-caller
- * fallback. A swarm with new items asks the App-scope automatic preset decider
- * once before resolving, so the new tasks start on a freshly chosen preset.
- * The Session-scoped coordinator separately evaluates every resumed child's
+ * consumes the App-scope automatic preset decider's final binding separately
+ * for each new item, including temporary role fallbacks. Each task carries its
+ * own fixed binding; unavailable routes fail before the batch is dispatched.
+ * Without a caller model, the service retains its "no model bound" check.
+ * The Session-scoped coordinator separately resolves every resumed child's
  * actual rebindable profile, including resume-only and mixed batches. Swarm
  * mode is entered through `IAgentSwarmService`; the caller's agent id comes from
  * `IAgentScopeContext`. Pure tool — owns no scoped state. Bound at Agent
@@ -28,8 +27,6 @@ import {
 import { Error2, ErrorCodes } from '#/errors';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import { IConfigService } from '#/app/config/config';
-import { IFlagService } from '#/app/flag/flag';
-import { IModelCatalog } from '#/kosong/model/catalog';
 import { ISessionSwarmService, type SessionSwarmTask } from '#/features/swarm/session/sessionSwarm';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { IAgentProfileService } from '#/agent/profile/profile';
@@ -42,7 +39,7 @@ import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { IAgentSwarmService } from '#/features/swarm/agent/swarm';
 import { IAutoSubagentPresetService } from '#/app/autoSubagentPreset/autoSubagentPreset';
 import {
-  resolveSubagentBinding,
+  type SubagentRouteRequest,
   resolveSubagentTimeoutMs,
 } from '#/session/subagent/configSection';
 import {
@@ -97,8 +94,6 @@ export class AgentSwarmTool implements IAgentSwarmTool {
     @IAgentScopeContext scopeContext: IAgentScopeContext,
     @IAgentSwarmService private readonly swarmMode: IAgentSwarmService,
     @IConfigService private readonly config: IConfigService,
-    @IFlagService private readonly flags: IFlagService,
-    @IModelCatalog private readonly modelCatalog: IModelCatalog,
     @ISessionAgentProfileCatalog private readonly catalog: ISessionAgentProfileCatalog,
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @ISessionContext private readonly sessionContext: ISessionContext,
@@ -150,7 +145,7 @@ export class AgentSwarmTool implements IAgentSwarmTool {
     toolCallId: string,
   ): Promise<string> {
     const profileName = normalizeOptionalString(args.subagent_type) ?? DEFAULT_SUBAGENT_TYPE;
-    let binding: { model: string; thinking?: string } | undefined;
+    let routeRequest: SubagentRouteRequest | undefined;
     if ((args.items?.length ?? 0) > 0) {
       await this.catalog.ready;
       const own = this.profile.data();
@@ -169,19 +164,7 @@ export class AgentSwarmTool implements IAgentSwarmTool {
         });
       }
       if (own.modelAlias !== undefined) {
-        await this.autoPreset.evaluate(
-          {
-            route: 'swarm',
-            profileName,
-            modelPreference: targetProfile.modelPreference,
-            caller: {
-              modelAlias: own.modelAlias,
-              thinkingLevel: own.thinkingLevel,
-            },
-          },
-          { sessionId: this.sessionContext.sessionId, signal },
-        );
-        const resolved = resolveSubagentBinding(this.config, this.flags, this.modelCatalog, {
+        routeRequest = {
           route: 'swarm',
           profileName,
           modelPreference: targetProfile.modelPreference,
@@ -189,41 +172,51 @@ export class AgentSwarmTool implements IAgentSwarmTool {
             modelAlias: own.modelAlias,
             thinkingLevel: own.thinkingLevel,
           },
-        });
-        binding = { model: resolved.model, thinking: resolved.thinking };
+        };
       }
     }
     const timeoutMs = resolveSubagentTimeoutMs(this.config);
     const specs = await createAgentSwarmSpecs(args, (agentId) =>
       this.swarmService.getSwarmItem({ callerAgentId: this.callerAgentId, agentId }),
     );
-    const tasks: SessionSwarmTask<AgentSwarmSpec>[] = specs.map((spec) => {
-      const descriptionName = spec.kind === 'resume' ? 'resume' : profileName;
-      const common = {
-        data: spec,
-        profileName: spec.kind === 'resume' ? 'subagent' : profileName,
-        parentToolCallId: toolCallId,
-        prompt: spec.prompt,
-        description: childDescription(args.description, spec.index, descriptionName),
-        swarmIndex: spec.index,
-        runInBackground: false,
-        swarmItem: spec.item,
-        signal,
-        timeout: timeoutMs,
-      };
-      if (spec.kind === 'resume') {
+    const tasks: SessionSwarmTask<AgentSwarmSpec>[] = await Promise.all(
+      specs.map(async (spec) => {
+        const descriptionName = spec.kind === 'resume' ? 'resume' : profileName;
+        const common = {
+          data: spec,
+          profileName: spec.kind === 'resume' ? 'subagent' : profileName,
+          parentToolCallId: toolCallId,
+          prompt: spec.prompt,
+          description: childDescription(args.description, spec.index, descriptionName),
+          swarmIndex: spec.index,
+          runInBackground: false,
+          swarmItem: spec.item,
+          signal,
+          timeout: timeoutMs,
+        };
+        if (spec.kind === 'resume') {
+          return {
+            ...common,
+            kind: 'resume' as const,
+            resumeAgentId: spec.agentId,
+          };
+        }
+        const binding = routeRequest === undefined
+          ? undefined
+          : await this.autoPreset.resolveBinding(routeRequest, {
+              sessionId: this.sessionContext.sessionId,
+              signal,
+            });
         return {
           ...common,
-          kind: 'resume' as const,
-          resumeAgentId: spec.agentId,
+          kind: 'spawn' as const,
+          binding: binding === undefined
+            ? undefined
+            : { model: binding.model, thinking: binding.thinking },
         };
-      }
-      return {
-        ...common,
-        kind: 'spawn' as const,
-        binding,
-      };
-    });
+      }),
+    );
+    signal.throwIfAborted();
     const results = await this.swarmService.run({
       callerAgentId: this.callerAgentId,
       tasks,

@@ -154,13 +154,12 @@ const catalogIdParamSchema = z.object({
 });
 
 /**
- * Resolve the catalog service after the config layer is ready. Config loads
- * asynchronously during bootstrap; mirroring `routes/config.ts`, route handlers
- * await `IConfigService.ready` so an immediate request never observes an empty
- * (not-yet-loaded) catalog.
+ * Resolve the catalog after config and registry hydration, including local
+ * built-in model backfill, so the first request cannot observe a partial list.
  */
 async function loadCatalog(core: Scope): Promise<IModelCatalog> {
   await core.accessor.get(IConfigService).ready;
+  await core.accessor.get(IKosongConfigService).ready;
   return core.accessor.get(IModelCatalog);
 }
 

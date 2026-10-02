@@ -3,7 +3,7 @@
  *
  * Defines the Agent-scope service that shapes provider-visible tool/history
  * views, records selected dynamic schemas as pending declarations, and
- * reports loadable-tool announcements.
+ * reports loadable-tool announcements and content-free disclosure diagnostics.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
@@ -23,6 +23,15 @@ export interface LoadToolsResult {
   readonly unknown: readonly string[];
 }
 
+export interface ToolSelectionDiagnostics {
+  readonly mode: 'off' | 'native' | 'catalog';
+  readonly activeToolCount: number;
+  readonly visibleToolCount: number;
+  readonly loadableToolCount: number;
+  readonly loadedToolCount: number;
+  readonly pendingToolCount: number;
+}
+
 export interface IAgentToolSelectService {
   readonly _serviceBrand: undefined;
 
@@ -36,7 +45,9 @@ export interface IAgentToolSelectService {
 
   drainPendingToolSchemas(): readonly Tool[] | undefined;
 
-  loadableToolsAnnouncement(): string | undefined;
+  loadableToolsAnnouncement(isNewTurn?: boolean, forceCatalogRefresh?: boolean): string | undefined;
+
+  diagnostics(): ToolSelectionDiagnostics;
 }
 
 export const IAgentToolSelectService: ServiceIdentifier<IAgentToolSelectService> =

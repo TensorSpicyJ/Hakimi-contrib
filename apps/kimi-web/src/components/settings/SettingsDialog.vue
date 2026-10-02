@@ -17,18 +17,28 @@ import {
   autoSubagentPresetPatch,
   autoSubagentPresetSupported,
   formatSubagentPresetDuration,
-  formatSubagentPresetScore,
+  subagentPresetConfiguredLabel,
   mainRouteForPreset,
-  subagentPresetAvailabilityLabel,
+  subagentPresetCandidateState,
+  subagentPresetDisplayRows,
+  subagentPresetParticipationLabel,
+  subagentPresetEvaluationScopeLabel,
+  subagentPresetTotals,
+  subagentPresetRoleCounts,
+  subagentPresetCoverageLabel,
+  subagentPresetMeteredProviders,
+  subagentPresetResourceLabel,
+  subagentPresetPeakPolicyLabel,
+  subagentPresetPeakSummary,
+  formatPresetCny,
   subagentPresetCandidateBreakdown,
   subagentPresetCandidatesOrder,
-  subagentPresetCurrentEvaluation,
   subagentPresetCandidatesPatch,
   subagentPresetEvidenceLabel,
   subagentPresetManualLock,
   subagentPresetReasonLabel,
   subagentPresetRemainingLabel,
-  subagentPresetResumeAutoPatch,
+  autoSubagentPresetActionLabel,
   type SubagentPresetT,
 } from '../../lib/subagentPreset';
 import type { Accent, ColorScheme } from '../../composables/useKimiWebClient';
@@ -52,6 +62,7 @@ import Badge from '../ui/Badge.vue';
 import Icon from '../ui/Icon.vue';
 import IconButton from '../ui/IconButton.vue';
 import ProviderUsagePanel from './ProviderUsagePanel.vue';
+import PresetRoleScores from './PresetRoleScores.vue';
 
 const { t, locale } = useI18n();
 
@@ -77,6 +88,7 @@ const props = defineProps<{
   config?: AppConfig | null;
   /** Latest process-global automatic routing evaluation, when supported. */
   autoSubagentPresetStatus?: AutoSubagentPresetStatus;
+  autoPresetControl?: { automatic: boolean; label: string; disabledReason?: string; feedback: string; pending: boolean };
   /** Models from the daemon catalog, used to label default-model choices. */
   models?: AppModel[];
   /** True while a config or preset activation request is saving. */
@@ -104,6 +116,7 @@ const emit = defineEmits<{
   openProviders: [];
   updateConfig: [patch: Partial<AppConfig>];
   activatePreset: [preset: string];
+  resumeAutoPreset: [];
   close: [];
 }>();
 
@@ -225,7 +238,7 @@ const automaticPresetSwitchingOverridden = computed(() =>
 );
 
 /** `autoPreset.manualLock`: a manually activated preset paused automatic
- *  switching; the lock row offers the resume-auto action. */
+ *  switching; shown alongside the always-visible automatic selection action. */
 const presetManualLocked = computed(() => subagentPresetManualLock(props.config));
 
 /** Presets in the declaration order of `subagent.presets` — the order used as
@@ -255,22 +268,17 @@ const schedulerEvaluationContext = computed(() => {
   const status = props.autoSubagentPresetStatus;
   if (status === undefined) return '';
   return t('settings.smartRoutingEvaluationContext', {
-    route: status.route,
-    profile: status.profileName ?? t('header.subagentPresetNoData'),
+    route: subagentPresetEvaluationScopeLabel(status, t),
+    profile: status.profileName ?? status.route,
     time: new Date(status.evaluatedAt).toLocaleString(locale.value),
   });
 });
 const schedulerCurrent = computed(() => {
-  const status = props.autoSubagentPresetStatus;
-  if (status === undefined) return '';
-  const current = subagentPresetCurrentEvaluation(
-    status,
-    props.config?.subagent?.preset,
-  );
-  return t('settings.smartRoutingActiveSelection', {
-    current: current.preset ?? t('header.subagentPresetNoData'),
-    score: formatSubagentPresetScore(current.score, t as unknown as SubagentPresetT),
-  });
+  return subagentPresetConfiguredLabel(props.config, t);
+});
+const schedulerActivation = computed(() => {
+  const preset = props.autoSubagentPresetStatus?.activatedPreset;
+  return preset ? t('settings.smartRoutingActivatedSelection', { preset }) : '';
 });
 const schedulerSelection = computed(() => {
   const status = props.autoSubagentPresetStatus;
@@ -289,27 +297,22 @@ const schedulerCooldown = computed(() =>
   ),
 );
 
-function schedulerCandidateScore(candidate: AutoSubagentPresetCandidateScore): string {
-  return formatSubagentPresetScore(candidate.score, t as unknown as SubagentPresetT);
-}
+const schedulerRows = computed(() => subagentPresetDisplayRows(
+  subagentPresetNames.value, props.autoSubagentPresetStatus, props.config?.subagent?.autoPreset?.candidates,
+));
+const schedulerMeteredProviders = computed(() => subagentPresetMeteredProviders(props.autoSubagentPresetStatus?.candidates ?? []));
 
 function schedulerCandidateStatus(candidate: AutoSubagentPresetCandidateScore): string {
-  return (
-    subagentPresetRemainingLabel(
-      candidate.circuitBreakerOpenUntil,
-      schedulerNow.value,
-      'circuit',
-      t as unknown as SubagentPresetT,
-    ) ?? subagentPresetAvailabilityLabel(candidate.availability, t as unknown as SubagentPresetT)
-  );
+  return subagentPresetCandidateState(candidate, t);
 }
 
 function schedulerCandidateStatusVariant(
   candidate: AutoSubagentPresetCandidateScore,
 ): 'success' | 'warning' | 'danger' | 'neutral' {
-  if (candidate.availability === 'healthy') return 'success';
-  if (candidate.availability === 'circuit_open') return 'danger';
-  if (candidate.availability === 'quota_below_floor') return 'warning';
+  if (!candidate.roleScores) return 'neutral';
+  if (candidate.availability === 'healthy') return candidate.fallbackRoleCount ? 'warning' : 'success';
+  if (candidate.availability === 'circuit_open' || candidate.availability === 'unavailable') return 'danger';
+  if (candidate.availability === 'quota_below_floor' || candidate.availability === 'partial') return 'warning';
   return 'neutral';
 }
 
@@ -331,6 +334,9 @@ const schedulerPolicy = computed<Partial<AutoSubagentPresetPolicySnapshot>>(() =
   return {
     quotaFloorPercent: autoPreset?.quotaFloorPercent,
     switchMarginPercent: autoPreset?.switchMarginPercent,
+    resetPriorityWindowMs: autoPreset?.resetPriorityWindowMs,
+    resetPriorityExponent: autoPreset?.resetPriorityExponent,
+    resetPriorityMaxBonus: autoPreset?.resetPriorityMaxBonus,
     localUsageWindowMs: autoPreset?.localUsageWindowMs,
     localUsageWeightPercent: autoPreset?.localUsageWeightPercent,
     priorityWeightPercent: autoPreset?.priorityWeightPercent,
@@ -339,11 +345,17 @@ const schedulerPolicy = computed<Partial<AutoSubagentPresetPolicySnapshot>>(() =
     switchCooldownMs: autoPreset?.switchCooldownMs,
     circuitBreakerFailureThreshold: autoPreset?.circuitBreakerFailureThreshold,
     circuitBreakerCooldownMs: autoPreset?.circuitBreakerCooldownMs,
+    deepseekAvoidPeakHours: autoPreset?.deepseekAvoidPeakHours,
+    deepseekPeakPolicy: autoPreset?.deepseekPeakPolicy,
+    deepseekPeakPenalty: autoPreset?.deepseekPeakPenalty,
   };
 });
-const schedulerPolicyKeys: Array<keyof AutoSubagentPresetPolicySnapshot> = [
+const schedulerPolicyKeys = [
   'quotaFloorPercent',
   'switchMarginPercent',
+  'resetPriorityWindowMs',
+  'resetPriorityExponent',
+  'resetPriorityMaxBonus',
   'localUsageWindowMs',
   'localUsageWeightPercent',
   'priorityWeightPercent',
@@ -352,7 +364,9 @@ const schedulerPolicyKeys: Array<keyof AutoSubagentPresetPolicySnapshot> = [
   'switchCooldownMs',
   'circuitBreakerFailureThreshold',
   'circuitBreakerCooldownMs',
-];
+  'fallbackPenalty',
+  'meteredFundedResourceScore',
+] as const;
 const schedulerPolicyEntries = computed(() =>
   schedulerPolicyKeys.flatMap((key) => {
     const value = schedulerPolicy.value[key];
@@ -424,7 +438,7 @@ function setDefaultPermissionMode(mode: 'manual' | 'auto' | 'yolo'): void {
 
 function setSubagentPreset(preset: string): void {
   const config = props.config;
-  if (!config || preset === (config.subagent?.preset ?? '')) return;
+  if (!config || props.configSaving || (preset === (config.subagent?.preset ?? '') && presetManualLocked.value)) return;
   emit('activatePreset', preset);
 }
 
@@ -433,11 +447,10 @@ function setAutomaticPresetSwitching(enabled: boolean): void {
   emit('updateConfig', autoSubagentPresetPatch(enabled));
 }
 
-/** Resume automatic switching: minimal patch clearing only the manual lock —
- *  the active preset and the auto gates stay exactly as configured. */
+/** Delegate to the same root action as the desktop and mobile preset menus. */
 function resumeAutoPreset(): void {
-  if (props.configSaving) return;
-  emit('updateConfig', subagentPresetResumeAutoPatch());
+  if (props.configSaving || props.autoPresetControl?.disabledReason) return;
+  emit('resumeAutoPreset');
 }
 
 /** Candidate-priority edits persist only `subagent.autoPreset.candidates`;
@@ -787,6 +800,29 @@ function archiveTime(iso: string): string {
               <span v-if="configSaving" class="saving">{{ t('settings.saving') }}</span>
             </div>
 
+            <div class="row">
+              <span class="rlabel">
+                {{ t('settings.activePreset') }}
+                <span class="hint">{{ autoPresetControl?.disabledReason || t('header.subagentPresetAutoHint') }}</span>
+              </span>
+              <span class="row-actions">
+                <Badge v-if="presetManualLocked" variant="warning" dot>{{ t('header.subagentPresetLocked') }}</Badge>
+                <Badge v-else-if="autoPresetControl?.automatic" variant="info">{{ t('header.subagentPresetAutomatic') }}</Badge>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  :loading="autoPresetControl?.pending"
+                  :disabled="configSaving || !!autoPresetControl?.disabledReason"
+                  @click="resumeAutoPreset"
+                >
+                  {{ autoPresetControl?.pending ? t('header.subagentPresetAutoEvaluating') : autoPresetControl?.label ?? autoSubagentPresetActionLabel(false, presetManualLocked, t) }}
+                </Button>
+              </span>
+            </div>
+            <Banner v-if="autoPresetControl?.feedback" variant="info" role="status" aria-live="polite">
+              {{ autoPresetControl.feedback }}
+            </Banner>
+
             <template v-if="config">
               <div class="row">
                 <span class="rlabel">
@@ -852,26 +888,6 @@ function archiveTime(iso: string): string {
                 />
               </div>
 
-              <div v-if="config.subagent && presetManualLocked" class="row">
-                <span class="rlabel">
-                  {{ t('settings.presetManualLock') }}
-                  <span class="hint">{{ t('settings.presetManualLockHint') }}</span>
-                </span>
-                <span class="row-actions">
-                  <Badge variant="warning" dot>
-                    {{ t('settings.presetManualLocked') }}
-                  </Badge>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    :disabled="configSaving"
-                    @click="resumeAutoPreset"
-                  >
-                    {{ t('settings.presetResumeAuto') }}
-                  </Button>
-                </span>
-              </div>
-
               <div v-if="automaticPresetSwitchingSupported && config.subagent" class="row candidates-row">
                 <span class="rlabel">
                   {{ t('settings.presetCandidates') }}
@@ -935,10 +951,7 @@ function archiveTime(iso: string): string {
                 </div>
               </div>
 
-              <Card
-                v-if="automaticPresetSwitchingSupported && config.subagent"
-                class="scheduler-card"
-              >
+              <Card class="scheduler-card">
                 <template #head>
                   <Icon name="sparkles" size="sm" />
                   <span>{{ t('settings.smartRoutingStatus') }}</span>
@@ -967,76 +980,79 @@ function archiveTime(iso: string): string {
                 <Banner v-if="presetManualLocked" variant="warning">
                   {{ t('settings.smartRoutingManualLock') }}
                 </Banner>
-                <template v-else-if="autoSubagentPresetStatus">
+                <template v-if="autoSubagentPresetStatus">
                   <div class="scheduler-section scheduler-decision">
                     <span class="scheduler-label">{{ t('settings.smartRoutingLatestDecision') }}</span>
                     <strong>{{ schedulerReason }}</strong>
                     <span>{{ schedulerEvaluationContext }}</span>
-                    <span>{{ schedulerCurrent }}</span>
+                    <span class="scheduler-current">{{ schedulerCurrent }}</span>
                     <span>{{ schedulerSelection }}</span>
+                    <span v-if="schedulerActivation" class="scheduler-activation">{{ schedulerActivation }}</span>
                     <Badge v-if="schedulerCooldown" variant="warning" size="sm">
                       {{ schedulerCooldown }}
                     </Badge>
                   </div>
 
-                  <div class="scheduler-section">
-                    <span class="scheduler-label">{{ t('settings.smartRoutingCandidates') }}</span>
-                    <div class="scheduler-candidates">
-                      <div
-                        v-for="candidate in autoSubagentPresetStatus.candidates"
-                        :key="candidate.preset"
-                        class="scheduler-candidate"
-                      >
-                        <div class="scheduler-candidate-head">
-                          <span class="scheduler-candidate-name">{{ candidate.preset }}</span>
-                          <Badge size="sm">{{ schedulerCandidateScore(candidate) }}</Badge>
-                          <Badge
-                            :variant="schedulerCandidateStatusVariant(candidate)"
-                            size="sm"
-                            dot
-                          >
-                            {{ schedulerCandidateStatus(candidate) }}
-                          </Badge>
-                        </div>
-                        <span v-if="candidate.provider" class="scheduler-meta">
-                          {{ t('settings.smartRoutingProvider', { provider: candidate.provider }) }}
-                        </span>
-                        <span class="scheduler-breakdown">
-                          {{ schedulerCandidateBreakdown(candidate) }}
-                        </span>
-                        <span class="scheduler-meta">
-                          {{ schedulerCandidateEvidence(candidate) }}
-                        </span>
-                        <span
-                          v-if="candidate.quotaRemainingPercent !== undefined"
-                          class="scheduler-meta"
-                        >
-                          {{
-                            t('settings.smartRoutingQuota', {
-                              percent: candidate.quotaRemainingPercent.toFixed(1),
-                            })
-                          }}
-                        </span>
-                        <span
-                          v-if="candidate.localEvidence.averageFirstTokenLatencyMs !== undefined"
-                          class="scheduler-meta"
-                        >
-                          {{
-                            t('settings.smartRoutingLatency', {
-                              latency: candidate.localEvidence.averageFirstTokenLatencyMs.toFixed(0),
-                            })
-                          }}
-                        </span>
+                </template>
+                <Banner v-else>{{ t('settings.smartRoutingNoEvaluation') }}</Banner>
+
+                <div class="scheduler-section">
+                  <span class="scheduler-label">{{ t('settings.smartRoutingCandidates') }}</span>
+                  <div class="scheduler-candidates">
+                    <div v-for="row in schedulerRows" :key="row.preset" class="scheduler-candidate">
+                      <div class="scheduler-candidate-head">
+                        <span class="scheduler-candidate-name">{{ row.preset }}</span>
+                        <Badge size="sm">{{ subagentPresetTotals(row.candidate, t) }}</Badge>
+                        <span v-if="!row.configured" class="scheduler-meta scheduler-removed">{{ t('settings.smartRoutingRemovedPreset') }}</span>
+                        <Badge v-else size="sm" :variant="row.participating ? 'info' : 'neutral'">{{ subagentPresetParticipationLabel(row.participating, t) }}</Badge>
+                        <Badge v-if="row.candidate" :variant="schedulerCandidateStatusVariant(row.candidate)" size="sm" dot>{{ schedulerCandidateStatus(row.candidate) }}</Badge>
                       </div>
+                      <template v-if="row.candidate">
+                        <template v-if="row.candidate.roleScores">
+                          <span class="scheduler-meta">{{ subagentPresetRoleCounts(row.candidate, t) }}</span>
+                          <span class="scheduler-meta">{{ subagentPresetCoverageLabel(row.candidate, t) }}</span>
+                          <span v-if="subagentPresetPeakSummary(row.candidate, t)" class="scheduler-meta">{{ subagentPresetPeakSummary(row.candidate, t) }}</span>
+                          <span v-if="(row.candidate.contributions.peakPenalty ?? 0) > 0" class="scheduler-meta">{{ t('settings.presetScoring.peakClamp') }}</span>
+                          <span class="scheduler-meta">{{ schedulerCandidateEvidence(row.candidate) }}</span>
+                          <PresetRoleScores :candidate="row.candidate" :now="schedulerNow" />
+                        </template>
+                        <template v-else>
+                          <span class="scheduler-breakdown">{{ schedulerCandidateBreakdown(row.candidate) }}</span>
+                          <span class="scheduler-meta">{{ schedulerCandidateEvidence(row.candidate) }}</span>
+                        </template>
+                      </template>
+                      <span v-else class="scheduler-meta">{{ t('header.subagentPresetNoData') }}</span>
                     </div>
                   </div>
-                </template>
-                <Banner v-else>
-                  {{ t('settings.smartRoutingNoEvaluation') }}
-                </Banner>
+                </div>
+                <div v-if="schedulerMeteredProviders.length" class="scheduler-section">
+                  <span class="scheduler-label">{{ t('settings.presetScoring.periods') }}</span>
+                  <span class="scheduler-meta">{{ t('settings.meteredLocalNote') }} · {{ t('settings.meteredTimezone') }}</span>
+                  <div v-for="entry in schedulerMeteredProviders" :key="entry.provider" class="scheduler-candidate">
+                    <strong>{{ entry.provider }}</strong>
+                    <span class="scheduler-meta">{{ subagentPresetResourceLabel(entry.resource, locale, t) }}</span>
+                    <template v-if="entry.resource.meteredUsage">
+                      <span v-if="entry.resource.meteredUsage.degraded" class="scheduler-meta">{{ t('settings.meteredDegraded') }}</span>
+                      <div v-for="period in ['today', 'month'] as const" :key="period" class="scheduler-meta">
+                        {{ t('settings.presetScoring.cost', {
+                          period: t(period === 'today' ? 'settings.meteredToday' : 'settings.meteredMonth'),
+                          cost: formatPresetCny(entry.resource.meteredUsage[period].unpricedRequestCount > 0 ? null : entry.resource.meteredUsage[period].estimatedCost, locale, t),
+                          requests: entry.resource.meteredUsage[period].requestCount,
+                          unpriced: entry.resource.meteredUsage[period].unpricedRequestCount,
+                        }) }}
+                        <span v-if="entry.resource.meteredUsage[period].unpricedRequestCount > 0"> · {{ t('settings.presetScoring.unpriced', { cost: formatPresetCny(entry.resource.meteredUsage[period].estimatedCost, locale, t) }) }}</span>
+                        <span v-if="entry.resource.meteredUsage[period].isPartial"> · {{ t('settings.meteredPartial') }}</span>
+                        <span v-if="entry.resource.meteredUsage[period].missingUsageRequestCount"> · {{ t('settings.meteredMissingUsage', { count: entry.resource.meteredUsage[period].missingUsageRequestCount }) }}</span>
+                        <span v-if="entry.resource.meteredUsage[period].pendingRequestCount"> · {{ t('settings.meteredPending', { count: entry.resource.meteredUsage[period].pendingRequestCount }) }}</span>
+                      </div>
+                    </template>
+                    <span v-else class="scheduler-meta">{{ t('settings.presetScoring.usageUnknown') }}</span>
+                  </div>
+                </div>
 
                 <div class="scheduler-section">
                   <span class="scheduler-label">{{ t('settings.smartRoutingPolicy') }}</span>
+                  <span v-if="subagentPresetPeakPolicyLabel(schedulerPolicy, t)" class="scheduler-meta">{{ t(autoSubagentPresetStatus ? 'settings.presetScoring.peakEvaluation' : 'settings.presetScoring.peakConfigured') }} · {{ subagentPresetPeakPolicyLabel(schedulerPolicy, t) }}</span>
                   <div v-if="schedulerPolicyEntries.length > 0" class="scheduler-policy">
                     <div
                       v-for="entry in schedulerPolicyEntries"
@@ -1508,14 +1524,13 @@ function archiveTime(iso: string): string {
   gap: var(--space-2);
 }
 .scheduler-candidate-name {
-  flex: 1 1 0;
+  flex: 0 0 100%;
   min-width: 0;
-  overflow: hidden;
   color: var(--color-text);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .scheduler-breakdown {
   color: var(--color-text-muted);

@@ -6,8 +6,10 @@
  * back (unknown versions and malformed records are skipped), the fold that
  * joins records by `runId` while preserving started-only incomplete runs, and
  * the `IAgentRunUsageService` that appends records, exposes read-only
- * iteration plus the folded read, and announces newly completed live runs
- * through `onDidFinishRun`. Records carry token usage, duration, role,
+ * iteration plus the folded read, and announces live starts/completions through
+ * `onDidStartRun` / `onDidFinishRun`. Start notifications are synchronous live
+ * facts, not replayed by ledger reads; persisted v1 records remain unchanged.
+ * Records carry token usage, duration, role,
  * model alias, thinking effort, the active `[subagent]` preset, result status,
  * and optional aggregate LLM request count / first-token latency only — never
  * prompts, summaries, tool arguments, paths, error messages, or user content —
@@ -68,6 +70,7 @@ export interface AgentRunUsageEntry {
 export interface IAgentRunUsageService {
   readonly _serviceBrand: undefined;
 
+  readonly onDidStartRun: Event<AgentRunUsageStartedRecord>;
   readonly onDidFinishRun: Event<AgentRunUsageEntry>;
   appendStarted(record: AgentRunUsageStartedRecord): void;
   appendFinished(record: AgentRunUsageFinishedRecord): void;

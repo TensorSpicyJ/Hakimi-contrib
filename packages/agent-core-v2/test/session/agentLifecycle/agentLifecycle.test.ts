@@ -16,6 +16,9 @@ import { type ISessionScopeHandle } from '#/_base/di/scope';
 import { TestInstantiationService } from '#/_base/di/test';
 import { Event } from '#/_base/event';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import '#/agent/contextMemory/contextMemoryService';
+import '#/agent/tokenCounting/tokenCountingService';
 import '#/agent/profile/profileService';
 import { profileBind } from '#/agent/profile/profileOps';
 import { TOWER_WORKER_PROFILE } from '#/features/tower/tower';
@@ -47,6 +50,7 @@ import { ISessionCronService } from '#/session/cron/sessionCronService';
 import '#/agent/toolDedupe/toolDedupeService';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
+import { IFlagService } from '#/app/flag/flag';
 import '#/app/event/eventBusService';
 import { IAgentBlobService } from '#/agent/blob/agentBlobService';
 import { IAgentPluginService } from '#/agent/plugin/agentPlugin';
@@ -55,7 +59,7 @@ import { IPluginService } from '#/app/plugin/plugin';
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
-import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
 import { createWireMetadataRecord, type WireRecord } from '#/wire/record';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentLoopService } from '#/agent/loop/loop';
@@ -80,6 +84,7 @@ import {
 } from '#/workspace/workspaceInstance/workspaceInstanceManager';
 import type { OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
+import { stubFlag } from '../../app/flag/stubs';
 
 const noopLog = {
   _serviceBrand: undefined,
@@ -162,6 +167,31 @@ function stubBlobPassThrough(ix: TestInstantiationService): void {
   } satisfies IAgentBlobService);
 }
 
+/** Replaces the session-metadata stub with one holding the given agent records. */
+function stubPersistedAgents(
+  ix: TestInstantiationService,
+  agents: Readonly<Record<string, AgentMeta>>,
+  registerAgentImpl: ISessionMetadata['registerAgent'] = async () => {},
+): void {
+  ix.stub(ISessionMetadata, {
+    _serviceBrand: undefined,
+    ready: Promise.resolve(),
+    onDidChangeMetadata: () => ({ dispose: () => {} }),
+    read: () =>
+      Promise.resolve({
+        id: 'sess_test',
+        createdAt: 0,
+        updatedAt: 0,
+        archived: false,
+        agents,
+      }),
+    update: () => Promise.resolve(),
+    setTitle: () => Promise.resolve(),
+    setArchived: () => Promise.resolve(),
+    registerAgent: registerAgentImpl,
+  });
+}
+
 describe('AgentLifecycleService', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
@@ -232,6 +262,7 @@ describe('AgentLifecycleService', () => {
       additionalDirs: [],
     } as unknown as ISessionWorkspaceContext);
     ix.stub(IPluginService, pluginServiceStub);
+    ix.stub(IFlagService, stubFlag());
     ix.stub(IConfigService, {
       ready: Promise.resolve(),
       get: (() => undefined) as IConfigService['get'],
@@ -488,26 +519,14 @@ describe('AgentLifecycleService', () => {
   });
 
   it('create skips auto ids that collide with agents persisted by a previous run', async () => {
-    ix.stub(ISessionMetadata, {
-      _serviceBrand: undefined,
-      ready: Promise.resolve(),
-      onDidChangeMetadata: () => ({ dispose: () => {} }),
-      read: () =>
-        Promise.resolve({
-          id: 'sess_test',
-          createdAt: 0,
-          updatedAt: 0,
-          archived: false,
-          agents: {
-            'agent-0': { homedir: '/tmp/kimi-agentLifecycle-test/agents/agent-0', type: 'sub' },
-            'agent-1': { homedir: '/tmp/kimi-agentLifecycle-test/agents/agent-1', type: 'sub' },
-          },
-        }),
-      update: () => Promise.resolve(),
-      setTitle: () => Promise.resolve(),
-      setArchived: () => Promise.resolve(),
+    stubPersistedAgents(
+      ix,
+      {
+        'agent-0': { homedir: '/tmp/kimi-agentLifecycle-test/agents/agent-0', type: 'sub' },
+        'agent-1': { homedir: '/tmp/kimi-agentLifecycle-test/agents/agent-1', type: 'sub' },
+      },
       registerAgent,
-    });
+    );
     const svc = ix.get(IAgentLifecycleService);
 
     const first = await svc.create({});
@@ -515,6 +534,160 @@ describe('AgentLifecycleService', () => {
 
     const second = await svc.create({});
     expect(second.id).toBe('agent-3');
+  });
+
+  it('restore materializes an agent persisted by a previous run, keeping its record and history', async () => {
+    const persisted: AgentMeta = {
+      homedir: '/tmp/kimi-agentLifecycle-home/sessions/ws_test/sess_test/agents/agent-7',
+      type: 'sub',
+      parentAgentId: 'main',
+      forkedFrom: 'agent-3',
+      labels: { parentAgentId: 'main', swarmItem: 'item-2' },
+    };
+    stubPersistedAgents(ix, { 'agent-7': persisted }, registerAgent);
+    ix.stub(
+      IAppendLogStore,
+      recordingAppendLog([
+        createWireMetadataRecord(1),
+        {
+          type: 'profile.bind',
+          profileName: 'explore',
+          modelAlias: 'mock-model',
+          thinkingEffort: 'high',
+          systemPrompt: 'explore prompt',
+          disallowedTools: [],
+          time: 2,
+        },
+        {
+          type: 'context.append_message',
+          message: { role: 'user', content: [{ type: 'text', text: 'earlier work' }], toolCalls: [] },
+          time: 3,
+        },
+      ]).store,
+    );
+    const svc = ix.get(IAgentLifecycleService);
+    expect(svc.get('agent-7')).toBeUndefined();
+
+    const restored = await svc.restore('agent-7');
+
+    expect(restored?.id).toBe('agent-7');
+    expect(svc.get('agent-7')).toBe(restored);
+    expect(svc.list().map((agent) => agent.id)).toEqual(['agent-7']);
+    // The persisted record is reused verbatim, so labels, parentage and fork
+    // provenance survive the restore.
+    expect(registerAgent).toHaveBeenCalledWith('agent-7', persisted);
+    // The wire journal is replayed onto the restored scope: profile and the
+    // prior conversation both come back.
+    expect(restored!.accessor.get(IAgentProfileService).data()).toMatchObject({
+      profileName: 'explore',
+      modelAlias: 'mock-model',
+      thinkingLevel: 'high',
+    });
+    expect(restored!.accessor.get(IAgentContextMemoryService).get()).toHaveLength(1);
+  });
+
+  it('restore does not materialize an id the session has no record of', async () => {
+    stubPersistedAgents(ix, {}, registerAgent);
+    const svc = ix.get(IAgentLifecycleService);
+
+    await expect(svc.restore('agent-404')).resolves.toBeUndefined();
+
+    expect(svc.list()).toEqual([]);
+    expect(registerAgent).not.toHaveBeenCalled();
+  });
+
+  it('restore returns a live agent as-is', async () => {
+    stubPersistedAgents(
+      ix,
+      { 'agent-7': { homedir: '/tmp/kimi-agentLifecycle-test/agents/agent-7', type: 'sub' } },
+      registerAgent,
+    );
+    const svc = ix.get(IAgentLifecycleService);
+    const created = await svc.create({ agentId: 'agent-7' });
+
+    await expect(svc.restore('agent-7')).resolves.toBe(created);
+
+    expect(svc.list()).toEqual([created]);
+  });
+
+  it('restore joins concurrent restores of one id into a single materialization', async () => {
+    stubPersistedAgents(
+      ix,
+      { 'agent-7': { homedir: '/tmp/kimi-agentLifecycle-test/agents/agent-7', type: 'sub' } },
+      registerAgent,
+    );
+    const svc = ix.get(IAgentLifecycleService);
+
+    const [first, second] = await Promise.all([svc.restore('agent-7'), svc.restore('agent-7')]);
+
+    expect(first).toBe(second);
+    expect(svc.list()).toEqual([first]);
+  });
+
+  it('refuses to materialize an agent while its removal is still draining', async () => {
+    stubPersistedAgents(
+      ix,
+      { 'agent-7': { homedir: '/tmp/kimi-agentLifecycle-test/agents/agent-7', type: 'sub' } },
+      registerAgent,
+    );
+    let releaseRemoval!: () => void;
+    const removalBlocked = new Promise<void>((resolve) => {
+      releaseRemoval = resolve;
+    });
+    loopSettled.mockImplementationOnce(() => removalBlocked);
+    const svc = ix.get(IAgentLifecycleService);
+    const created = await svc.create({ agentId: 'agent-7' });
+    expect(registerAgent).toHaveBeenCalledTimes(1);
+
+    const removing = svc.remove('agent-7');
+
+    await expect(svc.restore('agent-7')).rejects.toThrow('is being removed');
+    await expect(svc.create({ agentId: 'agent-7' })).rejects.toThrow('is being removed');
+    expect(svc.list()).toEqual([]);
+    expect(registerAgent).toHaveBeenCalledTimes(1);
+
+    releaseRemoval();
+    await removing;
+    expect(svc.get('agent-7')).toBeUndefined();
+    expect(created.id).toBe('agent-7');
+  });
+
+  it('refuses to join an in-flight bootstrap once the agent is being removed', async () => {
+    stubPersistedAgents(
+      ix,
+      { 'agent-7': { homedir: '/tmp/kimi-agentLifecycle-test/agents/agent-7', type: 'sub' } },
+      registerAgent,
+    );
+    let releaseBootstrap!: () => void;
+    const bootstrapBlocked = new Promise<void>((resolve) => {
+      releaseBootstrap = resolve;
+    });
+    registerAgent.mockImplementationOnce(() => bootstrapBlocked);
+    let releaseRemoval!: () => void;
+    const removalBlocked = new Promise<void>((resolve) => {
+      releaseRemoval = resolve;
+    });
+    loopSettled.mockImplementationOnce(() => removalBlocked);
+    const svc = ix.get(IAgentLifecycleService);
+
+    const creating = svc.create({ agentId: 'agent-7' });
+    // The handle is published before its bootstrap finishes.
+    expect(svc.get('agent-7')).toBeDefined();
+    const removing = svc.remove('agent-7');
+
+    const restoreRefusal = expect(svc.restore('agent-7')).rejects.toThrow('is being removed');
+    const createRefusal = expect(svc.create({ agentId: 'agent-7' })).rejects.toThrow(
+      'is being removed',
+    );
+
+    releaseBootstrap();
+    await creating.catch(() => undefined);
+    await restoreRefusal;
+    await createRefusal;
+
+    releaseRemoval();
+    await removing;
+    expect(svc.get('agent-7')).toBeUndefined();
   });
 
   it('seeds each agent scope with a telemetry view bound to its own agent id', async () => {

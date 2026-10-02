@@ -49,7 +49,7 @@ import { AgentToolExecutorService } from '#/agent/toolExecutor/toolExecutorServi
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { AgentToolRegistryService } from '#/agent/toolRegistry/toolRegistryService';
 import { DYNAMIC_TOOL_SCHEMA_VARIANT, LOADABLE_TOOLS_VARIANT } from '#/agent/toolSelect/dynamicTools';
-import { TOOL_SELECT_FLAG_ID } from '#/agent/toolSelect/flag';
+import { TOOL_CATALOG_FLAG_ID, TOOL_SELECT_FLAG_ID } from '#/agent/toolSelect/flag';
 import { IAgentToolSelectService, SELECT_TOOLS_TOOL_NAME } from '#/agent/toolSelect/toolSelect';
 import { IAgentToolSelectAnnouncementsService } from '#/agent/toolSelect/toolSelectAnnouncements';
 import { AgentToolSelectAnnouncementsService } from '#/agent/toolSelect/toolSelectAnnouncementsService';
@@ -57,6 +57,8 @@ import { IAgentToolSelectSchemasService } from '#/agent/toolSelect/toolSelectSch
 import { AgentToolSelectSchemasService } from '#/agent/toolSelect/toolSelectSchemasService';
 import { AgentToolSelectService } from '#/agent/toolSelect/toolSelectService';
 import { SelectToolsTool } from '#/agent/tools/select-tools/selectToolsTool';
+import { ISelectToolsTool } from '#/agent/tools/select-tools/select-tools';
+import { IAgentStateService } from '#/agent/state/agentState';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IWireService } from '#/wire/wire';
 import { registerLogServices } from '../../_base/log/stubs';
@@ -81,6 +83,7 @@ const REQUIRED_PAYLOAD_PARAMETERS = {
 let disposables: DisposableStore;
 let capabilities: ModelCapability;
 let flagEnabled: boolean;
+let catalogEnabled: boolean;
 let activeToolNames: ReadonlySet<string> | undefined;
 let disclosureToolActive: boolean;
 
@@ -88,6 +91,7 @@ beforeEach(() => {
   disposables = new DisposableStore();
   capabilities = makeCapabilities({ tool_use: true, dynamically_loaded_tools: true });
   flagEnabled = false;
+  catalogEnabled = false;
   activeToolNames = undefined;
   disclosureToolActive = true;
 });
@@ -217,6 +221,7 @@ class FakeLoopService implements IAgentLoopService {
   readonly hooks: IAgentLoopService['hooks'] = {
     onWillBeginStep: new OrderedHookSlot<BeforeStepContext>(),
     onDidFinishStep: new OrderedHookSlot<AfterStepContext>(),
+    onWillCompleteTurn: new OrderedHookSlot(),
   };
 
   cancelFromUser(): void {}
@@ -328,12 +333,13 @@ function registerSharedServices(
     isToolActiveForDisclosure: () => disclosureToolActive,
   });
   reg.definePartialInstance(IFlagService, {
-    enabled: (id: string) => (id === TOOL_SELECT_FLAG_ID ? flagEnabled : false),
+    enabled: (id: string) => id === TOOL_CATALOG_FLAG_ID ? catalogEnabled : id === TOOL_SELECT_FLAG_ID ? flagEnabled : false,
   });
   reg.defineInstance(IWireService, stubWire());
   reg.define(IAgentContextInjectorService, AgentContextInjectorService);
   reg.define(IAgentToolRegistryService, AgentToolRegistryService);
   reg.define(IAgentToolSelectService, AgentToolSelectService);
+  reg.define(ISelectToolsTool, SelectToolsTool);
   reg.define(IAgentToolSelectAnnouncementsService, AgentToolSelectAnnouncementsService);
   reg.define(IAgentToolSelectSchemasService, AgentToolSelectSchemasService);
   reg.define(IAgentSystemReminderService, AgentSystemReminderService);
@@ -488,6 +494,197 @@ async function execute(
   return results;
 }
 
+describe('ordinary tool catalog', () => {
+  beforeEach(() => {
+    catalogEnabled = true;
+    capabilities = makeCapabilities({ tool_use: true });
+  });
+
+  it('keeps common workspace tools eager while other builtins remain loadable', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('Read'));
+    registerBuiltin(h, new EchoTool('apply_patch'));
+    registerBuiltin(h, new EchoTool('CronList'));
+    registerBuiltin(h, new EchoTool(SELECT_TOOLS_TOOL_NAME));
+
+    expect(new Set(h.sut.shapeTools(h.registry.list()).map((tool) => tool.name))).toEqual(new Set(['Read', 'apply_patch', 'select_tools']));
+    expect(h.sut.loadableToolsAnnouncement()).toContain('<tools_added>\nCronList\n</tools_added>');
+    expect(h.sut.load(['CronList'])).toEqual({ toLoad: ['CronList'], alreadyAvailable: [], unknown: [] });
+    expect(h.sut.shapeTools(h.registry.list()).find((tool) => tool.name === 'CronList')).toMatchObject({ description: 'Echo input text.' });
+    expect(h.sut.shapeTools(h.registry.list()).find((tool) => tool.name === 'CronList')?.deferred).toBeUndefined();
+    expect(h.sut.load(['Read'])).toEqual({ toLoad: [], alreadyAvailable: ['Read'], unknown: [] });
+  });
+
+  it('preserves the loaded ledger while removing schema-only messages from the provider history', async () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('CronList'));
+    await announce(h);
+    h.sut.load(['CronList']);
+    await declareSchemas(h);
+
+    const projected = h.sut.shapeHistory(h.contextMemory.history);
+    expect(projected.some((message) => message.tools !== undefined)).toBe(false);
+    expect(projected.map(announcementText).join('\n')).toContain('<tools_added>\nCronList');
+    expect(h.contextMemory.history.some((message) => message.tools?.some((tool) => tool.name === 'CronList'))).toBe(true);
+    expect(h.sut.load(['CronList']).alreadyAvailable).toEqual(['CronList']);
+  });
+
+  it('recovers selected tools from restored history without another selection', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('CronList'));
+    h.contextMemory.history.push(structuredClone(schemaMessage('CronList')));
+
+    expect(h.sut.shapeTools(h.registry.list()).map((tool) => tool.name)).toEqual(['CronList']);
+    expect(h.sut.load(['CronList']).alreadyAvailable).toEqual(['CronList']);
+  });
+
+  it('requires selection again when compaction removes the loaded schema history', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('CronList'));
+    h.contextMemory.history.push(schemaMessage('CronList'));
+    h.sut.load(['CronList']);
+    h.contextMemory.history.length = 0;
+    h.eventBus.emit('compaction.completed');
+
+    expect(h.sut.shapeTools(h.registry.list())).toEqual([]);
+    expect(h.sut.loadableToolsAnnouncement()).toContain('CronList');
+  });
+
+  it('excludes disabled tools even when restored history previously loaded them', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('CronList'));
+    h.contextMemory.history.push(schemaMessage('CronList'));
+    activeToolNames = new Set(['Read']);
+
+    expect(h.sut.shapeTools(h.registry.list())).toEqual([]);
+    expect(h.sut.load(['CronList'])).toEqual({ toLoad: [], alreadyAvailable: [], unknown: ['CronList'] });
+  });
+
+  it('keeps tools eager when the catalog loader is explicitly disabled', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('CronList'));
+    registerBuiltin(h, new EchoTool(SELECT_TOOLS_TOOL_NAME));
+    disclosureToolActive = false;
+
+    expect(h.sut.enabled()).toBe(false);
+    expect(h.sut.shapeTools(h.registry.list()).map((tool) => tool.name)).toEqual(['CronList']);
+  });
+
+  it('does not activate when the bound model cannot call tools', () => {
+    const h = createHarness();
+    capabilities = makeCapabilities({ tool_use: false });
+    expect(h.sut.enabled()).toBe(false);
+  });
+
+  it('announces catalog changes at the next step without repeating unchanged entries', async () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('CronList'));
+    await announce(h);
+    registerBuiltin(h, new EchoTool('GetGoal'));
+
+    expect(await announce(h, 2)).toContain('<tools_added>\nGetGoal\n</tools_added>');
+    expect(await announce(h, 3)).toBeUndefined();
+  });
+
+  it('requires selection before executing a deferred builtin', async () => {
+    const h = createExecutorHarness();
+    const tool = new EchoTool('CronList');
+    registerBuiltin(h, tool);
+
+    const blocked = await execute(h, toolCall('before_selection', 'CronList'));
+    expect(blocked[0]?.result).toMatchObject({ isError: true, output: expect.stringContaining('select_tools') });
+    expect(tool.calls).toBe(0);
+
+    h.sut.load(['CronList']);
+    await execute(h, toolCall('after_selection', 'CronList'));
+    expect(tool.calls).toBe(1);
+  });
+
+  it('announces bounded purposes and only refreshes a changed purpose', async () => {
+    const h = createHarness();
+    const tool = new EchoTool('CronList');
+    Object.defineProperty(tool, 'description', { value: 'List scheduled tasks.\n\n' + 'Details '.repeat(200) });
+    registerBuiltin(h, tool);
+    const first = await announce(h);
+    expect(first).toContain('"purpose":"List scheduled tasks."');
+    expect(first).not.toContain('Details');
+    expect(await announce(h, 2)).toBeUndefined();
+
+    registerBuiltin(h, new EchoTool('CronList'));
+    const changed = await announce(h, 3);
+    expect(changed).toContain('"purpose":"Echo input text."');
+    expect(changed).not.toContain('<tools_added>');
+    expect(await announce(h, 4)).toBeUndefined();
+  });
+
+  it('adds purposes to restored name-only history and rediscovers after compaction', async () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('CronList'));
+    h.contextMemory.landAnnouncement('<tools_added>\nCronList\n</tools_added>');
+    const resumed = await announce(h);
+    expect(resumed).toContain('"name":"CronList","purpose":"Echo input text."');
+    expect(resumed).not.toContain('<tools_added>');
+    h.contextMemory.clear();
+    const compacted = await announceAfterCompaction(h);
+    expect(compacted).toContain('<tools_added>\nCronList\n</tools_added>');
+    expect(compacted).toContain('"purpose":"Echo input text."');
+  });
+
+  it('offers the current permitted catalog after a stale selection fails', async () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('CronList'));
+    registerMcp(h, new StubMcpTool(MCP_BETA));
+    activeToolNames = new Set(['CronList']);
+    await announce(h);
+    const execution = await h.ix.get(ISelectToolsTool).resolveExecution({ names: [MCP_GONE] });
+    if (execution.isError === true) throw new Error('expected runnable selection');
+    const result = await execution.execute({ turnId: 1, toolCallId: 'select-stale', signal: new AbortController().signal });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain('<tools_added>\nCronList\n</tools_added>');
+    expect(result.output).toContain('"purpose":"Echo input text."');
+    expect(result.output).not.toContain(MCP_BETA);
+  });
+
+  it('does not report a disconnected loaded tool as available and recovers on reconnection', async () => {
+    const h = createHarness();
+    const registration = registerMcp(h, new StubMcpTool(MCP_ALPHA));
+    h.sut.load([MCP_ALPHA]);
+    await declareSchemas(h);
+    registration.dispose();
+    expect(h.sut.load([MCP_ALPHA])).toEqual({ toLoad: [], alreadyAvailable: [], unknown: [MCP_ALPHA] });
+    expect(h.sut.shapeTools(h.registry.list())).toEqual([]);
+    registerMcp(h, new StubMcpTool(MCP_ALPHA));
+    expect(h.sut.load([MCP_ALPHA]).alreadyAvailable).toEqual([MCP_ALPHA]);
+    expect(h.sut.shapeTools(h.registry.list()).map((entry) => entry.name)).toEqual([MCP_ALPHA]);
+  });
+
+  it('withholds pending schemas when permissions change before the next boundary', async () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('CronList'));
+    h.sut.load(['CronList']);
+    activeToolNames = new Set();
+    expect(await declareSchemas(h)).toBeUndefined();
+    expect(h.sut.shapeTools(h.registry.list())).toEqual([]);
+    activeToolNames = undefined;
+    expect((await declareSchemas(h, 2))?.tools?.map((tool) => tool.name)).toEqual(['CronList']);
+  });
+
+  it('publishes only mode and counts for inspection without adding them to model history', () => {
+    const h = createHarness();
+    registerBuiltin(h, new EchoTool('Read'));
+    registerBuiltin(h, new EchoTool('CronList'));
+    expect(h.sut.diagnostics()).toEqual({
+      mode: 'catalog', activeToolCount: 2, visibleToolCount: 1,
+      loadableToolCount: 1, loadedToolCount: 0, pendingToolCount: 0,
+    });
+    h.sut.load(['CronList']);
+    expect(h.sut.diagnostics()).toMatchObject({ visibleToolCount: 2, loadedToolCount: 1, pendingToolCount: 1 });
+    const diagnostics = h.ix.get(IAgentStateService).snapshot()['toolSelect.diagnostics'];
+    expect(JSON.stringify(diagnostics)).not.toMatch(/Read|CronList|Echo/);
+    expect(h.contextMemory.get()).toEqual([]);
+  });
+});
+
 describe('AgentToolSelectService gate', () => {
   it('opens only when dynamically_loaded_tools capability, tool_use capability and flag are all on', () => {
     flagEnabled = true;
@@ -517,6 +714,27 @@ describe('AgentToolSelectService gate', () => {
 });
 
 describe('AgentToolSelectService S0 baseline (gate closed)', () => {
+  it.each([false, true])('retains text input formats through registry and disclosure with flag=%s', (enabled) => {
+    flagEnabled = enabled;
+    const h = createHarness();
+    const inputFormat = { type: 'text', grammar: { syntax: 'lark', definition: 'start: /.+/' } } as const;
+    h.registry.register({
+      name: 'text_edit', description: 'Edit text.', parameters: {}, inputFormat,
+      resolveExecution: () => ({ approvalRule: 'text_edit', execute: async () => ({ output: 'ok' }) }),
+    }, { source: 'user', disclosure: 'deferred' });
+    if (enabled) h.sut.load(['text_edit']);
+    expect(h.sut.shapeTools(h.registry.list())).toMatchObject([{
+      name: 'text_edit',
+      inputFormat: { type: 'text', grammar: { syntax: 'lark', definition: 'start: /.+/' } },
+    }]);
+    if (enabled) {
+      expect(h.sut.drainPendingToolSchemas()).toEqual([{
+        name: 'text_edit', description: 'Edit text.', parameters: {},
+        inputFormat: { type: 'text', grammar: { syntax: 'lark', definition: 'start: /.+/' } },
+      }]);
+    }
+  });
+
   it('shapeTools returns the identical array when dynamically_loaded_tools is absent', () => {
     const h = createHarness();
     registerBuiltin(h, new EchoTool());

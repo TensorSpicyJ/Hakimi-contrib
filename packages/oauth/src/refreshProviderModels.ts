@@ -29,6 +29,11 @@ import {
   getOpenPlatformById,
   isOpenPlatformId,
 } from './open-platform';
+import {
+  getMissingOpenAICodexModels,
+  isOpenAICodexCatalogSynced,
+  OPENAI_CODEX_PROVIDER_NAME,
+} from './openai-codex';
 import { isRecord } from './utils';
 
 /**
@@ -363,8 +368,10 @@ function pickDefaultModel(
 
 /**
  * Refresh remote model metadata for the configured providers and persist any
- * changes through the host. Handles five provider kinds, in order:
+ * changes through the host. Handles six provider kinds, in order:
  *
+ *  0. Managed OpenAI Codex (OAuth) — offline additive backfill of the
+ *     built-in catalog; no network, no credential reads, nothing removed.
  *  1. Managed Kimi Code (OAuth) — `GET /models` against the runtime endpoint.
  *  2. Open platforms (moonshot-cn, moonshot-ai, …) — platform catalog fetch.
  *  2.5. DeepSeek official providers — OpenAI-compatible `GET /models`, with
@@ -393,6 +400,40 @@ export async function refreshProviderModels(
   const targetId = options.providerId;
 
   let config = await host.getConfig();
+
+  // ---------------------------------------------------------------------------
+  // 0. Managed OpenAI Codex (OAuth catalog) — additive, offline backfill
+  // ---------------------------------------------------------------------------
+  // Use the bundled catalog without authentication or remote discovery.
+  // Existing aliases and provider preferences win; no defaults are changed.
+  const codexProvider = readProvider(config, OPENAI_CODEX_PROVIDER_NAME);
+  const codexWanted = targetId === undefined || targetId === OPENAI_CODEX_PROVIDER_NAME;
+  if (codexWanted && codexProvider !== undefined) {
+    try {
+      if (isOpenAICodexCatalogSynced(codexProvider)) {
+        const missing = getMissingOpenAICodexModels(config);
+        if (Object.keys(missing).length === 0) {
+          unchanged.push(OPENAI_CODEX_PROVIDER_NAME);
+        } else {
+          config = await host.setConfig({
+            providers: config.providers,
+            models: { ...config.models, ...missing },
+          });
+          changed.push({
+            providerId: OPENAI_CODEX_PROVIDER_NAME,
+            providerName: 'OpenAI Codex',
+            added: Object.keys(missing).length,
+            removed: 0,
+          });
+        }
+      }
+    } catch (error) {
+      failed.push({
+        provider: OPENAI_CODEX_PROVIDER_NAME,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // 1. Managed Kimi Code (OAuth)

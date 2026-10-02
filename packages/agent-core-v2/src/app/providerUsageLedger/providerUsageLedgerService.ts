@@ -15,7 +15,15 @@
  * process restart re-lists from the store. Immutable tracking-start and gap
  * events use independent UUIDs, preventing an older writer from overwriting a
  * newer coverage reset. Queries and graceful disposal await queued writes,
- * without making model generation wait for persistence. App scope.
+ * without making model generation wait for persistence. A query derives a cost
+ * in memory, through the same price resolver the write path uses, for a
+ * completed record whose stored price is absent, and re-derives one stored from
+ * the superseded 2026-09-07 snapshot when a later rate now applies; the stored
+ * document and the cached copy are never rewritten and no attempt is counted
+ * twice. Alias-group queries filter the deduplicated records once and preserve
+ * each member's tracking gaps; a missing tracking start never discards another
+ * member's records or known start, and never establishes complete coverage.
+ * App scope.
  */
 
 import { officialDeepSeekBalanceUrl } from '@moonshot-ai/kimi-code-oauth';
@@ -30,14 +38,11 @@ import type { TokenUsage } from '#/kosong/contract/usage';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 
 import {
-  computeCostNanos,
   endOfShanghaiDay,
   endOfShanghaiMonth,
   formatNanosToCny,
-  isDeepSeekPeak,
-  PRICING_SNAPSHOT_VALID_FROM,
-  PRICING_SNAPSHOT_VERSION,
-  resolveDeepSeekModelKind,
+  LEGACY_PRICING_VERSION,
+  resolveDeepSeekPrice,
   shanghaiYearMonth,
   startOfShanghaiDay,
   startOfShanghaiMonth,
@@ -210,31 +215,43 @@ export class ProviderUsageLedgerService implements IProviderUsageLedgerService {
   }
 
   async getMeteredUsage(
-    providerName: string,
+    providerName: string | readonly string[],
     options?: { readonly signal?: AbortSignal },
   ): Promise<LocalMeteredUsage> {
+    const providerNames = new Set(typeof providerName === 'string' ? [providerName] : providerName);
     const now = Date.now();
     const monthScope = this.monthScope(shanghaiYearMonth(now));
     let records: AttemptRecord[] = [];
-    let tracking: TrackingState = { startedAtEpochMs: null, gapTimes: [] };
+    const tracking: TrackingState[] = [];
     if (options?.signal?.aborted !== true) {
       try {
         await this.settleWrites();
         const keys = await this.atomicDocs.list(monthScope);
         records = await this.readRecords(monthScope, keys);
-        tracking = await this.readTrackingState(providerName);
+        for (const name of providerNames) tracking.push(await this.readTrackingState(name));
       } catch {
         this.degraded = true;
       }
     }
-    const providerRecords = records.filter((record) => record.providerName === providerName);
-    const report = aggregateMeteredUsage(providerRecords, now, this.degraded, tracking.startedAtEpochMs);
+    const providerRecords = records
+      .filter((record) => providerNames.has(record.providerName))
+      .map(recoverAttemptPrice);
+    const trackingStartedAt = tracking.reduce<number | null>((latest, state) => {
+      const time = state.startedAtEpochMs;
+      return time === null ? latest : Math.max(latest ?? time, time);
+    }, null);
+    const report = aggregateMeteredUsage(providerRecords, now, this.degraded, trackingStartedAt);
     const withGaps = (period: MeteredUsagePeriod): MeteredUsagePeriod => {
       const from = Date.parse(period.startAt);
       const to = Date.parse(period.endAt);
       return {
         ...period,
-        isPartial: period.isPartial || tracking.gapTimes.some((time) => time >= from && time < to),
+        isPartial:
+          period.isPartial ||
+          tracking.some(
+            (state) => state.startedAtEpochMs === null ||
+              state.gapTimes.some((time) => time >= from && time < to),
+          ),
       };
     };
     return { ...report, today: withGaps(report.today), month: withGaps(report.month) };
@@ -317,16 +334,10 @@ export class ProviderUsageLedgerService implements IProviderUsageLedgerService {
     start: MeteredAttemptStart,
     usage: TokenUsage | null,
   ): { readonly version: string | null; readonly costNanos: string | null } {
-    if (usage === null || start.startedAtEpochMs < PRICING_SNAPSHOT_VALID_FROM) {
-      return { version: null, costNanos: null };
-    }
-    const kind = resolveDeepSeekModelKind(start.modelName);
-    if (kind === undefined) return { version: null, costNanos: null };
-    const peak = isDeepSeekPeak(start.startedAtEpochMs);
-    return {
-      version: PRICING_SNAPSHOT_VERSION,
-      costNanos: computeCostNanos(kind, peak, usage).toString(),
-    };
+    if (usage === null) return { version: null, costNanos: null };
+    const priced = resolveDeepSeekPrice(start.modelName, start.startedAtEpochMs, usage);
+    if (priced === undefined) return { version: null, costNanos: null };
+    return { version: priced.pricingVersion, costNanos: priced.costNanos.toString() };
   }
 
   private async readRecords(
@@ -385,6 +396,18 @@ export class ProviderUsageLedgerService implements IProviderUsageLedgerService {
   private cacheKey(monthScope: string, attemptId: string): string {
     return `${monthScope}/${attemptId}`;
   }
+}
+
+function recoverAttemptPrice(record: AttemptRecord): AttemptRecord {
+  if (record.outcome === 'started' || record.usage === null) return record;
+  const missingPrice = record.costNanos === null && record.pricingVersion === null;
+  const supersededPrice =
+    record.costNanos !== null && record.pricingVersion === LEGACY_PRICING_VERSION;
+  if (!missingPrice && !supersededPrice) return record;
+  const priced = resolveDeepSeekPrice(record.modelName, record.startedAtEpochMs, record.usage);
+  if (priced === undefined) return record;
+  if (supersededPrice && priced.pricingVersion === record.pricingVersion) return record;
+  return { ...record, pricingVersion: priced.pricingVersion, costNanos: priced.costNanos.toString() };
 }
 
 export function aggregateMeteredUsage(

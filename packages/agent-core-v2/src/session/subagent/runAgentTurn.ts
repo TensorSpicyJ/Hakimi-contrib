@@ -14,7 +14,11 @@
  * contract stays cumulative. `runUsageSince` derives the delta for a run that
  * ended in failure or cancellation. A listener installed before turn launch
  * aggregates request/first-token timing evidence across the initial and any
- * summary-continuation turns into the handle's race-free snapshot.
+ * summary-continuation turns into the handle's race-free snapshot. The
+ * target's services are resolved once, before the first await: the run keeps
+ * its collaborators for its whole lifetime, and a turn that settles while the
+ * agent's scope is being torn down (session close, agent removal) reports its
+ * own outcome instead of failing on a read through the disposed scope.
  *
  * The lifecycle is imperative — the caller awaits the returned `completion`
  * promise. Turn hooks are not used because there is exactly one observer (the
@@ -57,6 +61,13 @@ export interface RunAgentTurnOptions {
   readonly onReady?: () => void;
 }
 
+interface AgentRunServices {
+  readonly loop: IAgentLoopService;
+  readonly prompt: IAgentPromptService;
+  readonly memory: IAgentContextMemoryService;
+  readonly usage: IAgentUsageService | undefined;
+}
+
 export async function runAgentTurn(
   target: IAgentScopeHandle,
   request: AgentRunRequest,
@@ -64,20 +75,24 @@ export async function runAgentTurn(
 ): Promise<AgentRunHandle> {
   options.signal.throwIfAborted();
   const timing = createRunTimingCollector(target);
-  const usage = target.accessor.get(IAgentUsageService);
-  const baseline = usage?.status().total ?? emptyUsage();
-  const promptService = target.accessor.get(IAgentPromptService);
+  const services: AgentRunServices = {
+    loop: target.accessor.get(IAgentLoopService),
+    prompt: target.accessor.get(IAgentPromptService),
+    memory: target.accessor.get(IAgentContextMemoryService),
+    usage: target.accessor.get(IAgentUsageService),
+  };
+  const baseline = services.usage?.status().total ?? emptyUsage();
   let turn: Turn | undefined;
   try {
     turn =
       request.kind === 'prompt'
-        ? await (await promptService.enqueue({ message: {
+        ? await (await services.prompt.enqueue({ message: {
             role: 'user',
             content: [{ type: 'text', text: request.prompt }],
             toolCalls: [],
             origin: AGENT_RUN_PROMPT_ORIGIN,
           } })).launched
-        : await promptService.retry();
+        : await services.prompt.retry();
   } catch (error) {
     timing.dispose();
     throw error;
@@ -92,7 +107,7 @@ export async function runAgentTurn(
     void turn.ready.then(() => options.onReady?.()).catch(() => {});
   }
 
-  const completion = awaitRun(target, turn, options, baseline, timing.track).finally(() =>
+  const completion = awaitRun(services, turn, options, baseline, timing.track).finally(() =>
     timing.dispose(),
   );
   return {
@@ -168,7 +183,7 @@ export function runUsageSince(
 }
 
 async function awaitRun(
-  target: IAgentScopeHandle,
+  services: AgentRunServices,
   turn: Turn,
   options: RunAgentTurnOptions,
   baseline: TokenUsage,
@@ -176,7 +191,7 @@ async function awaitRun(
 ): Promise<AgentRunCompletion> {
   const controller = new AbortController();
   const unlink = linkAbortSignal(options.signal, controller);
-  const loop = target.accessor.get(IAgentLoopService);
+  const loop = services.loop;
   const cancelTurn = (turnToCancel: Turn, reason: unknown): void => {
     loop.cancel(turnToCancel.id, reason);
   };
@@ -185,7 +200,7 @@ async function awaitRun(
     const result = await awaitTurn(turnRef, controller, cancelTurn);
     classifyTurnResult(result);
     const summary = await distillSummary(
-      target,
+      services,
       controller,
       options.summaryPolicy,
       (t) => {
@@ -194,7 +209,7 @@ async function awaitRun(
       },
       cancelTurn,
     );
-    const total = target.accessor.get(IAgentUsageService)?.status().total;
+    const total = services.usage?.status().total;
     if (total === undefined) return { summary };
     return { summary, usage: total, runUsage: subtractUsage(total, baseline) };
   } finally {
@@ -227,20 +242,19 @@ async function awaitTurn(
 }
 
 async function distillSummary(
-  target: IAgentScopeHandle,
+  services: AgentRunServices,
   controller: AbortController,
   policy: AgentProfileSummaryPolicy | undefined,
   setTurn: (turn: Turn) => void,
   cancelTurn: (turn: Turn, reason: unknown) => void,
 ): Promise<string> {
-  const memory = target.accessor.get(IAgentContextMemoryService);
+  const memory = services.memory;
   let summary = latestAssistantText(memory.get());
   if (policy === undefined) return summary;
   if (isSummaryAdequate(summary, policy)) return summary;
 
-  const promptService = target.accessor.get(IAgentPromptService);
   for (let attempt = 0; attempt < policy.retries; attempt++) {
-    const turn = await (await promptService.enqueue({ message: {
+    const turn = await (await services.prompt.enqueue({ message: {
       role: 'user',
       content: [{ type: 'text', text: policy.continuationPrompt }],
       toolCalls: [],

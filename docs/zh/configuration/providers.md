@@ -206,7 +206,11 @@ Hakimi 也可以通过 OpenAI Codex OAuth 供应商使用 ChatGPT 订阅。在 T
 hakimi login --provider openai-codex
 ```
 
-该命令会打开设备授权页面，并生成 `openai-codex/gpt-5.6-sol`、`openai-codex/gpt-5.6-terra`、`openai-codex/gpt-5.6-luna` 和 `openai-codex/gpt-6-astra` 这些 Codex 模型别名。在无法启动浏览器的无头机器或 WSL 环境中，加上 `--no-open`；Hakimi 只打印验证地址和用户码，不尝试打开浏览器。
+该命令会打开设备授权页面，并生成 `openai-codex/gpt-6-sol`、`openai-codex/gpt-6-luna` 和 `openai-codex/gpt-6-astra`，同时保留 `openai-codex/gpt-5.6-sol`、`openai-codex/gpt-5.6-terra` 和 `openai-codex/gpt-5.6-luna` 模型别名。首次通过 CLI 或 TUI 登录 Codex 时，会将默认模型设为 GPT-6 Sol，推理强度设为 `medium`。对于已配置的 Codex OAuth 供应商，启动和刷新模型列表时会自动补齐缺失的内置模型别名，无需读取凭据、访问 OpenAI 或重新登录。已有模型参数、默认模型、Thinking 模式设置和 subagent preset 均保持不变。显式设置 `model_source = "static"` 时，模型列表仍由用户手动管理，不会自动添加条目。
+
+GPT-6 Sol 和 Luna 均支持图片输入，默认推理强度为 `medium`。Sol 提供 `low`、`medium`、`high`、`xhigh`、`max` 和 `ultra`；Luna 提供相同档位，但不支持 `ultra`。两个新别名均采用官方 Codex 目录的默认上下文窗口，即 272,000 token。目录还标注了 872,000 token 的最大上下文窗口，但没有单独列出最大输入或输出大小；Hakimi 不推测这些限制。
+
+在无法启动浏览器的无头机器或 WSL 环境中，加上 `--no-open`；Hakimi 只打印验证地址和用户码，不尝试打开浏览器。
 
 ```sh
 hakimi login --provider openai-codex --no-open

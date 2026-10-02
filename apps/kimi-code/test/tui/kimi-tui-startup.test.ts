@@ -1201,6 +1201,51 @@ describe('KimiTUI startup', () => {
     expect(mountSessionPicker).toHaveBeenCalledTimes(1);
   });
 
+  it('refuses to open the session picker while an approval is pending, and recovers after it is answered', async () => {
+    const session = makeSession({ id: 'ses-current' });
+    const harness = makeHarness(session);
+    const driver = makeDriver(harness, makeStartupInput());
+    const pickerDriver = driver as unknown as {
+      showSessionPicker(): Promise<void>;
+      approvalController: { respond(response: unknown): void };
+    };
+    await expect(driver.init()).resolves.toBe(false);
+
+    // A real pending approval: the handler the TUI registered is parked on the
+    // response, exactly like the engine waiting for the user, and its panel
+    // owns the editor area.
+    const handler = (session.setApprovalHandler as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[0] as (request: unknown) => Promise<unknown>;
+    let settled = false;
+    const pending = handler({
+      toolCallId: 'tc-1',
+      toolName: 'Bash',
+      action: 'run command: ls',
+      display: { kind: 'generic', summary: 'run command: ls' },
+    }).then(() => {
+      settled = true;
+    });
+
+    await pickerDriver.showSessionPicker();
+
+    // Mounting the picker over the panel would leave the request pending with
+    // no panel to answer it (and the engine waiting forever), so the picker
+    // stays closed and the user is told why.
+    expect(driver.state.activeDialog).toBeNull();
+    expect(driver.state.transcriptContainer.render(160).join('\n')).toContain(
+      'Answer the pending approval or question first.',
+    );
+    expect(settled).toBe(false);
+
+    // Answering the parked request restores the normal path: the picker opens
+    // again, so the refusal is transient rather than a dead end.
+    pickerDriver.approvalController.respond({ decision: 'approved' });
+    await pending;
+
+    await pickerDriver.showSessionPicker();
+    expect(driver.state.activeDialog).toBe('session-picker');
+  });
+
   function makePagedListSessionsPage() {
     const firstPage = Array.from({ length: 50 }, (_, index) => ({
       id: `ses-page1-${String(index).padStart(2, '0')}`,
@@ -2534,6 +2579,8 @@ describe('KimiTUI subagent preset changes', () => {
     state: TUIState;
     start(): Promise<void>;
     stop(): Promise<void>;
+    onExit?: (exitCode?: number) => Promise<void>;
+    getBackgroundSessionExitHint(): string | undefined;
   };
 
   function makeEventDriver() {
@@ -2621,6 +2668,86 @@ describe('KimiTUI subagent preset changes', () => {
     try {
       await driver.start();
       expect(harness.createSession).toHaveBeenCalledOnce();
+      await driver.stop();
+    } finally {
+      bannerLoad.mockRestore();
+    }
+  });
+
+  it('reports the background-session exit hint from the real shutdown path', async () => {
+    // The CLI reads the hint inside `onExit`, which the real `stop()` runs
+    // AFTER its shutdown work — including dropping the background entries. This
+    // drives the real order instead of stubbing the getter.
+    const background = makeSession({ id: 'ses-b', summary: { title: 'Port the parser' } });
+    const enableSessionHandoff = vi.fn((options: { onSessionReady: (s: unknown, i: unknown) => void }) => {
+      void options;
+      return true;
+    });
+    const harness = makeHarness(makeSession(), {
+      supportsSessionHandoff: vi.fn(() => true),
+      enableSessionHandoff,
+    });
+    const driver = makeDriver(harness, makeStartupInput()) as unknown as StartDriver;
+    vi.spyOn(driver.state.ui, 'start').mockImplementation(() => {});
+    vi.spyOn(driver.state.ui, 'stop').mockImplementation(() => {});
+    vi.spyOn(driver.state.terminal, 'write').mockImplementation(() => {});
+    vi.spyOn(driver.state.terminal, 'setTitle').mockImplementation(() => {});
+    vi.spyOn(driver.state.terminal, 'drainInput').mockImplementation(async () => {});
+    const bannerLoad = vi.spyOn(BannerProvider.prototype, 'load').mockResolvedValue(null);
+    let hintAtExit: string | undefined;
+    try {
+      await driver.start();
+
+      // Adopt the handed-off session exactly like the engine does, through the
+      // host this TUI registered at startup.
+      const registered = enableSessionHandoff.mock.calls[0]?.[0];
+      expect(registered).toBeDefined();
+      registered?.onSessionReady(background, {
+        sessionId: 'ses-b',
+        workspaceId: 'ws-b',
+        workDir: '/tmp/project-b',
+        sourceSessionId: 'ses-1',
+        sourceWorkDir: '/tmp/proj-a',
+        prompt: 'port the parser',
+      });
+
+      driver.onExit = async () => {
+        hintAtExit = driver.getBackgroundSessionExitHint();
+      };
+      await driver.stop();
+
+      expect(hintAtExit).toBe('Background session will stop with this process: ses-b');
+      // After shutdown the entries are gone, but the snapshot still answers.
+      expect(driver.getBackgroundSessionExitHint()).toBe(
+        'Background session will stop with this process: ses-b',
+      );
+    } finally {
+      bannerLoad.mockRestore();
+    }
+  });
+  it('opts the process in as a cross-project handoff host on start', async () => {
+    const supportsSessionHandoff = vi.fn(() => true);
+    const enableSessionHandoff = vi.fn((options: unknown) => {
+      void options;
+      return true;
+    });
+    const harness = makeHarness(makeSession(), { supportsSessionHandoff, enableSessionHandoff });
+    const driver = makeDriver(harness, makeStartupInput()) as unknown as StartDriver;
+    vi.spyOn(driver.state.ui, 'start').mockImplementation(() => {});
+    vi.spyOn(driver.state.ui, 'stop').mockImplementation(() => {});
+    vi.spyOn(driver.state.terminal, 'write').mockImplementation(() => {});
+    vi.spyOn(driver.state.terminal, 'setTitle').mockImplementation(() => {});
+    vi.spyOn(driver.state.terminal, 'drainInput').mockImplementation(async () => {});
+    const bannerLoad = vi.spyOn(BannerProvider.prototype, 'load').mockResolvedValue(null);
+    try {
+      await driver.start();
+      // Opt-in happens before the first session exists, and the host hands the
+      // target session to the TUI before its first prompt (onSessionReady).
+      expect(enableSessionHandoff).toHaveBeenCalledOnce();
+      expect(enableSessionHandoff.mock.calls[0]![0]).toMatchObject({
+        onSessionReady: expect.any(Function),
+      });
+      expect(driver.getBackgroundSessionExitHint()).toBeUndefined();
       await driver.stop();
     } finally {
       bannerLoad.mockRestore();

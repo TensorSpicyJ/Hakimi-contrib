@@ -148,7 +148,8 @@ describe('Settings Agent automatic Preset switch', () => {
     expect(settingsDialog).toContain('<Card');
     expect(settingsDialog).toContain("t('settings.smartRoutingStatus')");
     expect(settingsDialog).toContain('<Banner v-if="presetManualLocked" variant="warning">');
-    expect(settingsDialog).toContain('v-for="candidate in autoSubagentPresetStatus.candidates"');
+    expect(settingsDialog).toContain('v-for="row in schedulerRows"');
+    expect(settingsDialog).toContain('<PresetRoleScores :candidate="row.candidate" :now="schedulerNow" />');
     expect(settingsDialog).toContain('schedulerPolicyEntries');
   });
 });

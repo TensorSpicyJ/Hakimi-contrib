@@ -1,3 +1,11 @@
+/**
+ * Scenario: Research Mode assembly, restoration, and official Skill availability.
+ *
+ * Exercises the real Feature, scoped mode service, visibility fold, and wire
+ * replay with in-memory catalog and context-injection boundaries.
+ * Run: pnpm --filter @moonshot-ai/agent-core-v2 test test/features/aitpResearch/aitpResearchService.test.ts
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { DisposableStore, toDisposable } from '#/_base/di/lifecycle';
@@ -64,7 +72,13 @@ beforeEach(() => {
 afterEach(() => disposables.dispose());
 
 const emptyContext: ContextInjectionContext = { injectedPositions: [], lastInjectedAt: null, isNewTurn: true };
-const aitpSkill = stubSkill('aitp', { plugin: { id: 'aitp-research-protocol' } });
+
+/** The four core Skills shipped by the current official `aitp` plugin. */
+const AITP_SKILL_NAMES = ['aitp-memory', 'aitp-research', 'aitp-writing', 'aitp-distill'] as const;
+const aitpSkills = AITP_SKILL_NAMES.map((name) => stubSkill(name, { plugin: { id: 'aitp' } }));
+const aitpSkill = aitpSkills[0]!;
+/** The retired plugin id: not the official plugin, so never Research-gated. */
+const legacyAitpSkill = stubSkill('aitp-legacy', { plugin: { id: 'aitp-research-protocol' } });
 
 function setup(options: { records?: WireRecord[]; plugin?: boolean; agentId?: string; skills?: ISessionSkillCatalog } = {}) {
   const records = options.records ?? [];
@@ -72,7 +86,8 @@ function setup(options: { records?: WireRecord[]; plugin?: boolean; agentId?: st
   const ix = disposables.add(new TestInstantiationService());
   const wire = registerTestAgentWire(ix, 'research/test', { log: recordingWireLog(records), eventBus: bus });
   const catalog = new InMemorySkillCatalog();
-  if (options.plugin !== false) catalog.register(aitpSkill);
+  if (options.plugin !== false) for (const skill of aitpSkills) catalog.register(skill);
+  catalog.register(legacyAitpSkill);
   const catalogChanged = disposables.add(new Emitter<string>());
   const load = vi.fn(async () => {});
   const skills: ISessionSkillCatalog = options.skills ?? { _serviceBrand: undefined, catalog, ready: Promise.resolve(), onDidChange: catalogChanged.event, load, reload: load, list: async () => [] };
@@ -288,16 +303,38 @@ describe('Research memory-mode production assembly', () => {
     expect(mode.isActive).toBe(false);
   });
 
-  it('toggles official Skill visibility while keeping unrelated skills visible', async () => {
+  it('keeps official Skills visible across Research Mode changes', async () => {
     const { mode, agent } = setup();
     const visibility = agent.accessor.get(IAgentSkillVisibilityService);
-    expect(visibility.isSkillVisible(aitpSkill)).toBe(false);
+    for (const skill of aitpSkills) {
+      expect(visibility.isSkillVisible(skill)).toBe(true);
+      expect(visibility.hiddenReason(skill)).toBeUndefined();
+      expect(visibility.isSkillVisibleInFrozenListing(skill)).toBe(false);
+    }
     expect(visibility.isSkillVisible(stubSkill('ordinary'))).toBe(true);
+    expect(visibility.isSkillVisible(legacyAitpSkill)).toBe(true);
     await mode.enter({ actor: 'user' });
-    expect(visibility.isSkillVisible(aitpSkill)).toBe(true);
-    expect(visibility.isSkillVisibleInFrozenListing(aitpSkill)).toBe(false);
+    for (const skill of aitpSkills) {
+      expect(visibility.isSkillVisible(skill)).toBe(true);
+      expect(visibility.isSkillVisibleInFrozenListing(skill)).toBe(false);
+    }
+    expect(visibility.isSkillVisible(legacyAitpSkill)).toBe(true);
     await mode.exit();
-    expect(visibility.isSkillVisible(aitpSkill)).toBe(false);
+    for (const skill of aitpSkills) {
+      expect(visibility.isSkillVisible(skill)).toBe(true);
+      expect(visibility.hiddenReason(skill)).toBeUndefined();
+      expect(visibility.isSkillVisibleInFrozenListing(skill)).toBe(false);
+    }
+    expect(visibility.isSkillVisible(legacyAitpSkill)).toBe(true);
+  });
+
+  it('reports the retired plugin id as ordinary: it never counts as official availability', async () => {
+    const { mode, agent, catalog } = setup({ plugin: false });
+    const visibility = agent.accessor.get(IAgentSkillVisibilityService);
+    expect(visibility.isSkillVisible(legacyAitpSkill)).toBe(true);
+    expect(await mode.getSnapshot()).toEqual({ enabled: false, skillsAvailable: false });
+    catalog.register(aitpSkills[1]!);
+    expect(await mode.getSnapshot()).toEqual({ enabled: false, skillsAvailable: true });
   });
 
   it('reports a missing plugin honestly and emits availability changes without probing', async () => {
@@ -320,24 +357,32 @@ describe('Research memory-mode production assembly', () => {
     expect(await render(previous('BeginResearchAction is required.'))).toMatchObject({ content: expect.stringContaining('instructions are retired') });
     await mode.enter({ actor: 'user' });
     const result = await render(emptyContext) as { content: string };
-    expect(result.content).toContain('No delta means no write');
-    expect(result.content).toContain('CLI fallback');
+    expect(result.content).toContain('No durable change means no write');
+    expect(result.content).toContain('`aitp-memory` first');
+    expect(result.content).toContain('`aitp-research`');
+    expect(result.content).toContain('`aitp-writing`');
+    expect(result.content).toContain('`aitp-distill`');
+    expect(result.content).toContain('there is no ledger CLI or session hook');
+    expect(result.content).not.toContain('CLI fallback');
+    expect(result.content).not.toContain('CLI health');
     expect(result.content).toContain('Ordinary tools need no Research action');
     expect(await render(previous(result.content))).toBeUndefined();
     await mode.exit();
     expect(await render(previous(result.content))).toMatchObject({ content: expect.stringContaining('Research Mode is off') });
   });
 
-  it('preserves the independent dynamic Skill listing on entry and exit', async () => {
+  it('deduplicates the available dynamic Skill listing across mode entry and exit', async () => {
     const { mode, providers } = setup();
     const render = providers.get('aitp_skill_visibility')!;
-    expect(await render(emptyContext)).toBeUndefined();
-    await mode.enter({ actor: 'user' });
     const result = await render(emptyContext) as { content: string };
-    expect(result.content).toContain('aitp');
+    for (const name of AITP_SKILL_NAMES) expect(result.content).toContain(`/skills/${name}/SKILL.md`);
+    expect(result.content).not.toContain('/skills/aitp-legacy/SKILL.md');
+    expect(await render(previous(result.content))).toBeUndefined();
+    await mode.enter({ actor: 'user' });
     expect(await render(previous(result.content))).toBeUndefined();
     await mode.exit();
-    expect(await render(previous(result.content))).toMatchObject({ content: expect.stringContaining('no active AITP') });
+    expect(await render(previous(result.content))).toBeUndefined();
+    expect(await render(emptyContext)).toEqual(result);
   });
 
   it('rejects all old execution entry points instead of pretending success', async () => {

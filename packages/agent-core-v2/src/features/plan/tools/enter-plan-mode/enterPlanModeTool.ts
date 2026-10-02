@@ -6,8 +6,8 @@
  * `auto_approved` outcome (`telemetry`). Plan mode is a short-lived overlay
  * that may nest inside active Research Mode; the tool does not consult
  * Research state. The result message walks the model through the plan-mode
- * workflow, including the plan file path when the host provides one. Bound at
- * Agent scope.
+ * workflow, including the plan file path when the host provides one and the
+ * plan-only boundary for every file editor. Bound at Agent scope.
  */
 
 import type { ToolExecution } from '#/tool/toolContract';
@@ -72,7 +72,7 @@ function enteredPlanModeMessage(planPath: string | null): string {
       '2. Design a concrete, step-by-step plan.',
       '3. Wait for the host to provide a plan file path before calling ExitPlanMode.',
       '',
-      'Do NOT use Write or Edit while plan mode is active in this host; no plan file path is available.',
+      'Do NOT use Write, Edit or apply_patch while plan mode is active in this host; no plan file path is available.',
       'Use Bash only when needed; Bash follows the normal permission mode and rules.',
     ].join('\n');
   }
@@ -84,7 +84,7 @@ function enteredPlanModeMessage(planPath: string | null): string {
     '',
     '1. Use read-only tools (Read, Grep, Glob) to investigate the codebase. Use Bash only when needed.',
     '2. Design a concrete, step-by-step plan.',
-    '3. Write the plan to the plan file with Write or Edit.',
+    '3. Write the plan to the plan file with Write or Edit, or apply_patch when available. Every patched file must be the plan file.',
     '4. When the plan is ready, call ExitPlanMode for user approval.',
     '',
     'Do NOT edit files other than the plan file while plan mode is active.',

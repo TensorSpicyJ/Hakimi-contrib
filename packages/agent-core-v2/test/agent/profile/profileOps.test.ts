@@ -29,6 +29,7 @@ import { IAgentAgentsMdReminderService } from '#/agent/agentsMdReminder/agentsMd
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
+import { IFlagService } from '#/app/flag/flag';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
 import { IProtocolAdapterRegistry, type Protocol } from '#/kosong/protocol/protocol';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
@@ -56,6 +57,7 @@ import { AGENT_WIRE_RECORD_KEY, type WireRecord } from '#/wire/record';
 import '#/kosong/provider/providers/kimi/kimi.contrib';
 
 import { registerTestAgentWire, restoreTestAgentWire, testWireScope } from '../../wire/stubs';
+import { stubFlag } from '../../app/flag/stubs';
 
 const SCOPE = 'wire';
 const KEY = 'profile-test';
@@ -213,6 +215,7 @@ function buildHost(key: string, protocolRegistry = createProtocolRegistryStub())
     new AgentTelemetryContextService(),
   );
   host.stub(IConfigService, createConfigStub());
+  host.stub(IFlagService, stubFlag());
   host.stub(IModelCatalog, modelCatalog);
   host.stub(IProtocolAdapterRegistry, protocolRegistry);
   host.stub(IHostEnvironment, stubUnused());

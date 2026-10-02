@@ -81,6 +81,10 @@ describe('DefaultToolApprovePermissionPolicyService', () => {
     ['CronCreate', { cron: '*/5 * * * *', prompt: 'ping' }],
     ['CronDelete', { id: 'job_1' }],
     ['SetSubagentPreset', { preset: 'balanced' }],
+    [
+      'StartSession',
+      { work_dir: '/work/target', prompt: 'Do the thing.', title: 'Thing' },
+    ],
   ] as const)('does not approve %s', (toolName, args) => {
     expect(
       policy.evaluate(policyContext(toolName, args)),

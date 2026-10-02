@@ -10,6 +10,7 @@ import { getKimiWebApi } from '../../api';
 import type {
   AppMessage,
   AppModel,
+  AppPlugin,
   AppProvider,
   AppSession,
   AppSkill,
@@ -277,27 +278,78 @@ export function useModelProviderState(
       .catch((error: unknown) => pushOperationFailure('setConfig', error));
   }
 
-  async function loadSkillsForSession(sessionId: string): Promise<void> {
+  const aitpPlugin = ref<AppPlugin | null>(null);
+  const pluginMetadataStatus = ref<'unknown' | 'loading' | 'ready' | 'error'>('unknown');
+  const skillRequests = new Map<string, symbol>();
+  const workspaceSkillRequests = new Map<string, symbol>();
+  let pluginRequest: symbol | undefined;
+
+  async function loadPlugins(): Promise<void> {
+    const request = Symbol();
+    pluginRequest = request;
+    aitpPlugin.value = null;
+    pluginMetadataStatus.value = 'loading';
     try {
-      const api = getKimiWebApi();
-      const list = await api.listSkills(sessionId);
+      const plugins = await getKimiWebApi().listPlugins();
+      if (pluginRequest !== request) return;
+      aitpPlugin.value = plugins.find((plugin) => plugin.id === 'aitp') ?? null;
+      pluginMetadataStatus.value = 'ready';
+    } catch {
+      if (pluginRequest === request) pluginMetadataStatus.value = 'error';
+      // Plugin metadata must never turn a successful mode toggle into a failure.
+    }
+  }
+
+  async function loadSkillsForSession(sessionId: string): Promise<void> {
+    const request = Symbol();
+    skillRequests.set(sessionId, request);
+    // Do not keep advertising skills from the previous Research state while
+    // refreshing (or if the refresh fails). Only the server grants visibility.
+    skillsBySession.value = { ...skillsBySession.value, [sessionId]: [] };
+    try {
+      const list = await getKimiWebApi().listSkills(sessionId);
+      if (skillRequests.get(sessionId) !== request) return;
       skillsBySession.value = { ...skillsBySession.value, [sessionId]: list };
     } catch {
-      // Skills are side data; an older daemon without /skills just yields no
-      // slash-skills, the built-in commands still work.
+      // Skills are side data; built-in commands still work without /skills.
     }
   }
 
   async function loadSkillsForWorkspace(workspaceId: string): Promise<void> {
+    const request = Symbol();
+    workspaceSkillRequests.set(workspaceId, request);
     try {
-      const api = getKimiWebApi();
-      const list = await api.listSkillsForWorkspace(workspaceId);
+      const list = await getKimiWebApi().listSkillsForWorkspace(workspaceId);
+      if (workspaceSkillRequests.get(workspaceId) !== request) return;
       skillsByWorkspace.value = { ...skillsByWorkspace.value, [workspaceId]: list };
     } catch {
-      // Side data; an older daemon without /workspaces/{id}/skills just yields
-      // no slash-skills for the onboarding composer.
+      // Side data; an older daemon may not expose workspace skills.
     }
   }
+
+  watch(() => rawState.backend, () => {
+    skillRequests.clear();
+    workspaceSkillRequests.clear();
+    pluginRequest = undefined;
+    skillsBySession.value = {};
+    skillsByWorkspace.value = {};
+    aitpPlugin.value = null;
+    pluginMetadataStatus.value = 'unknown';
+  }, { flush: 'sync' });
+
+  // All authoritative Research commits (HTTP, WS, initial load and resync)
+  // replace a session snapshot. Observe that single seam, not individual UI
+  // commands. Synchronous invalidation beats an already-in-flight off response.
+  watch(() => rawState.researchBySession, (next, previous) => {
+    if (rawState.backend !== 'v2') return;
+    let changed = false;
+    for (const [sessionId, snapshot] of Object.entries(next)) {
+      if (snapshot === previous[sessionId]) continue;
+      void loadSkillsForSession(sessionId);
+      changed = true;
+    }
+    if (changed) void loadPlugins();
+  }, { flush: 'sync' });
 
   /** Load models (cached — call again to force refresh) */
   async function loadModels(): Promise<void> {
@@ -658,6 +710,8 @@ export function useModelProviderState(
     draftModel,
     skillsBySession,
     skillsByWorkspace,
+    aitpPlugin,
+    pluginMetadataStatus,
     // actions
     loadSkillsForSession,
     loadSkillsForWorkspace,

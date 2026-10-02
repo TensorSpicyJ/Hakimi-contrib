@@ -1,3 +1,8 @@
+/**
+ * Exercises turn continuation, stopping, and interruption through the scoped
+ * agent harness with real loop/tool services and a scripted model boundary.
+ * Run: pnpm exec vitest run --project agent-core-v2 test/agent/loop/loop.test.ts
+ */
 import { type ToolCall } from '#/kosong/contract/message';
 import { emptyUsage } from '#/kosong/contract/usage';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -150,6 +155,66 @@ describe('Agent loop', () => {
     expect(stepCompleted?.args).toMatchObject({
       finishReason: 'filtered',
     });
+  });
+
+  it('does not execute or persist tool proposals from a filtered response and restores its visible content', async () => {
+    let resolutions = 0;
+    let executions = 0;
+    profile.update({ activeToolNames: ['MutateExample'] });
+    ctx.get(IAgentToolRegistryService).register({
+      name: 'MutateExample',
+      description: 'A fixture with an observable side effect.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      resolveExecution: () => {
+        resolutions += 1;
+        return {
+          approvalRule: 'MutateExample',
+          execute: async () => {
+            executions += 1;
+            return { output: 'side effect completed' };
+          },
+        };
+      },
+    });
+    await ctx.rpc.setPermission({ mode: 'yolo' });
+    const content = [
+      { type: 'think' as const, think: '', encrypted: 'opaque-example', openaiResponses: { itemId: 'rs_example' } },
+      { type: 'text' as const, text: 'The provider declined this response.', openaiResponses: { itemId: 'msg_example', phase: 'final_answer', contentType: 'refusal' as const } },
+    ];
+    ctx.mockNextProviderResponse({
+      parts: [
+        ...content,
+        { type: 'function', id: 'call_filtered_one', name: 'MutateExample', arguments: '{}' },
+        { type: 'function', id: 'call_filtered_two', name: 'MutateExample', arguments: '{invalid' },
+      ],
+      finishReason: 'filtered',
+      rawFinishReason: 'refusal',
+    });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Run the requested operation.' }] });
+    const turn = (loop as unknown as { activeTurnJob?: { turn: Turn } }).activeTurnJob?.turn;
+    expect(turn).toBeDefined();
+    await ctx.untilTurnEnd();
+
+    await expect(turn!.result).resolves.toMatchObject({ type: 'failed', steps: 1, error: { code: 'provider.filtered' } });
+    expect(resolutions).toBe(0);
+    expect(executions).toBe(0);
+    expect(ctx.llmCalls).toHaveLength(1);
+    expect(ctx.context.get().filter((message) => message.role === 'assistant')).toEqual([
+      expect.objectContaining({ content, toolCalls: [] }),
+    ]);
+    expect(ctx.context.get().some((message) => message.role === 'tool')).toBe(false);
+    const persisted = await ctx.persistedWireRecords();
+    const loopEvents = persisted.filter((entry) => entry.type === 'context.append_loop_event').map((entry) => entry['event']);
+    expect(loopEvents).not.toEqual(expect.arrayContaining([expect.objectContaining({ type: 'tool.call' })]));
+    expect(loopEvents).not.toEqual(expect.arrayContaining([expect.objectContaining({ type: 'tool.result' })]));
+    expect(loopEvents).toContainEqual(expect.objectContaining({
+      type: 'step.end', finishReason: 'filtered', providerFinishReason: 'filtered', rawFinishReason: 'refusal',
+    }));
+    expect(ctx.allEvents).toContainEqual(expect.objectContaining({
+      event: 'turn.ended', args: expect.objectContaining({ reason: 'failed', interruptReason: 'filtered', error: expect.objectContaining({ code: 'provider.filtered' }) }),
+    }));
+    await ctx.expectResumeMatches();
   });
 
   it('marks a completed turn as truncated when the provider stops at max tokens', async () => {
@@ -405,6 +470,111 @@ describe('Agent loop', () => {
       assistant: text "I will look it up."  calls call_lookup:Lookup { "query": "moon" }
       tool[call_lookup]: text "lookup-result"
   `);
+  });
+
+  it('continues after successful tool calls when the provider reports completed', async () => {
+    profile.update({ activeToolNames: ['Lookup'] });
+    ctx.get(IAgentToolRegistryService).register({
+      name: 'Lookup',
+      description: 'Return a test lookup result.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      resolveExecution: () => ({
+        approvalRule: 'Lookup',
+        execute: async () => ({ output: 'lookup-result' }),
+      }),
+    });
+    ctx.mockNextProviderResponse({
+      parts: [{ type: 'function', id: 'call_lookup', name: 'Lookup', arguments: '{}' }],
+      finishReason: 'completed',
+      rawFinishReason: 'completed',
+    });
+    ctx.mockNextResponse({ type: 'text', text: 'The lookup result is lookup-result.' });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Look up the test value' }] });
+    await ctx.untilApproval(true);
+    await ctx.untilTurnEnd();
+
+    expect(ctx.llmCalls).toHaveLength(2);
+    expect(ctx.llmInputs().inputs[1]?.history).toContainEqual(
+      expect.objectContaining({
+        role: 'tool',
+        toolCallId: 'call_lookup',
+        content: [{ type: 'text', text: 'lookup-result' }],
+      }),
+    );
+    expect(ctx.allEvents
+      .filter((event) => event.type === '[rpc]' && event.event === 'turn.step.completed')
+      .map((event) => event.args)).toMatchObject([
+      { finishReason: 'tool_use' },
+      { finishReason: 'end_turn' },
+    ]);
+  });
+
+  it('skips completion hooks when a tool explicitly stops the turn', async () => {
+    profile.update({ activeToolNames: ['Pause'] });
+    ctx.get(IAgentToolRegistryService).register({
+      name: 'Pause',
+      description: 'Stop the current turn.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      resolveExecution: () => ({
+        approvalRule: 'Pause',
+        execute: async () => ({ output: 'paused', stopTurn: true }),
+      }),
+    });
+    const completions: number[] = [];
+    loop.hooks.onWillCompleteTurn.register('test-completion', async (hookCtx, next) => {
+      completions.push(hookCtx.step);
+      loop.enqueue(new ContinuationStepRequest());
+      await next();
+    });
+    ctx.mockNextResponse({ type: 'function', id: 'call_pause', name: 'Pause', arguments: '{}' });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Pause this turn' }] });
+    await ctx.untilApproval(true);
+    await ctx.untilTurnEnd();
+
+    expect(completions).toEqual([]);
+    expect(ctx.llmCalls).toHaveLength(1);
+  });
+
+  it('skips completion hooks when an after-step hook fails', async () => {
+    profile.update({ activeToolNames: [] });
+    const completions: number[] = [];
+    loop.hooks.onDidFinishStep.register('test-failing-after-step', async () => {
+      throw new Error('after-step failed');
+    });
+    loop.hooks.onWillCompleteTurn.register('test-completion', async (hookCtx, next) => {
+      completions.push(hookCtx.step);
+      await next();
+    });
+    ctx.mockNextResponse({ type: 'text', text: 'Answer.' });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Hello' }] });
+    await ctx.untilTurnEnd();
+
+    expect(completions).toEqual([]);
+    expect(ctx.llmCalls).toHaveLength(1);
+  });
+
+  it('runs work queued by a completion hook before ending the turn', async () => {
+    profile.update({ activeToolNames: [] });
+    loop.hooks.onWillCompleteTurn.register('test-completion', async (hookCtx, next) => {
+      if (hookCtx.step === 1) loop.enqueue(new ContinuationStepRequest());
+      await next();
+    });
+    ctx.mockNextResponse({ type: 'text', text: 'First answer.' });
+    ctx.mockNextResponse({ type: 'text', text: 'Completed answer.' });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Hello' }] });
+    await ctx.untilTurnEnd();
+
+    expect(ctx.llmCalls).toHaveLength(2);
+    expect(ctx.contextData().history).toContainEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Completed answer.' }],
+      }),
+    );
   });
 
   it('lets non-external stop hooks continue a turn more than once', async () => {
@@ -1055,6 +1225,55 @@ describe('interruption reminder', () => {
       },
     ]);
     expect(ctx.contextData().history.indexOf(interruptionReminders()[0]!)).toBe(2);
+  });
+
+  it('archives a late Responses update received before cancellation and replays it once', async () => {
+    ctx.mockNextResponse(
+      { type: 'think', think: 'why', openaiResponses: { itemId: 'rs_1' } },
+      { type: 'think', think: '', encrypted: 'enc-1', openaiResponses: { itemId: 'rs_1' } },
+      { type: 'text', text: 'partial answer', openaiResponses: { itemId: 'msg_1' } },
+      { type: 'text', text: 'interleaved item', openaiResponses: { itemId: 'msg_2' } },
+      {
+        type: 'text',
+        text: '',
+        openaiResponses: { itemId: 'msg_1', phase: 'final_answer' },
+      },
+    );
+    let deltas = 0;
+    const subscription = ctx.get(IEventBus).subscribe('assistant.delta', () => {
+      deltas += 1;
+      if (deltas === 3) loop.cancel();
+    });
+    const turn = (await loop.enqueue(nextTurnMessage('Hello')).assigned).turn;
+    await expect(turn.result).resolves.toMatchObject({ type: 'cancelled' });
+    subscription.dispose();
+
+    const archivedContent: ContextMessage['content'] = [
+      { type: 'think', think: 'why', encrypted: 'enc-1', openaiResponses: { itemId: 'rs_1' } },
+      {
+        type: 'text',
+        text: 'partial answer',
+        openaiResponses: { itemId: 'msg_1', phase: 'final_answer' },
+      },
+      { type: 'text', text: 'interleaved item', openaiResponses: { itemId: 'msg_2' } },
+    ];
+    expect(ctx.contextData().history).toContainEqual({
+      role: 'assistant',
+      content: archivedContent,
+      toolCalls: [],
+      partial: true,
+    });
+
+    ctx.mockNextResponse({ type: 'text', text: 'second answer' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Next' }] });
+    await ctx.untilTurnEnd();
+
+    const replayedAssistant = ctx
+      .llmInputs()
+      .inputs.at(-1)
+      ?.history.filter((message) => message.role === 'assistant');
+    expect(replayedAssistant).toHaveLength(1);
+    expect(replayedAssistant?.[0]?.content).toEqual(archivedContent);
   });
 
   it('writes one active cancellation when cancel repeats before the turn settles', async () => {

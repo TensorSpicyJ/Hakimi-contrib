@@ -131,9 +131,11 @@ canonical 路由 key 中，`main` 表示激活 preset 时应用的 main agent �
 
 Hakimi Web 会在 `Agent` 卡片、详情面板、后台任务行和实时 `AgentSwarm` member 行中显示每个已确认 subagent 的 profile 角色与实际绑定模型。旧历史缺少这些元数据时，界面会保持空缺，而不会猜测。
 
-启用实验性自动切换 preset 后（`[subagent.auto_preset]`，见[配置文件](../configuration/config-files.md#自动切换-preset)），候选顺序表示加权的本地偏好，而不是严格的回退链。引擎会把 provider 配额与 reset 时间、最近的本地 profile/provider 可靠性、首 token 延迟、token 用量以及路由 / 模型匹配度合并评分，再选择得分最高的健康候选；证据明显更好时，列表中较低位置的 preset 可以越级。路由或配额证据缺失、配额低于 floor、熔断器打开都会使候选不可选；当前 preset 健康时，胜出者还必须跨过评分余量并等待切换冷却结束，而当前 preset 不健康时可以立即逃生。
+启用实验性自动切换 preset 后（`[subagent.auto_preset]`，见 [配置文件](../configuration/config-files.md#自动切换-preset)），引擎评估整套 preset 的各个角色，而不只看 `coder`。资源可用性、reset 时间、本地可靠性、首 token 延迟、token 用量和路由匹配参与逐角色评分；角色默认等权，候选顺序加分只在整体分中加一次。尚未用完的订阅额度在临近已声明的长周期重置时，会获得指数增长的优先加分；确实可用的剩余额度可以低于通常保留门槛继续使用，而不是留到到期作废。短窗口耗尽仍会阻止该路由，也不会为了消耗额度制造额外任务。官方 DeepSeek 的账户资金证据与订阅配额百分比分开处理，不获得订阅到期加分。高峰策略可选择禁用，也可允许调用并按角色扣分；`penalize` 模式的扣分取决于实际使用 DeepSeek 的角色权重占比，临时补位同样计算。不会仅因进入高峰就强制选择某个 preset 名称。评分表展示原始分、临时补位后有效分、不可用角色和被排除的 preset，不会悄悄漏掉这些项。
 
-评估发生在新的 `Agent` 派生、每个允许重绑定的 `Agent` resume、`AgentSwarm` 调用中新 item 使用的路由和每个允许重绑定的 resumed child，以及 Tower worker/reviewer 派生之前。设置了 `preserveBindingOnResume` 的 profile 会同时跳过评估与重绑定。评分器固定且只在本机运行：它保持 fail-open，不训练模型、不上传用户内容，也不会在空闲时后台轮询。在 Hakimi Web 中，聊天 header 的 Preset 菜单与 **设置 > Agent** 会展示最近原因、候选评分、配额、缺失证据、冷却、熔断状态、手动锁定和恢复自动入口。手动选择基础路由或任一 preset 后，该选择会持久化并锁定，不再被自动策略改写，直到用户恢复自动切换；TUI 中可用 `/preset auto` 解除同一把锁。每次自动切换成功后，触发切换的会话还会增加一条带本地化原因的状态标记。
+角色原路由不可用时，自动模式可从允许的 preset 或基础路由已使用的模型中临时补位，也可以跨角色寻找兼容且有可用资源的模型。例如，共用的图像路由额度耗尽时，可以使用另一个已允许且明确支持图像和工具调用的模型；能力未知或只支持文本的模型不能替代。preset 定义不变，子任务保留 profile 和权限，实际模型记录在本次调用中。之后重新评估，原路由恢复后会回归。允许整套 preset 部分可用，但本次任务找不到可用原路由或临时替代时，会带原因拒绝派发，不会在自动模式下偷偷使用不可用模型。
+
+评估发生在新 `Agent` 派生、可重绑定的 `Agent` resume、`AgentSwarm` 新 item 和恢复 child 的路由，以及 Tower worker/reviewer 派生前。`preserveBindingOnResume` 的 profile 跳过评估和重绑定。评分器确定、只在本机运行，不训练模型、不上传内容，也不在空闲时轮询。Web 桌面/手机 Preset 菜单与 **设置 > Agent** 保持自动选择入口常驻；点击会解锁并立即重新评估整套 preset，已经自动时也可再点。手动选择仍锁定对应 preset，并停止临时自动补位。TUI `/preset auto` 只解锁，等待下一次相关派发。成功切换会在真实的触发会话中加入本地化状态标记。
 
 ### 选择 main agent
 

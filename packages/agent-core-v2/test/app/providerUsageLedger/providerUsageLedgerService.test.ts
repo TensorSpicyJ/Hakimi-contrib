@@ -4,6 +4,8 @@
  *  - records independent attempt documents and aggregates today/month tokens +
  *    estimated CNY cost via the pure `aggregateMeteredUsage`;
  *  - distinguishes measured / missing-usage / unpriced / pending requests;
+ *  - aggregates caller-verified alias groups without losing noncanonical history,
+ *    duplicating attempts, or hiding member tracking gaps and degraded reads;
  *  - serializes a finish write after its start write and recovers records
  *    across instances sharing one store (restart);
  *  - only accepts formal UUID keys (skipping atomic-write tmp leftovers) and
@@ -146,7 +148,7 @@ function createLedger(
     store?: InMemoryStorageService;
     atomicDocs?: IAtomicDocumentStore;
   } = {},
-): { ledger: IProviderUsageLedgerService; dispose: () => void } {
+): { ledger: IProviderUsageLedgerService; atomicDocs: IAtomicDocumentStore; dispose: () => void } {
   const disposables = new DisposableStore();
   const ix = disposables.add(new TestInstantiationService());
   const store = opts.store ?? new InMemoryStorageService();
@@ -161,6 +163,7 @@ function createLedger(
   ix.set(IProviderUsageLedgerService, new SyncDescriptor(ProviderUsageLedgerService));
   return {
     ledger: ix.get(IProviderUsageLedgerService),
+    atomicDocs: ix.get(IAtomicDocumentStore),
     dispose: () => disposables.dispose(),
   };
 }
@@ -185,6 +188,60 @@ function withClock(initial = T2): { set: (epochMs: number) => void } {
   };
 }
 
+const SHANGHAI_OFFSET_MS = 8 * 3_600_000;
+
+function shanghaiEpoch(year: number, month: number, day: number, hour: number, minute = 0): number {
+  return Date.UTC(year, month - 1, day, hour, minute) - SHANGHAI_OFFSET_MS;
+}
+
+// 2026-09-09 and 2026-09-10 are a Wednesday and a Thursday; 10:00 is peak.
+const SEP9_PEAK = shanghaiEpoch(2026, 9, 9, 10, 0);
+const SEP10_PEAK = shanghaiEpoch(2026, 9, 10, 10, 0);
+const SEP10_OFF_PEAK = shanghaiEpoch(2026, 9, 10, 20, 0);
+const SEP10_DAY_START = shanghaiEpoch(2026, 9, 10, 0, 0);
+const SEP1_DAY_START = shanghaiEpoch(2026, 9, 1, 0, 0);
+
+function seedAttempt(
+  store: MapAtomicDocs,
+  startedAtEpochMs: number,
+  overrides: Partial<AttemptRecord> = {},
+): AttemptRecord {
+  const record: AttemptRecord = {
+    attemptId: crypto.randomUUID(),
+    providerName: 'deepseek',
+    modelName: 'deepseek-v4-pro',
+    modelAlias: 'deepseek/deepseek-v4-pro',
+    startedAtEpochMs,
+    outcome: 'success',
+    usage: usageOf(0, 1_000_000, 0),
+    pricingVersion: null,
+    costNanos: null,
+    ...overrides,
+  };
+  const bucket = store.data.get(MONTH_SCOPE) ?? new Map<string, unknown>();
+  bucket.set(record.attemptId, record);
+  store.data.set(MONTH_SCOPE, bucket);
+  return record;
+}
+
+function seedTracking(
+  store: MapAtomicDocs,
+  trackingStartedAtEpochMs: number,
+  gapTimes: readonly number[] = [],
+): void {
+  const bucket = new Map<string, unknown>([
+    [TRACKING_KEY, { providerName: 'deepseek', trackingStartedAtEpochMs }],
+  ]);
+  for (const time of gapTimes) {
+    bucket.set(crypto.randomUUID(), {
+      providerName: 'deepseek',
+      trackingStartedAtEpochMs: time,
+      gap: true,
+    });
+  }
+  store.data.set(TRACKING_SCOPE, bucket);
+}
+
 describe('ProviderUsageLedgerService', () => {
   let disposables: DisposableStore;
 
@@ -195,6 +252,147 @@ describe('ProviderUsageLedgerService', () => {
   afterEach(() => {
     disposables.dispose();
     vi.restoreAllMocks();
+  });
+
+  it('keeps usage and missing-price evidence from an alias other than the canonical query provider', async () => {
+    withClock(T2);
+    const host = createLedger();
+    disposables.add({ dispose: host.dispose });
+    const id = host.ledger.startAttempt(start({ providerName: 'z-used', modelName: 'unknown-model' }));
+    host.ledger.finishAttempt(id!, { usage: usageOf(10, 20, 0), outcome: 'success' });
+
+    const report = await host.ledger.getMeteredUsage(['a-unused', 'z-used']);
+    expect(report.trackingStartedAt).toBe(new Date(T2).toISOString());
+    expect(report.degraded).toBe(false);
+    for (const period of [report.today, report.month]) {
+      expect(period).toMatchObject({
+        requestCount: 1, measuredRequestCount: 1, totalTokens: 30,
+        unpricedRequestCount: 1, estimatedCost: null, isPartial: true,
+      });
+    }
+    expect((await host.ledger.getMeteredUsage('a-unused')).month.requestCount).toBe(0);
+  });
+
+  it('counts each real attempt once across aliases, repeated names and duplicate storage listing keys', async () => {
+    withClock(T2);
+    const store = new InMemoryStorageService();
+    const writer = createLedger({ store });
+    disposables.add({ dispose: writer.dispose });
+    const first = writer.ledger.startAttempt(start({ providerName: 'a-used', modelName: 'unknown-model' }));
+    const second = writer.ledger.startAttempt(start({ providerName: 'z-used', modelName: 'unknown-model' }));
+    const outside = writer.ledger.startAttempt(start({ providerName: 'outside', modelName: 'unknown-model' }));
+    writer.ledger.finishAttempt(first!, { usage: usageOf(10, 20, 0), outcome: 'success' });
+    writer.ledger.finishAttempt(first!, { usage: usageOf(100, 200, 0), outcome: 'success' });
+    writer.ledger.finishAttempt(second!, { usage: usageOf(3, 4, 5), outcome: 'success' });
+    writer.ledger.finishAttempt(outside!, { usage: usageOf(100, 200, 0), outcome: 'success' });
+    await writer.ledger.getMeteredUsage(['a-used', 'z-used']);
+    const restored = createLedger({ store });
+    disposables.add({ dispose: restored.dispose });
+    const list = restored.atomicDocs.list.bind(restored.atomicDocs);
+    vi.spyOn(restored.atomicDocs, 'list').mockImplementation(async (scope) => {
+      const keys = await list(scope);
+      return scope === MONTH_SCOPE ? [...keys, ...keys] : keys;
+    });
+
+    const report = await restored.ledger.getMeteredUsage(['z-used', 'a-used', 'z-used']);
+    expect(report.month).toMatchObject({
+      requestCount: 2, measuredRequestCount: 2, inputTokens: 18, outputTokens: 24,
+      cacheReadTokens: 5, totalTokens: 42, unpricedRequestCount: 2, estimatedCost: null,
+    });
+    expect(report.degraded).toBe(false);
+    expect(await restored.ledger.getMeteredUsage(['a-used', 'z-used'])).toEqual(report);
+    expect(await restored.ledger.getMeteredUsage(['a-used'])).toEqual(await restored.ledger.getMeteredUsage('a-used'));
+  });
+
+  it('propagates pending and missing-usage attempts across all requested aliases', async () => {
+    withClock(T2);
+    const host = createLedger();
+    disposables.add({ dispose: host.dispose });
+    host.ledger.startAttempt(start({ providerName: 'pending' }));
+    const missing = host.ledger.startAttempt(start({ providerName: 'missing' }));
+    host.ledger.finishAttempt(missing!, { usage: null, outcome: 'error' });
+    const measured = host.ledger.startAttempt(start({ providerName: 'measured', modelName: 'unknown-model' }));
+    host.ledger.finishAttempt(measured!, { usage: usageOf(10, 20, 0), outcome: 'success' });
+
+    const report = await host.ledger.getMeteredUsage(['pending', 'missing', 'measured']);
+    expect(report.month).toMatchObject({
+      requestCount: 3, measuredRequestCount: 1, pendingRequestCount: 1,
+      missingUsageRequestCount: 1, unpricedRequestCount: 1, totalTokens: 30,
+      estimatedCost: null, isPartial: true,
+    });
+  });
+
+  it('retains known tracking history but marks a group partial when an unused alias has no coverage', async () => {
+    withClock(T2);
+    const host = createLedger();
+    disposables.add({ dispose: host.dispose });
+    const lastMonth = Date.UTC(2026, 7, 20);
+    const id = host.ledger.startAttempt(start({ providerName: 'z-used', startedAtEpochMs: lastMonth }));
+    host.ledger.finishAttempt(id!, { usage: usageOf(1, 1, 0), outcome: 'success' });
+    expect((await host.ledger.getMeteredUsage('z-used')).month.isPartial).toBe(false);
+
+    const report = await host.ledger.getMeteredUsage(['a-unused', 'z-used']);
+    expect(report.trackingStartedAt).toBe(new Date(lastMonth).toISOString());
+    expect(report.today.isPartial).toBe(true);
+    expect(report.month.isPartial).toBe(true);
+    expect(report.degraded).toBe(false);
+  });
+
+  it('uses the latest known member tracking start without discarding older member records', async () => {
+    const clock = withClock(T1);
+    const host = createLedger();
+    disposables.add({ dispose: host.dispose });
+    const first = host.ledger.startAttempt(start({ providerName: 'a-used' }));
+    host.ledger.finishAttempt(first!, { usage: usageOf(10, 20, 0), outcome: 'success' });
+    clock.set(T2);
+    const second = host.ledger.startAttempt(start({ providerName: 'z-used' }));
+    host.ledger.finishAttempt(second!, { usage: usageOf(1, 2, 0), outcome: 'success' });
+    const report = await host.ledger.getMeteredUsage(['a-used', 'z-used']);
+    expect(report.trackingStartedAt).toBe(new Date(T2).toISOString());
+    expect(report.month.totalTokens).toBe(33);
+    expect(report.today.totalTokens).toBe(3);
+    expect(report.today.isPartial).toBe(true);
+  });
+
+  it('preserves a noncanonical member\'s tracking gap after restoring the ledger', async () => {
+    const clock = withClock(T1);
+    const store = new InMemoryStorageService();
+    const flag = mutableFlag(true);
+    const host = createLedger({ store, flags: flag.flags });
+    disposables.add({ dispose: host.dispose });
+    for (const providerName of ['a-used', 'z-used']) {
+      const id = host.ledger.startAttempt(start({ providerName }));
+      host.ledger.finishAttempt(id!, { usage: usageOf(1, 1, 0), outcome: 'success' });
+    }
+    await host.ledger.getMeteredUsage(['a-used', 'z-used']);
+    clock.set(T2);
+    expect((await host.ledger.getMeteredUsage(['a-used', 'z-used'])).today.isPartial).toBe(false);
+    flag.set(false);
+    expect(host.ledger.startAttempt(start({ providerName: 'z-used' }))).toBeUndefined();
+    await host.ledger.getMeteredUsage('z-used');
+    const restored = createLedger({ store });
+    disposables.add({ dispose: restored.dispose });
+    expect((await restored.ledger.getMeteredUsage('a-used')).today.isPartial).toBe(false);
+    const report = await restored.ledger.getMeteredUsage(['a-used', 'z-used']);
+    expect(report.today.isPartial).toBe(true);
+    expect(report.degraded).toBe(false);
+  });
+
+  it('preserves another alias\'s records when one member\'s tracking metadata cannot be read', async () => {
+    withClock(T2);
+    const host = createLedger();
+    disposables.add({ dispose: host.dispose });
+    const id = host.ledger.startAttempt(start({ providerName: 'z-used', modelName: 'unknown-model' }));
+    host.ledger.finishAttempt(id!, { usage: usageOf(10, 20, 0), outcome: 'success' });
+    const list = host.atomicDocs.list.bind(host.atomicDocs);
+    vi.spyOn(host.atomicDocs, 'list').mockImplementation(async (scope) => {
+      if (scope.endsWith('/_tracking/a-unused')) throw new Error('tracking unavailable');
+      return list(scope);
+    });
+    const report = await host.ledger.getMeteredUsage(['a-unused', 'z-used']);
+    expect(report.degraded).toBe(true);
+    expect(report.trackingStartedAt).toBe(new Date(T2).toISOString());
+    expect(report.month).toMatchObject({ requestCount: 1, totalTokens: 30, estimatedCost: null, isPartial: true });
   });
 
   it('records a measured attempt and aggregates today/month cost', async () => {
@@ -746,6 +944,187 @@ describe('ProviderUsageLedgerService', () => {
     const host = createLedger();
     disposables.add({ dispose: host.dispose });
     expect(host.ledger.startAttempt(start({ baseUrl: 'https://example.com/v1' }))).toBeUndefined();
+  });
+
+  it('prices the new deepseek-flash wire model on the write path', async () => {
+    withClock(SEP10_PEAK);
+    const store = new MapAtomicDocs();
+    seedTracking(store, SEP10_DAY_START);
+    const host = createLedger({ atomicDocs: store });
+    disposables.add({ dispose: host.dispose });
+
+    const id = host.ledger.startAttempt(start({
+      modelName: 'deepseek-flash',
+      modelAlias: 'deepseek/deepseek-flash',
+      startedAtEpochMs: SEP10_PEAK,
+    }));
+    host.ledger.finishAttempt(id!, { usage: usageOf(0, 1_000_000, 0), outcome: 'success' });
+
+    const report = await host.ledger.getMeteredUsage('deepseek');
+    expect(report.today.measuredRequestCount).toBe(1);
+    expect(report.today.unpricedRequestCount).toBe(0);
+    expect(report.today.estimatedCost).toBe('8');
+    expect(report.today.isPartial).toBe(false);
+    const record = await store.get<AttemptRecord>(MONTH_SCOPE, id!);
+    expect(record?.pricingVersion).toBe('2026-09-10');
+    expect(record?.costNanos).toBe('8000000000');
+  });
+
+  it('prices deepseek-flash at the exact peak and off-peak V4.1 rates', async () => {
+    withClock(SEP10_OFF_PEAK);
+    const store = new MapAtomicDocs();
+    seedTracking(store, SEP10_DAY_START);
+    const host = createLedger({ atomicDocs: store });
+    disposables.add({ dispose: host.dispose });
+
+    for (const startedAtEpochMs of [SEP10_PEAK, SEP10_OFF_PEAK]) {
+      const id = host.ledger.startAttempt(start({ modelName: 'deepseek-flash', startedAtEpochMs }));
+      host.ledger.finishAttempt(id!, { usage: usageOf(0, 1_000_000, 0), outcome: 'success' });
+    }
+
+    const report = await host.ledger.getMeteredUsage('deepseek');
+    expect(report.today.measuredRequestCount).toBe(2);
+    expect(report.today.unpricedRequestCount).toBe(0);
+    expect(report.today.estimatedCost).toBe('12');
+  });
+
+  it('prices legacy flash names by request date and leaves deepseek-flash unpriced before its release', async () => {
+    withClock(SEP10_PEAK);
+    const store = new MapAtomicDocs();
+    seedTracking(store, SEP1_DAY_START);
+    seedAttempt(store, SEP9_PEAK, {
+      modelName: 'deepseek-v4-flash',
+      pricingVersion: '2026-09-07',
+      costNanos: '9000000000',
+    });
+    seedAttempt(store, SEP9_PEAK, { modelName: 'deepseek-flash' });
+    seedAttempt(store, SEP10_PEAK, { modelName: 'deepseek-flash' });
+
+    const host = createLedger({ atomicDocs: store });
+    disposables.add({ dispose: host.dispose });
+    const report = await host.ledger.getMeteredUsage('deepseek');
+
+    expect(report.today.estimatedCost).toBe('8');
+    expect(report.today.unpricedRequestCount).toBe(0);
+    expect(report.today.isPartial).toBe(false);
+    expect(report.month.measuredRequestCount).toBe(3);
+    expect(report.month.unpricedRequestCount).toBe(1);
+    expect(report.month.estimatedCost).toBe('17');
+    expect(report.month.isPartial).toBe(true);
+  });
+
+  it('derives a cost for a stored unpriced record without rewriting the ledger', async () => {
+    withClock(SEP10_PEAK);
+    const store = new MapAtomicDocs();
+    seedTracking(store, SEP10_DAY_START);
+    const stored = seedAttempt(store, SEP10_PEAK, {
+      modelName: 'deepseek-flash',
+      usage: usageOf(1000, 500, 200),
+    });
+    const writesBefore = store.setCalls.length;
+    const host = createLedger({ atomicDocs: store });
+    disposables.add({ dispose: host.dispose });
+
+    const report = await host.ledger.getMeteredUsage('deepseek');
+    expect(report.today).toMatchObject({
+      requestCount: 1,
+      measuredRequestCount: 1,
+      unpricedRequestCount: 0,
+      inputTokens: 1200,
+      outputTokens: 500,
+      cacheReadTokens: 200,
+      totalTokens: 1700,
+      estimatedCost: '0.006008',
+    });
+    expect(store.setCalls).toHaveLength(writesBefore);
+    expect(await store.get<AttemptRecord>(MONTH_SCOPE, stored.attemptId)).toEqual(stored);
+    expect(await host.ledger.getMeteredUsage('deepseek')).toEqual(report);
+  });
+
+  it('corrects a superseded legacy flash price but never touches pro or unknown versions', async () => {
+    withClock(SEP10_PEAK);
+    const store = new MapAtomicDocs();
+    seedTracking(store, SEP10_DAY_START);
+    const staleFlash = seedAttempt(store, SEP10_PEAK, {
+      modelName: 'deepseek-v4-flash',
+      pricingVersion: '2026-09-07',
+      costNanos: '9000000000',
+    });
+    seedAttempt(store, SEP10_PEAK, {
+      modelName: 'deepseek-v4-pro',
+      pricingVersion: '2026-09-07',
+      costNanos: '27000000000',
+    });
+    seedAttempt(store, SEP10_PEAK, { modelName: 'deepseek-flash', pricingVersion: '2026-09-10' });
+    seedAttempt(store, SEP10_PEAK, {
+      modelName: 'deepseek-flash',
+      pricingVersion: '2099-01-01',
+      costNanos: '123',
+    });
+    seedAttempt(store, SEP9_PEAK, {
+      modelName: 'deepseek-v4-flash',
+      pricingVersion: '2026-09-07',
+      costNanos: '9000000000',
+    });
+    const writesBefore = store.setCalls.length;
+    const host = createLedger({ atomicDocs: store });
+    disposables.add({ dispose: host.dispose });
+
+    const report = await host.ledger.getMeteredUsage('deepseek');
+    expect(report.today.measuredRequestCount).toBe(4);
+    expect(report.today.unpricedRequestCount).toBe(1);
+    expect(report.today.estimatedCost).toBe('35.000000123');
+    expect(report.month.estimatedCost).toBe('44.000000123');
+    expect(store.setCalls).toHaveLength(writesBefore);
+    expect(await store.get<AttemptRecord>(MONTH_SCOPE, staleFlash.attemptId)).toEqual(staleFlash);
+  });
+
+  it('reports the same derived cost from the cache and from a restarted service', async () => {
+    withClock(SEP10_PEAK);
+    const store = new MapAtomicDocs();
+    seedTracking(store, SEP10_DAY_START);
+    seedAttempt(store, SEP10_PEAK, { modelName: 'deepseek-flash' });
+
+    const first = createLedger({ atomicDocs: store });
+    disposables.add({ dispose: first.dispose });
+    const cached = await first.ledger.getMeteredUsage('deepseek');
+    expect(cached.today.estimatedCost).toBe('8');
+
+    const restarted = createLedger({ atomicDocs: store });
+    disposables.add({ dispose: restarted.dispose });
+    const reloaded = await restarted.ledger.getMeteredUsage('deepseek');
+    expect(reloaded).toEqual(cached);
+    expect(await first.ledger.getMeteredUsage('deepseek')).toEqual(cached);
+  });
+
+  it('keeps the incomplete-coverage flag after deriving a cost', async () => {
+    withClock(SEP10_PEAK);
+    const store = new MapAtomicDocs();
+    seedTracking(store, SEP1_DAY_START, [shanghaiEpoch(2026, 9, 10, 8, 0)]);
+    seedAttempt(store, SEP10_PEAK, { modelName: 'deepseek-flash' });
+    const host = createLedger({ atomicDocs: store });
+    disposables.add({ dispose: host.dispose });
+
+    const report = await host.ledger.getMeteredUsage('deepseek');
+    expect(report.today.estimatedCost).toBe('8');
+    expect(report.today.unpricedRequestCount).toBe(0);
+    expect(report.today.isPartial).toBe(true);
+    expect(report.month.isPartial).toBe(true);
+  });
+
+  it('leaves a stored record for an unknown model unpriced', async () => {
+    withClock(SEP10_PEAK);
+    const store = new MapAtomicDocs();
+    seedTracking(store, SEP10_DAY_START);
+    seedAttempt(store, SEP10_PEAK, { modelName: 'deepseek-chat' });
+    const host = createLedger({ atomicDocs: store });
+    disposables.add({ dispose: host.dispose });
+
+    const report = await host.ledger.getMeteredUsage('deepseek');
+    expect(report.today.measuredRequestCount).toBe(1);
+    expect(report.today.unpricedRequestCount).toBe(1);
+    expect(report.today.estimatedCost).toBeNull();
+    expect(report.today.isPartial).toBe(true);
   });
 });
 

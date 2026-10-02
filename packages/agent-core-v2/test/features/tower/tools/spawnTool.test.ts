@@ -40,13 +40,10 @@ import {
   DEFAULT_SUBAGENT_TIMEOUT_MS,
   SECONDARY_MODEL_SECTION,
   SUBAGENT_SECTION,
-  type SubagentRouteRequest,
+  resolveSubagentBinding,
 } from '#/session/subagent/configSection';
 import { SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
-import {
-  IAutoSubagentPresetService,
-  type AutoSubagentPresetContext,
-} from '#/app/autoSubagentPreset/autoSubagentPreset';
+import { IAutoSubagentPresetService } from '#/app/autoSubagentPreset/autoSubagentPreset';
 import {
   ISessionSubagentService,
   type AgentRunHandle,
@@ -94,6 +91,8 @@ describe('TowerSpawnTool', () => {
   let subagentConfig: Record<string, unknown> | undefined;
   let config: StubConfigService;
   let createdSetMode: Mock<(mode: PermissionMode) => void>;
+  let effectiveThinking: string | undefined;
+  let child: Awaited<ReturnType<IAgentLifecycleService['create']>>;
 
   async function git(cwd: string, ...args: string[]): Promise<void> {
     await execFileAsync('git', args, { cwd });
@@ -120,18 +119,27 @@ describe('TowerSpawnTool', () => {
     subagentConfig = undefined;
     config = new StubConfigService();
     createdSetMode = vi.fn();
-    createAgent = vi.fn(
-      async () =>
-        ({
-          id: 'agent-7',
-          accessor: {
-            get: (id: unknown) =>
-              id === (IAgentPermissionModeService as unknown)
-                ? { setMode: createdSetMode }
-                : undefined,
-          },
-        }) as never,
-    );
+    effectiveThinking = undefined;
+    createAgent = vi.fn(async (options) => {
+      const childProfile = {
+        data: () => ({
+          modelAlias: options?.binding?.model,
+          thinkingLevel: options?.binding?.thinking ?? 'off',
+        }),
+        getEffectiveThinkingLevel: () => effectiveThinking ?? options?.binding?.thinking ?? 'off',
+        republishStatus: vi.fn(),
+      };
+      child = {
+        id: 'agent-7',
+        accessor: {
+          get: (id: unknown) =>
+            id === (IAgentPermissionModeService as unknown)
+              ? { setMode: createdSetMode }
+              : id === (IAgentProfileService as unknown) ? childProfile : undefined,
+        },
+      } as never;
+      return child;
+    });
     runAgent = vi.fn(
       async (agentId: string) =>
         ({
@@ -159,8 +167,6 @@ describe('TowerSpawnTool', () => {
     } as unknown as ITowerRateLimitService);
     ix.stub(ISessionContext, { cwd: repo, sessionId: 'session-spawn-test' } as unknown as ISessionContext);
     ix.stub(IAgentScopeContext, { agentId: 'main', scope: (subKey?: string) => subKey ?? '' });
-    // The requester handle's accessor mirrors production lookups: the event
-    // bus is real; the lifecycle lookup (context-token probe) finds nothing.
     ix.stub(IAgentLifecycleService, {
       get: (agentId: string) =>
         agentId === 'main'
@@ -171,7 +177,7 @@ describe('TowerSpawnTool', () => {
                   id === (IEventBus as unknown)
                     ? ix.get(IEventBus)
                     : id === (IAgentLifecycleService as unknown)
-                      ? { get: () => undefined }
+                      ? { get: (targetId: string) => targetId === 'agent-7' ? child : undefined }
                       : undefined,
               },
             } as never)
@@ -188,7 +194,12 @@ describe('TowerSpawnTool', () => {
       enabled: (id: string) => id === SECONDARY_MODEL_FLAG_ID && secondaryFlagOn,
     } as unknown as IFlagService);
     ix.stub(IModelCatalog, { get: () => ({}) } as unknown as IModelCatalog);
-    ix.stub(IAutoSubagentPresetService, stubAutoSubagentPreset());
+    ix.stub(IAutoSubagentPresetService, {
+      ...stubAutoSubagentPreset(),
+      resolveBinding: async (request) => resolveSubagentBinding(
+        config, ix.get(IFlagService), ix.get(IModelCatalog), request,
+      ),
+    });
     ix.set(ITowerSpawnTool, new SyncDescriptor(TowerSpawnTool));
   });
 
@@ -254,30 +265,75 @@ describe('TowerSpawnTool', () => {
     expect(state.roster.agents).toHaveLength(0);
   });
 
-  it('asks the automatic preset decider before resolving the worker binding', async () => {
-    const evaluate = vi.fn(
-      async (request: SubagentRouteRequest, _context: AutoSubagentPresetContext) => ({
-      request,
-      reason: 'stubbed',
+  it('creates workers and reviewers with their own temporary binding and reports the actual model', async () => {
+    const resolveBinding = vi.fn<IAutoSubagentPresetService['resolveBinding']>(async (request) => ({
+      model: request.route === 'tower_worker' ? 'fallback/worker' : 'fallback/reviewer',
+      thinking: request.route === 'tower_worker' ? 'low' : 'high',
+      source: 'auto-fallback', modelSource: 'auto-fallback', thinkingSource: 'auto-fallback',
     }));
-    ix.stub(IAutoSubagentPresetService, stubAutoSubagentPreset(evaluate));
+    ix.stub(IAutoSubagentPresetService, { resolveBinding });
+    const events: unknown[] = [];
+    disposables.add(ix.get(IEventBus).subscribe((event) => events.push(event)));
 
-    const result = await execute(WORKER_ARGS);
+    const worker = await execute(WORKER_ARGS);
+    const reviewer = await execute({ name: 'reviewer-a', kind: 'reviewer', review_target: 'feat/build-gemm' });
 
-    expect(result.isError).toBeUndefined();
-    expect(evaluate).toHaveBeenCalledTimes(1);
-    expect(evaluate.mock.calls[0]![0]).toMatchObject({
-      route: 'tower_worker',
-      caller: { modelAlias: 'kimi-code' },
-    });
-    expect(evaluate.mock.calls[0]![1]).toMatchObject({
-      sessionId: 'session-spawn-test',
-      signal: expect.any(AbortSignal),
-    });
-    expect(createAgent).toHaveBeenCalledWith({
-      binding: { profile: 'tower-worker', model: 'kimi-code', thinking: 'off' },
+    expect(worker.isError).toBeUndefined();
+    expect(reviewer.isError).toBeUndefined();
+    expect(createAgent).toHaveBeenNthCalledWith(1, {
+      binding: { profile: 'tower-worker', model: 'fallback/worker', thinking: 'low' },
       labels: { parentAgentId: 'main' },
     });
+    expect(createAgent).toHaveBeenNthCalledWith(2, {
+      binding: { profile: 'tower-worker', model: 'fallback/reviewer', thinking: 'high' },
+      labels: { parentAgentId: 'main' },
+    });
+    expect(worker.output).toContain('model: fallback/worker');
+    expect(reviewer.output).toContain('model: fallback/reviewer');
+    expect(events).toContainEqual(expect.objectContaining({ type: 'subagent.spawned', model: 'fallback/worker' }));
+    expect(events).toContainEqual(expect.objectContaining({ type: 'subagent.spawned', model: 'fallback/reviewer' }));
+    const activityLog = await readFile(join(repo, '.tower/comms/log/activity.log'), 'utf8');
+    expect(activityLog).toMatch(/spawn .*model=fallback\/worker/);
+    expect(activityLog).toMatch(/spawn .*model=fallback\/reviewer/);
+    expect(registerTask.mock.calls[0]?.[0]).toMatchObject({ model: 'fallback/worker' });
+    expect(resolveBinding).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['off', undefined])('records effective thinking instead of requested %s in task snapshots', async (requested) => {
+    effectiveThinking = 'high';
+    ix.stub(IAutoSubagentPresetService, {
+      resolveBinding: async () => ({
+        model: 'provider/worker', thinking: requested,
+        source: 'caller', modelSource: 'caller', thinkingSource: 'caller',
+      }),
+    });
+    const events: unknown[] = [];
+    disposables.add(ix.get(IEventBus).subscribe((event) => events.push(event)));
+    const result = await execute(WORKER_ARGS);
+    expect(result.isError, String(result.output)).toBeFalsy();
+    expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({
+      binding: { profile: 'tower-worker', model: 'provider/worker', thinking: requested },
+    }));
+    const task = registerTask.mock.calls[0]![0];
+    expect(task).toMatchObject({ model: 'provider/worker', thinkingEffort: 'high' });
+    expect(task.toInfo({
+      taskId: 'task-1', description: 'Worker', status: 'running', startedAt: 0, endedAt: null,
+    })).toMatchObject({ model: 'provider/worker', thinkingEffort: 'high' });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'subagent.spawned', model: 'provider/worker', thinkingEffort: 'high',
+    }));
+  });
+
+  it('refuses an unavailable route without allocation or a phantom roster entry', async () => {
+    ix.stub(IAutoSubagentPresetService, {
+      resolveBinding: vi.fn().mockRejectedValue(new Error('No compatible route')),
+    });
+    const result = await execute(WORKER_ARGS);
+    expect(result).toMatchObject({ isError: true, output: expect.stringContaining('No compatible route') });
+    expect(createAgent).not.toHaveBeenCalled();
+    expect(registerTask).not.toHaveBeenCalled();
+    expect((await store.load()).roster.agents).toHaveLength(0);
+    expect(release).toHaveBeenCalledOnce();
   });
 
   it('spawns a detached tower-worker, registers the roster entry, and releases the slot on settle', async () => {

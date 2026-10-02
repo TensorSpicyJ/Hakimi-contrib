@@ -110,6 +110,7 @@ HTTP 状态码几乎总是 200，业务结果以 `code` 为准。例外情况：
 | `GET /api/v1/config` | 读取全局配置（密钥字段脱敏） |
 | `GET /api/v1/config/subagent-preset/status` | 读取最近一次进程内自动 preset 评估；首次评估前 `data` 为 `null` |
 | `POST /api/v1/config/subagent-preset/activate` | 手动激活已配置的 preset，或用空字符串选择基础路由 |
+| `POST /api/v1/config/subagent-preset/auto` | 启用自动切换、解锁并立即重新评估整套 preset 与临时角色补位 |
 | `POST /api/v1/config` | 合并式更新配置，并广播 `event.config.changed` |
 
 手动激活接受只含 `preset` 字段的 JSON 请求：
@@ -122,7 +123,15 @@ HTTP 状态码几乎总是 200，业务结果以 `code` 为准。例外情况：
 
 preset 名称必须存在于当前配置中。使用 `{ "preset": "" }` 可清除选择器并回到基础路由。成功响应返回权威的脱敏配置及可选 `warning`，同时把这次选择记录为手动锁定；恢复该锁定前，自动切换会保持暂停。客户端应优先调用此专用端点，因为激活操作会与自动选择串行执行，并由该边界维护手动锁定与 `revision` 契约。当前 daemon 也接受通用 `POST /api/v1/config` `patch` 中自有的 `subagent.preset` 字段：服务会先从普通合并式更新中取出该字段，再把它安全转入同一个手动激活边界，其余字段仍保留原有合并语义。兼容客户端仅在旧 daemon 对专用端点返回路由级 `404` 后使用通用形式；在这类旧 daemon 上，它仍保留 legacy 配置更新行为。
 
-自动 preset 状态是进程级全局快照，因为 `[subagent].preset` 本身是全局配置。它包含 `evaluated_at`、触发评估的 `route` / `profile_name`、结构化 `reason_code`、评估前 / 选中 / 已激活的 preset 与评分、`switch_cooldown_until`、候选列表和实际生效的策略。每个候选包含可用状态、配额与 reset 证据、熔断截止时间、评分贡献，以及样本数、首 token 延迟等聚合本地证据。所有时间均为 epoch 毫秒。
+自动选择接受 `{}` 或 `{ "session_id": "<session-id>" }`。它会开启自动选择的两个配置 gate、清除手动锁，并使用刷新后的资源证据立即评估各 preset 的全部角色，包括不可用路由的临时补位。有会话 ID 时，caller 模型与 Thinking 绑定取自该会话的 main agent；省略时使用全局默认值。它不会创建会话或 subagent，不会修改 main/default model 或 Thinking，也不会锁定结果。
+
+响应包含权威的脱敏 `config`、本次请求的 `status` 及可选 `warning`。当前项已最佳或候选不可用时仍会返回评估原因；环境强制禁用不会被绕过。该主动操作跳过普通切换的评分余量和冷却，但不跳过资源可用性规则、熔断或路由校验。未锁定的自动评估不再把候选列表外的当前 preset 当成隐式人工选择保留；只有实际的手动锁保护此类选择。评估期间更晚发生的人工选择优先。没有真实会话上下文时，结果会更新全局状态，但不发布会话评估或切换事件。旧 daemon 返回路由级 `404` 时，客户端必须提示不支持立即选择，不能悄悄替换成普通配置更新。
+
+自动 preset 状态是进程级全局快照，因为 `[subagent].preset` 本身是全局配置。`evaluation_scope: "preset"` 表示整体评分；`route` / `profile_name` 只描述触发上下文，不表示只评一个角色。缺少 scope/role 字段的旧快照仍按历史单路由评估读取。状态还包含 `evaluated_at`、`reason_code`、当前/选中/已激活的 preset 与评分、`switch_cooldown_until` 及策略参数。
+
+每个候选行包含 `participating`（能否参与自动选择）、`native_score`、补位后的整体 `score`、`role_count`、原生可用/临时补位/仍不可用角色数、`total_role_weight` 和证据覆盖 `coverage`。`role_scores` 包含每个角色的 `key`、`route`、可选 `profile_name`、`weight`、`original` 与 `effective` 路由评价、`effective_score`、`fallback_penalty` 及可选的 `fallback` 来源。每份路由评价标明模型、Thinking、provider、解析来源、可用状态、原始分、评分贡献、本地证据和资源证据。已验证为同一账户的别名共用配置中的规范查询 provider 名称，便于账户摘要去重；模型 alias 仍标识真实绑定。私有账户指纹不会输出。这里展示的替代是路由决策，不表示子任务已经启动；实际派发记录保存真正绑定给子任务的模型。
+
+`resource.kind` 分为 `subscription`、`metered` 和 `unknown`。订阅证据包含剩余配额和 reset 时间。可选的 `reset_priority` 包含声明的额度 `window`（`duration` 和 `unit`）、到期 `reset_at`、该周期的 `remaining_percent`、实际 `horizon_ms`、指数 `bonus` 和 `floor_relaxed`。该到期时间与瓶颈配额的 reset 分开，不能从短期限流窗口推断。`floor_relaxed` 表示保留策略例外，不是允许突破真实限额；同一加分同时体现在 `contributions.reset_bonus`，不能重复相加。支持此功能时，策略快照还包含 `reset_priority_window_ms`、`reset_priority_exponent`、`reset_priority_max_bonus`。官方 DeepSeek 的按量证据包含人民币 `balance_cny`、`balance_status`、账户可用状态及 `resource_score_basis: "funded_account"`，不会伪造配额百分比。`metered_usage` 保留本地日/月费用估算及不完整/缺价标记。未知金额保持缺省，未知费用保持 `null`；`blocked_until` 标明硬性时段限制的解除时间。DeepSeek 高峰软惩罚使用可选的按量资源证据 `peak_penalty: { points, until }`；此时路由可以仍为健康且允许调用。`contributions.peak_penalty` 是已计入角色原始分的正数扣分，候选级数值是有效角色的加权汇总，不能再扣一次。`deepseek_role_share` 表示有效健康 DeepSeek 角色的权重占比（0–1）；非高峰时占比可以为正，而当前扣分为零。策略快照提供 `deepseek_peak_policy` 和 `deepseek_peak_penalty`。缺少新可选字段的旧快照仍按 `deepseek_avoid_peak_hours` 解释原有硬禁用。评分时间戳使用 epoch 毫秒，既有按量统计的日历区间仍为 ISO 时间戳。显式安全投影会去掉凭证、端点和任意来源字段。
 
 该运行时快照不会进入 `GET /api/v1/config`，也不会写入 `config.toml`；其中不含 prompt、路径、错误文本或其他自由格式的用户内容。SDK 对应接口是 `KimiHarness.getAutoSubagentPresetStatus()`；使用 v1 引擎或 v2 首次评估前返回 `undefined`。`onSubagentPresetEvaluated()` 与 `onSubagentPresetChanged()` 提供对应的类型化事件流；两者在 v1 上均不产生事件。
 
@@ -157,12 +166,12 @@ preset 名称必须存在于当前配置中。使用 `{ "preset": "" }` 可清�
 | `GET /api/v1/sessions/{session_id}/status` | 实时状态汇总 |
 | `GET /api/v1/sessions/{session_id}/goal` | 当前目标快照（无则 `null`） |
 | `GET /api/v1/sessions/{session_id}/research` | 读取当前 AITP Research Mode 快照；默认可用，进入前返回 `inactive` 本地快照且不发生 AITP I/O |
-| `POST /api/v1/sessions/{session_id}/research/command` | 提交研究 steering 命令；`enter_mode` 默认可用，是显式探测 AITP 并执行 `enter` → `check` 维护周期的操作 |
+| `POST /api/v1/sessions/{session_id}/research/command` | 提交研究 steering 命令；`enter_mode` 默认可用，是显式启用模式并让官方 AITP Skills 可见的操作 |
 | `GET /api/v1/sessions/{session_id}/warnings` | 会话级告警 |
 | `POST /api/v1/sessions/{session_id}/export` | 导出会话与诊断信息（zip 流，不走信封） |
 | `GET /api/v1/sessions/{session_id}/snapshot` | 客户端重建用全量快照（含 `as_of_seq` 与 `epoch`） |
 
-SDK 通过 `Session.getResearch()` 和 `Session.commandResearch()` 暴露相同语义。显式发送 `enter_mode` 前，`getResearch()` 只读取本地的 inactive 快照，不会登录 OAuth，也不会探测 AITP。`commandResearch({ kind: 'enter_mode', actor: 'user' | 'model' })` 默认可发现，并返回命令执行后的快照。本次毕业只改变发现性与门控：REST/SDK 的 Wire 数据结构、AITP 传输层 schema（结构定义）以及 checkpoint 的 `save` + `show` + `check` 屏障均保持不变。
+SDK 通过 `Session.getResearch()` 和 `Session.commandResearch()` 暴露相同语义。显式发送 `enter_mode` 前，`getResearch()` 只读取本地的 inactive 快照，不会登录 OAuth，也不会探测 AITP。`commandResearch({ kind: 'enter_mode', actor: 'user' | 'model' })` 默认可发现，并返回命令执行后的快照。本次毕业只改变发现性与门控：REST/SDK 的 Wire 数据结构与 AITP 传输层 schema（结构定义）均保持不变。
 
 ### 消息与转录
 

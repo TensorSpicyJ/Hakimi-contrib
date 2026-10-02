@@ -3,9 +3,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
 
-import { ISessionMetadata, getLiveSessionById } from '@moonshot-ai/agent-core-v2';
+import {
+  ISessionHandoffCoordinator,
+  ISessionMetadata,
+  MAIN_AGENT_ID,
+  SessionHandoffErrors,
+  getLiveSessionById,
+  type SessionHandoffRequest,
+} from '@moonshot-ai/agent-core-v2';
 import { pino, type Logger } from 'pino';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type RawData, WebSocket } from 'ws';
 
 import {
@@ -266,12 +273,26 @@ describe('remote access server integration', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     if (server !== undefined) {
       await server.close();
       server = undefined;
     }
     await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
   });
+
+  /** Cross-project handoff request whose target directory does not exist, so a
+   *  permitted start fails at its own pre-flight instead of creating anything. */
+  function handoffRequest(sourceSessionId: string): SessionHandoffRequest {
+    return {
+      sourceSessionId,
+      sourceAgentId: MAIN_AGENT_ID,
+      sourceWorkDir: join(home, 'source'),
+      workDir: join(home, 'missing-target'),
+      prompt: 'Take this task over in the other project',
+      signal: new AbortController().signal,
+    };
+  }
 
   async function startRemote(sessionId: string | null = SHARED_SESSION_ID, logger?: Logger): Promise<RunningServer> {
     server = await startServer({
@@ -693,6 +714,59 @@ describe('remote access server integration', () => {
     expect(completed).toMatchObject({
       req: { url: '[redacted]', host: '[redacted]' },
       code: REMOTE_ACCESS_FORBIDDEN_CODE,
+    });
+  });
+
+  it('refuses cross-project handoff from the shared session while leaving other sessions alone', async () => {
+    // The restricted embedding already refuses REST session creation; a handoff
+    // would route around that boundary. The refusal is a source-scoped guard, so
+    // it never becomes a process-wide switch on a shared core.
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_CROSS_PROJECT_SESSIONS', 'true');
+    const remote = await startRemote(SHARED_SESSION_ID);
+    const coordinator = remote.core.accessor.get(ISessionHandoffCoordinator);
+
+    expect(coordinator.isAvailable(SHARED_SESSION_ID)).toBe(false);
+    await expect(coordinator.start(handoffRequest(SHARED_SESSION_ID))).rejects.toMatchObject({
+      code: SessionHandoffErrors.codes.SESSION_HANDOFF_DENIED,
+    });
+
+    // A session outside the share is not this embedding's business: the guard
+    // abstains, so the call proceeds to its own target-directory pre-flight.
+    expect(coordinator.isAvailable('other-session')).toBe(true);
+    await expect(coordinator.start(handoffRequest('other-session'))).rejects.toMatchObject({
+      code: SessionHandoffErrors.codes.SESSION_HANDOFF_WORK_DIR_INVALID,
+    });
+  });
+
+  it('refuses cross-project handoff from every source in all-session restricted mode', async () => {
+    // All-session mode has no session boundary left to cross, but it still
+    // forbids creating sessions — a handoff would slip past that.
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_CROSS_PROJECT_SESSIONS', 'true');
+    const remote = await startRemote(null);
+    const coordinator = remote.core.accessor.get(ISessionHandoffCoordinator);
+
+    expect(coordinator.isAvailable('any-session')).toBe(false);
+    await expect(coordinator.start(handoffRequest('any-session'))).rejects.toMatchObject({
+      code: SessionHandoffErrors.codes.SESSION_HANDOFF_DENIED,
+    });
+  });
+
+  it('leaves cross-project handoff available on an ordinary server', async () => {
+    // The product surface (plain Web, remote control, the tunnel edge) passes no
+    // `remoteAccess`, so the embedding refusal must not follow the core around.
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_CROSS_PROJECT_SESSIONS', 'true');
+    server = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: home,
+      logLevel: 'silent',
+    });
+    const coordinator = server.core.accessor.get(ISessionHandoffCoordinator);
+
+    expect(coordinator.isAvailable('any-session')).toBe(true);
+    await expect(coordinator.start(handoffRequest('any-session'))).rejects.toMatchObject({
+      code: SessionHandoffErrors.codes.SESSION_HANDOFF_WORK_DIR_INVALID,
     });
   });
 });

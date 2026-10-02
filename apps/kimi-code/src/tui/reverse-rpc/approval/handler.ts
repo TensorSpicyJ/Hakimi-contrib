@@ -1,15 +1,16 @@
 import type { ApprovalHandler, ApprovalRequest, ApprovalResponse } from '@bhjia-phys/hakimi-sdk';
 
-import { adaptApprovalRequest } from './adapter';
+import { adaptApprovalRequest, type ApprovalRequestContext } from './adapter';
 import type { ApprovalController } from './controller';
 
 export function createApprovalRequestHandler(
   controller: ApprovalController,
   onResponse?: (request: ApprovalRequest, response: ApprovalResponse) => void,
+  context?: ApprovalRequestContext,
 ): ApprovalHandler {
   return async (event): Promise<ApprovalResponse> => {
     try {
-      const response = await controller.show(adaptApprovalRequest(event));
+      const response = await controller.show(adaptApprovalRequest(event, context));
       onResponse?.(event, response);
       return response;
     } catch {

@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const out = await mkdtemp(join(tmpdir(), 'hakimi-research-panel-'));
-const browser = await chromium.launch({ headless: true, args: ['--disable-dev-shm-usage'] });
+const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH, args: ['--disable-dev-shm-usage'] });
 const page = await browser.newPage({ viewport: { width: 1180, height: 960 } });
 const errors = [];
 page.on('pageerror', error => errors.push(error.message));
@@ -32,6 +32,9 @@ try {
   const body = await board.innerText();
   assert.match(body, /On/, 'Shows the on state');
   assert.match(body, /AITP Skills visible/, 'Shows skill visibility');
+  assert.match(body, /1\.1\.0\+example\.20260916/, 'Shows the supplied plugin version');
+  assert.equal(await board.locator('.research-skills li').count(), 4, 'Shows the actual core skill list');
+  assert.match(body, /\/skill:aitp-memory/, 'Shows the composer invocation syntax');
   assert.match(body, /read-only/, 'Marks legacy records read-only');
   assert.deepEqual(await page.locator('.empty-composer').boundingBox(), emptyComposer, 'No empty composer shift');
   await hide.press('Escape');
@@ -95,8 +98,44 @@ try {
   assert.equal(await board.evaluate(el => el.scrollWidth <= el.clientWidth), true, 'Board has no horizontal overflow');
   await page.getByRole('button', { name: '隐藏面板', exact: true }).press('Escape');
   await visible(page.getByRole('button', { name: 'Research', exact: true }));
+  // Assert the switch itself, not only the row highlight: both must follow Research.
+  await page.setViewportSize({ width: 1180, height: 960 });
+  await call('locale', 'en');
+  await call('mode', 'off');
+  const modes = page.locator('.mode-pill');
+  const researchEntry = page.locator('.modes-menu').getByRole('button', { name: /^Research\b/ });
+  const switchStates = [];
+  for (const theme of ['light', 'dark']) {
+    await call('theme', theme);
+    const states = [];
+    for (const [index, enabled] of [false, true, false].entries()) {
+      await modes.click();
+      await researchEntry.waitFor();
+      await page.waitForTimeout(200);
+      const state = await researchEntry.locator('.mode-switch').evaluate(track => {
+        const knob = track.querySelector('.mode-knob');
+        const transform = getComputedStyle(knob).transform;
+        return {
+          on: track.classList.contains('on'),
+          background: getComputedStyle(track).backgroundColor,
+          knobX: transform === 'none' ? 0 : new DOMMatrixReadOnly(transform).m41,
+        };
+      });
+      assert.equal(state.on, enabled, `${theme}: switch class follows Research`);
+      assert.equal(state.knobX, enabled ? 15 : 0, `${theme}: switch knob follows Research`);
+      states.push(state);
+      await researchEntry.press('Tab');
+      await page.keyboard.press('Shift+Tab');
+      assert.equal(await researchEntry.evaluate(el => el.matches(':focus-visible')), true);
+      await page.screenshot({ path: join(out, `toggle-${theme}-${index}-${enabled ? 'on' : 'off'}-focus.png`) });
+      await researchEntry.press(index < 2 ? 'Enter' : 'Escape');
+    }
+    assert.notEqual(states[1].background, states[0].background, `${theme}: active track changes color`);
+    assert.deepEqual(states[2], states[0], `${theme}: disabling restores the track and knob`);
+    switchStates.push({ theme, states });
+  }
   assert.deepEqual(errors, [], 'No browser errors');
-  await writeFile(join(out, 'report.json'), JSON.stringify({ passed: true, errors }, null, 2));
+  await writeFile(join(out, 'report.json'), JSON.stringify({ passed: true, errors, switchStates }, null, 2));
   console.log(`Research panel browser checks passed; screenshots: ${out}`);
 } finally {
   await browser.close();

@@ -25,6 +25,8 @@
  * NOT applied, and the file is never rewritten); env-var renames declared via a binding's
  * `deprecatedEnv` still resolve as a fallback, likewise with a warning.
  * Diagnostics changes are published through `onDidChangeDiagnostics`.
+ * Multi-section replacements evaluate factories inside the target write
+ * transition and commit User-layer raw/TOML state only after storage succeeds.
  * `ConfigRegistry` is also the
  * fold of the `ConfigSectionContribution` collection token (D12): records
  * provided by live units register sections incrementally through the same
@@ -55,6 +57,7 @@ import {
   type ConfigEffectiveOverlay,
   type ConfigInspectValue,
   type ConfigMerge,
+  type ConfigSectionsUpdate,
   type ConfigOverlayRegisteredEvent,
   type ConfigSchema,
   type ConfigSection,
@@ -515,13 +518,14 @@ export class ConfigService extends Disposable implements IConfigService {
   }
 
   async replaceSections(
-    sections: Readonly<Record<string, unknown>>,
+    update: ConfigSectionsUpdate,
     target: ConfigTarget = ConfigTarget.User,
   ): Promise<void> {
     await this.ready;
-    const domains = Object.keys(sections);
-    if (domains.length === 0) return;
     if (target === ConfigTarget.Memory) {
+      const sections = typeof update === 'function' ? update(cloneRecord(this.memory)) : update;
+      const domains = Object.keys(sections);
+      if (domains.length === 0) return;
       const staged: ResolvedConfig = { ...this.memory };
       for (const domain of domains) {
         const value = sections[domain];
@@ -536,6 +540,9 @@ export class ConfigService extends Disposable implements IConfigService {
       return;
     }
     await this.enqueueStateTransition(async () => {
+      const sections = typeof update === 'function' ? update(cloneRecord(this.raw)) : update;
+      const domains = Object.keys(sections);
+      if (domains.length === 0) return;
       const staged: ResolvedConfig = { ...this.raw };
       for (const domain of domains) {
         const value = sections[domain] === null ? undefined : sections[domain];
@@ -546,8 +553,8 @@ export class ConfigService extends Disposable implements IConfigService {
           staged[domain] = this.registry.validate(domain, stripped);
         }
       }
+      await this.persistDomains(domains, staged);
       this.raw = staged;
-      await this.persistDomains(domains);
       this.rebuildEffective('set', domains);
       this.replaceRawDeprecationDiagnostics(this.rawSnake);
       this.emitDiagnosticsIfChanged();
@@ -813,11 +820,16 @@ export class ConfigService extends Disposable implements IConfigService {
     await this.persistDomains([domain]);
   }
 
-  private async persistDomains(domains: readonly string[]): Promise<void> {
+  private async persistDomains(
+    domains: readonly string[],
+    raw: ResolvedConfig = this.raw,
+  ): Promise<void> {
+    const stagedSnake = cloneRecord(this.rawSnake);
     for (const domain of domains) {
-      applySectionToToml(this.rawSnake, domain, this.raw[domain], this.registry);
+      applySectionToToml(stagedSnake, domain, raw[domain], this.registry);
     }
-    await this.documentStore.set(CONFIG_SCOPE, this.configKey, this.rawSnake);
+    await this.documentStore.set(CONFIG_SCOPE, this.configKey, stagedSnake);
+    this.rawSnake = stagedSnake;
   }
 }
 

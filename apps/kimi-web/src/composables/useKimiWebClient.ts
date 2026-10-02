@@ -450,6 +450,10 @@ const rawState: ExtendedState = reactive({
   sessionsFullyLoaded: false,
 });
 const researchRequests = createResearchRequestCoordinator();
+watch(() => rawState.backend, () => {
+  researchRequests.reset();
+  rawState.researchBySession = {};
+}, { flush: 'sync' });
 
 // ---------------------------------------------------------------------------
 // Draft mode staging (no active session yet).
@@ -3080,6 +3084,8 @@ export function useKimiWebClient() {
     loadModels: modelProvider.loadModels,
     loadProviders: modelProvider.loadProviders,
     skills,
+    aitpPlugin: modelProvider.aitpPlugin,
+    pluginMetadataStatus: modelProvider.pluginMetadataStatus,
     activateSkill: modelProvider.activateSkill,
     setModel: modelProvider.setModel,
     applyPresetMainRoute: modelProvider.applyPresetMainRoute,
@@ -3103,6 +3109,8 @@ export function useKimiWebClient() {
     providerUsageError,
     updateConfig: workspaceState.updateConfig,
     activateSubagentPreset: workspaceState.activateSubagentPreset,
+    autoSelectSubagentPreset: workspaceState.autoSelectSubagentPreset,
+    autoPresetAction: workspaceState.autoPresetAction,
     refreshProviderUsage: workspaceState.refreshProviderUsage,
 
     // Auth actions

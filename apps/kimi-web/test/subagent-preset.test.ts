@@ -1,4 +1,5 @@
-import { computed, nextTick } from 'vue';
+import { readFileSync } from 'node:fs';
+import { computed, nextTick, ref } from 'vue';
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -26,8 +27,36 @@ import {
   subagentPresetManualLock,
   subagentPresetReasonLabel,
   subagentPresetRemainingLabel,
-  subagentPresetResumeAutoPatch,
+  autoSubagentPresetActionLabel,
+  autoSubagentPresetUnavailableReason,
+  autoSubagentPresetResultLabel,
+  subagentPresetAvailabilityLabel,
+  subagentPresetDisplayRows,
+  subagentPresetMenuRows,
+  subagentPresetConfiguredLabel,
+  subagentPresetParticipationLabel,
+  subagentPresetCandidateState,
+  subagentPresetEvaluationScopeLabel,
+  subagentPresetTotals,
+  subagentPresetRoleCounts,
+  subagentPresetCoverageLabel,
+  subagentPresetResourceLabel,
+  subagentPresetPeakPolicyLabel,
+  subagentPresetPeakSummary,
+  subagentPresetRolePeakLabel,
+  subagentPresetResetFloorRelaxedLabel,
+  subagentPresetResetPriorityLabel,
+  subagentPresetMeteredProviders,
+  subagentPresetRoleContribution,
+  subagentPresetBindingLabel,
+  subagentPresetBindingSourceLabel,
+  formatPresetCny,
 } from '../src/lib/subagentPreset';
+import type { AutoSubagentPresetRoleScore, AutoSubagentPresetRouteScore, AutoSubagentPresetCandidateAvailability } from '../src/api/types';
+import enHeader from '../src/i18n/locales/en/header';
+import zhHeader from '../src/i18n/locales/zh/header';
+import enSettings from '../src/i18n/locales/en/settings';
+import zhSettings from '../src/i18n/locales/zh/settings';
 
 const apiMock = vi.hoisted(() => ({ listModels: vi.fn(), setConfig: vi.fn() }));
 
@@ -57,6 +86,45 @@ describe('Web subagent preset routes', () => {
       thinkingEffort: 'high',
     });
     expect(mainRouteForPreset(config, '')).toBeUndefined();
+  });
+});
+
+describe('permanent automatic preset entry points', () => {
+  const source = (path: string) => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8');
+
+  it('keeps desktop, mobile and settings actions visible with disabled explanations and loading', () => {
+    for (const [path, handler] of [
+      ['components/chat/ChatHeader.vue', 'resumeAutoPreset'],
+      ['components/mobile/MobileSettingsSheet.vue', 'onResumeAutoPreset'],
+      ['components/settings/SettingsDialog.vue', 'resumeAutoPreset'],
+    ]) {
+      const component = source(path!);
+      const action = component.match(new RegExp(`<(?:Button|MenuItem)[^>]*@click="${handler}"[^>]*>`))?.[0];
+      expect(action).toBeDefined();
+      expect(action).not.toContain('v-if');
+      expect(action).toContain('disabledReason');
+      expect(component).toContain('autoPresetControl?.pending');
+      expect(component).toContain('autoPresetControl?.feedback');
+      expect(component).toContain("t('header.subagentPresetAutomatic')");
+      expect(component).not.toContain('subagentPresetResumeAutoPatch');
+    }
+    const settings = source('components/settings/SettingsDialog.vue');
+    expect(settings.indexOf('@click="resumeAutoPreset"')).toBeLessThan(settings.indexOf('<template v-if="config">'));
+    expect(settings).toContain("emit('resumeAutoPreset')");
+  });
+
+  it('routes all entry points to one guarded action with a captured optional session', () => {
+    const app = source('App.vue');
+    expect(app.match(/@resume-auto-preset="handleResumeAutoPreset"/g)).toHaveLength(3);
+    expect(app).toContain('t, client.autoPresetAction.supported');
+    expect(app).toContain("client.autoPresetAction.metaStatus === 'error'");
+    expect(app).toContain("t('header.subagentPresetAutoMetaRetry')");
+    const handler = app.slice(app.indexOf('async function handleResumeAutoPreset'), app.indexOf('// LoginDialog callbacks'));
+    expect(handler).toContain('if (configSaving.value || autoPresetControl.value.disabledReason) return;');
+    expect(handler).toContain('const targetSessionId = client.activeSessionId.value;');
+    expect(handler).toContain('await client.autoSelectSubagentPreset(targetSessionId);');
+    expect(handler).not.toContain('updateConfig');
+    expect(handler).not.toContain('applyPresetMainRoute');
   });
 });
 
@@ -123,13 +191,20 @@ describe('manual lock and resume-auto', () => {
     expect(subagentPresetManualLock(undefined)).toBe(false);
   });
 
-  it('resume-auto clears only manualLock and never touches the preset or the gates', () => {
-    expect(subagentPresetResumeAutoPatch()).toEqual({
-      subagent: { autoPreset: { manualLock: false } },
-    });
-    // Exactly one target field on the wire: no preset, no enabled flags, no
-    // experimental gate — resuming must not re-route or re-enable anything.
-    expect(Object.keys(subagentPresetResumeAutoPatch())).toEqual(['subagent']);
+  it('keeps automatic selection actionable in manual, automatic, and disabled modes', () => {
+    const t = (key: string) => key;
+    expect(autoSubagentPresetActionLabel(false, false, t)).toBe('header.subagentPresetAutoSelect');
+    expect(autoSubagentPresetActionLabel(false, true, t)).toBe('header.subagentPresetResumeAuto');
+    expect(autoSubagentPresetActionLabel(true, false, t)).toBe('header.subagentPresetAutoAgain');
+    expect(autoSubagentPresetUnavailableReason(null, {}, t)).toBe('header.subagentPresetConfigUnavailable');
+    expect(autoSubagentPresetUnavailableReason(config, {}, t)).toBeUndefined();
+    expect(autoSubagentPresetUnavailableReason(config, {}, t, true)).toBeUndefined();
+    expect(autoSubagentPresetUnavailableReason(config, {}, t, false)).toBe('header.subagentPresetAutoUnsupported');
+    expect(autoSubagentPresetUnavailableReason(config, { auto_subagent_preset: false }, t)).toBeUndefined();
+    expect(autoSubagentPresetUnavailableReason(
+      { ...config, experimental: { auto_subagent_preset: true } },
+      { auto_subagent_preset: false }, t,
+    )).toBe('header.subagentPresetAutoEnvDisabled');
   });
 });
 
@@ -441,6 +516,18 @@ describe('subagent-preset controls and status separators', () => {
     ).toEqual({ preset: 'balanced', score: 76.25 });
   });
 
+  it('reports the evaluated preset, reason and timestamp even when unchanged', () => {
+    for (const locale of ['en', 'zh'] as const) withLocale(locale, () => {
+      const result = autoSubagentPresetResultLabel(
+        config, { ...switchedStatus, reasonCode: 'current_optimal' }, locale, t,
+      );
+      expect(result).toContain('fast');
+      expect(result).toContain(t('header.subagentPresetReasons.current_optimal'));
+      expect(result).toContain(new Date(switchedStatus.evaluatedAt).toLocaleString(locale));
+      expect(t('header.subagentPresetAutoAgain')).not.toContain('header.');
+    });
+  });
+
   it('formats the header control label in en and zh', () => {
     withLocale('en', () => {
       expect(subagentPresetLabel('balanced', t)).toBe('Preset: balanced');
@@ -548,7 +635,7 @@ describe('subagent-preset controls and status separators', () => {
   it('localizes structured reasons in diagnostics and transcript markers', () => {
     withLocale('en', () => {
       expect(subagentPresetReasonLabel('current_unhealthy', t)).toBe(
-        'The current preset is unhealthy or low on quota',
+        'The current preset is not eligible for automatic selection',
       );
       expect(
         subagentPresetChangedLabel(
@@ -592,7 +679,7 @@ describe('subagent-preset controls and status separators', () => {
         'Quota +80.0 · Reliability −7.5',
       );
       expect(subagentPresetCandidateBreakdown(candidate, t)).toContain(
-        'Quota +80.0 · Priority +8.0 · Reset +1.0',
+        'Quota +80.0 · Priority +8.0 · Reset bonus +1.0',
       );
       expect(
         subagentPresetCandidateSummary(
@@ -600,13 +687,264 @@ describe('subagent-preset controls and status separators', () => {
           1000,
           t,
         ),
-      ).toBe('Quota +80.0 · Reliability −7.5 · No local history');
+      ).toBe('Quota +80.0 · Reliability −7.5 · No usable account history');
     });
     withLocale('zh', () => {
       expect(subagentPresetCandidateSummary(candidate, 1000, t)).toBe(
         '额度 +80.0 · 可靠性 −7.5',
       );
     });
+  });
+
+  const nativeRoute: AutoSubagentPresetRouteScore = {
+    model: 'example/native', thinking: 'max', provider: 'example-subscription', source: 'preset',
+    availability: 'quota_below_floor', score: 12, contributions: candidate.contributions,
+    localEvidence: candidate.localEvidence,
+    resource: { kind: 'subscription', quotaRemainingPercent: 12, resourceScore: 12 },
+  };
+  const replacement: AutoSubagentPresetRouteScore = {
+    ...nativeRoute, model: 'example/flash', thinking: 'low', provider: 'example-metered',
+    availability: 'healthy', score: 100,
+    contributions: { ...candidate.contributions, quotaRemaining: undefined, resourceScore: 100 },
+    resource: { kind: 'metered', currency: 'CNY', balanceCny: '12.34', balanceStatus: 'known', isAvailable: true, resourceScore: 100, resourceScoreBasis: 'funded_account' },
+  };
+  const role: AutoSubagentPresetRoleScore = {
+    key: 'coder', route: 'agent', profileName: 'coder', weight: 2,
+    original: nativeRoute, effective: replacement, effectiveScore: 90, fallbackPenalty: 10,
+    fallback: { sourcePreset: 'allowed', sourceRole: 'reviewer', reason: 'quota_below_floor' },
+  };
+  const whole: AutoSubagentPresetCandidateScore = {
+    ...candidate, participating: true, nativeScore: 0, score: 90, roleScores: [role],
+    roleCount: 1, nativeAvailableRoleCount: 0, fallbackRoleCount: 1, unavailableRoleCount: 0,
+    totalRoleWeight: 2, coverage: { resourceProviderCount: 2, totalProviderCount: 2, localEvidenceRoleCount: 1, totalRoleCount: 1 },
+  };
+
+  it('keeps all presets visible without adding exclusions to the configured candidate pool', () => {
+    const status = { ...switchedStatus, evaluationScope: 'preset' as const, candidates: [whole, { ...whole, preset: 'excluded', participating: false }] };
+    const rows = subagentPresetDisplayRows(['balanced', 'excluded', 'new'], status, ['balanced']);
+    expect(rows.map((r) => [r.preset, r.participating])).toEqual([['balanced', true], ['excluded', false], ['new', false]]);
+    expect(rows[2]?.candidate).toBeUndefined();
+    expect(subagentPresetDisplayRows(['balanced'], undefined, [])[0]?.participating).toBe(false);
+    expect(subagentPresetDisplayRows([], status)[1]?.participating).toBe(false);
+    expect(subagentPresetDisplayRows(['balanced'], undefined)[0]?.candidate).toBeUndefined();
+    expect(subagentPresetDisplayRows([], status, [])[0]?.participating).toBe(false);
+  });
+
+  it('separates current configuration from an earlier automatic activation in reactive diagnostics', () => {
+    for (const locale of ['en', 'zh'] as const) withLocale(locale, () => {
+      const currentConfig = ref<AppConfig>({ ...config, subagent: { ...config.subagent, preset: 'kimi-heavy' } });
+      const label = computed(() => subagentPresetConfiguredLabel(currentConfig.value, t));
+      const history = { ...switchedStatus };
+      expect(label.value).toBe(t('settings.smartRoutingConfiguredSelection', { preset: 'kimi-heavy' }));
+      currentConfig.value = { ...config, subagent: { ...config.subagent, preset: 'manual-B', autoPreset: { manualLock: true } } };
+      expect(label.value).toBe(t('settings.smartRoutingConfiguredSelection', { preset: 'manual-B' }));
+      expect(label.value).not.toContain('kimi-heavy');
+      currentConfig.value.subagent!.preset = '';
+      expect(label.value).toBe(t('settings.smartRoutingConfiguredSelection', { preset: t('header.subagentPresetBaseOption') }));
+      expect(label.value).not.toContain('kimi-heavy');
+      expect(history.activatedPreset).toBe('kimi-heavy');
+      // The optimistic auto-response helper retains its existing precedence.
+      expect(subagentPresetCurrentEvaluation(history, 'manual-B').preset).toBe('kimi-heavy');
+      expect(subagentPresetCurrentEvaluation(history, '').preset).toBe('kimi-heavy');
+    });
+    const settings = readFileSync(new URL('../src/components/settings/SettingsDialog.vue', import.meta.url), 'utf8');
+    expect(settings).toContain('subagentPresetConfiguredLabel(props.config, t)');
+    expect(settings).not.toContain('subagentPresetCurrentEvaluation');
+    expect(settings).toContain('class="scheduler-current"');
+    expect(settings).toContain('class="scheduler-activation"');
+    expect(settings).toContain("t('settings.smartRoutingActivatedSelection', { preset })");
+  });
+
+  it('keeps deleted or renamed history read-only and leaves configured exclusions manually selectable', () => {
+    const status = { ...switchedStatus, candidates: [whole, { ...whole, preset: 'excluded', participating: false }] };
+    for (const names of [['excluded'], ['renamed', 'excluded']]) {
+      const menu = subagentPresetMenuRows(names, status, ['renamed']);
+      expect(menu.map((row) => row.preset)).toEqual(names);
+      expect(menu.find((row) => row.preset === 'excluded')).toMatchObject({ configured: true, participating: false });
+      const rows = subagentPresetDisplayRows(names, status, ['balanced', 'renamed']);
+      expect(rows.find((row) => row.preset === 'balanced')).toMatchObject({ configured: false, participating: false, candidate: whole });
+      expect(subagentPresetDisplayRows(names, status).find((row) => row.preset === 'balanced')).toMatchObject({ configured: false, participating: false });
+    }
+    for (const file of ['chat/ChatHeader.vue', 'mobile/MobileSettingsSheet.vue']) {
+      const source = readFileSync(new URL(`../src/components/${file}`, import.meta.url), 'utf8');
+      expect(source).toContain('subagentPresetMenuRows(');
+      expect(source).toMatch(/preset !== '' && !props\.subagentPresetNames\??\.includes\(preset\)/);
+    }
+    const settings = readFileSync(new URL('../src/components/settings/SettingsDialog.vue', import.meta.url), 'utf8');
+    expect(settings).toContain('v-if="!row.configured"');
+    expect(settings).toContain("t('settings.smartRoutingRemovedPreset')");
+    const row = settings.slice(settings.indexOf('v-for="row in schedulerRows"'), settings.indexOf('<div v-if="schedulerMeteredProviders.length"'));
+    expect(row).not.toContain('@click=');
+  });
+
+  it('distinguishes native, temporary, partial and legacy totals in both locales', () => {
+    for (const locale of ['en', 'zh'] as const) withLocale(locale, () => {
+      expect(subagentPresetCandidateState(whole, t)).toBe(t('header.subagentPresetFallback'));
+      expect(subagentPresetCandidateState({ ...whole, fallbackRoleCount: 0 }, t)).toBe(t('header.subagentPresetNative'));
+      for (const availability of ['partial', 'unavailable'] as const) expect(subagentPresetCandidateState({ ...whole, availability }, t)).toBe(t(`header.subagentPresetAvailability.${availability}`));
+      expect(subagentPresetTotals(whole, t)).toContain('0.0');
+      expect(subagentPresetTotals(whole, t)).toContain('90.0');
+      expect(subagentPresetTotals(undefined, t)).toBe(t('header.subagentPresetScoreNoData'));
+      expect(subagentPresetRoleCounts(whole, t)).toContain('0/1');
+      expect(subagentPresetCoverageLabel(whole, t)).toContain('2/2');
+      expect(subagentPresetParticipationLabel(false, t)).toBe(t('header.subagentPresetExcluded'));
+      expect(subagentPresetCandidateState(candidate, t)).toBe(t('header.subagentPresetLegacy'));
+      expect(subagentPresetEvaluationScopeLabel(switchedStatus, t)).toBe(t('header.subagentPresetLegacy'));
+      expect(subagentPresetEvaluationScopeLabel({ ...switchedStatus, evaluationScope: 'preset', candidates: [whole] }, t)).toBe(t('header.subagentPresetAggregate'));
+      expect(subagentPresetEvaluationScopeLabel({ ...switchedStatus, evaluationScope: 'preset' }, t)).toBe(t('header.subagentPresetLegacy'));
+      expect(subagentPresetBindingLabel(replacement, t)).toBe('example/flash · low');
+      expect(subagentPresetBindingSourceLabel(replacement, t)).not.toContain('settings.');
+      expect(subagentPresetCandidateSummary({ ...whole, localEvidence: { ...candidate.localEvidence, sampleCount: 0 } }, 0, t)).toContain(t('header.subagentPresetNoLocalEvidence'));
+    });
+  });
+
+  it('renders peak modes, weighted shares and server deductions in both locales without rescoring', () => {
+    for (const locale of ['en', 'zh'] as const) withLocale(locale, () => {
+      for (const mode of ['block', 'penalize', 'off'] as const) {
+        const label = subagentPresetPeakPolicyLabel({ deepseekPeakPolicy: mode, deepseekPeakPenalty: 60, deepseekAvoidPeakHours: true }, t)!;
+        expect(label).toContain(t(`settings.presetScoring.peakModes.${mode}`));
+        expect(label).toContain('60.0');
+      }
+      expect(subagentPresetPeakPolicyLabel({ deepseekAvoidPeakHours: true }, t)).toContain(t('settings.presetScoring.peakModes.block'));
+      expect(subagentPresetPeakPolicyLabel({ deepseekAvoidPeakHours: false }, t)).toContain(t('settings.presetScoring.peakModes.off'));
+      expect(subagentPresetPeakPolicyLabel({}, t)).toBeUndefined();
+      for (const [share, points] of [[0, 0], [0.25, 15], [0.5, 30], [1, 60]] as const) {
+        // Deliberately fixed role count / clamped score: neither controls the displayed evidence.
+        const value = { ...whole, deepseekRoleShare: share, roleCount: 17, score: 0,
+          contributions: { ...whole.contributions, peakPenalty: points } };
+        const label = subagentPresetPeakSummary(value, t)!;
+        expect(label).toContain(`${(share * 100).toFixed(1)}%`);
+        expect(label).toContain(points ? `−${points.toFixed(1)}` : t('settings.presetScoring.peakNoPenalty'));
+        expect(subagentPresetCandidateSummary(value, 0, t)).toContain(label);
+        expect(value.score).toBe(0);
+      }
+      // A weekend/non-peak evaluation may still have 100% DeepSeek weight; no penalty is inferred.
+      const weekend = { ...whole, deepseekRoleShare: 1, contributions: { ...whole.contributions, peakPenalty: 0 } };
+      expect(subagentPresetPeakSummary(weekend, t)).toContain(t('settings.presetScoring.peakNoPenalty'));
+      expect(subagentPresetPeakSummary(whole, t)).toBeUndefined();
+      const until = Date.parse('2026-09-21T12:00:00+08:00');
+      const resource = { kind: 'metered' as const, currency: 'CNY' as const, balanceStatus: 'known' as const,
+        resourceScoreBasis: 'funded_account' as const, peakPenalty: { points: 60, until } };
+      const roleLabel = subagentPresetRolePeakLabel(resource, locale, t)!;
+      expect(roleLabel).toContain('−60.0');
+      expect(roleLabel).toContain(new Date(until).toLocaleString(locale, { timeZone: 'Asia/Shanghai' }));
+      expect(roleLabel).not.toMatch(/blocked|Circuit|禁用|熔断/);
+      expect(subagentPresetRolePeakLabel({ kind: 'subscription' }, locale, t)).toBeUndefined();
+      expect(subagentPresetRolePeakLabel({ ...resource, peakPenalty: undefined }, locale, t)).toBeUndefined();
+      expect(subagentPresetCandidateBreakdown({ contributions: { ...whole.contributions, peakPenalty: 60 } }, t)).toContain('−60.0');
+    });
+  });
+
+  it('renders expiring-window evidence with the real remaining quota and floor waiver in both locales', () => {
+    const resetPriority = {
+      window: { duration: 1, unit: 'week' as const },
+      resetAt: 1_750_003_600_000,
+      remainingPercent: 12,
+      horizonMs: 43_200_000,
+      bonus: 117.5,
+      floorRelaxed: true,
+    };
+    const now = resetPriority.resetAt - 12 * 3_600_000;
+    withLocale('en', () => {
+      const label = subagentPresetResetPriorityLabel(resetPriority, now, 'en', t)!;
+      expect(label).toContain('1 week');
+      expect(label).toContain('12.0%');
+      expect(label).toContain('+117.5 points');
+      expect(label).toContain('12h');
+      expect(label).toContain(new Date(resetPriority.resetAt).toLocaleString('en'));
+      expect(subagentPresetResetFloorRelaxedLabel(resetPriority, t)).toContain('expiring remaining quota is usable');
+      expect(subagentPresetResetFloorRelaxedLabel({ ...resetPriority, floorRelaxed: false }, t)).toBeUndefined();
+      expect(subagentPresetResetPriorityLabel(undefined, now, 'en', t)).toBeUndefined();
+    });
+    withLocale('zh', () => {
+      const label = subagentPresetResetPriorityLabel(resetPriority, now, 'zh', t)!;
+      expect(label).toContain('1 周');
+      expect(label).toContain('12.0%');
+      expect(label).toContain('+117.5 分');
+      expect(label).toContain('12 小时');
+      expect(label).toContain(new Date(resetPriority.resetAt).toLocaleString('zh'));
+      expect(subagentPresetResetFloorRelaxedLabel(resetPriority, t)).toBe(
+        '已临期放宽额度健康门槛：临期剩余额度可用（其他限制不变）',
+      );
+    });
+  });
+
+  it('uses the fixed denominator and does not sum repeated metered accounts', () => {
+    expect(subagentPresetRoleContribution(role, 4)).toBe(45);
+    expect(subagentPresetRoleContribution({ ...role, weight: 0 }, 4)).toBe(0);
+    expect(subagentPresetRoleContribution(role, 0)).toBeUndefined();
+    expect(subagentPresetRoleContribution(role, undefined)).toBeUndefined();
+    const providers = subagentPresetMeteredProviders([whole, { ...whole, preset: 'other', roleScores: [role, { ...role, key: 'reviewer', original: replacement }] }]);
+    expect(providers).toHaveLength(1);
+    expect(providers[0]?.resource).toBe(replacement.resource);
+  });
+
+  it('formats CNY as currency and keeps unknown, zero, failed, invalid and restricted evidence distinct', () => {
+    for (const locale of ['en', 'zh'] as const) withLocale(locale, () => {
+      expect(formatPresetCny('0', locale, t)).toBe('¥0.00');
+      expect(formatPresetCny('12.3400', locale, t)).toBe('¥12.34');
+      expect(formatPresetCny('0.000001', locale, t)).toContain('0.000001');
+      for (const value of [undefined, null, '', 'NaN', '-1', '1e3', 'oops']) expect(formatPresetCny(value, locale, t)).toBe(t('settings.presetScoring.unknown'));
+      expect(subagentPresetResourceLabel(replacement.resource, locale, t)).toContain('¥12.34');
+      expect(subagentPresetResourceLabel(replacement.resource, locale, t)).not.toContain('%');
+      expect(subagentPresetCandidateBreakdown(replacement, t)).toContain(t('settings.presetScoring.resourceScore', { score: '100.0' }));
+      for (const balanceStatus of ['query_failed', 'invalid', 'missing'] as const) {
+        expect(subagentPresetResourceLabel({ kind: 'metered', currency: 'CNY', balanceStatus, resourceScoreBasis: 'funded_account', blockedUntil: 1000 }, locale, t)).toBe(t(`settings.presetScoring.balanceStatus.${balanceStatus}`));
+      }
+      for (const reason of ['query_failed', 'unsupported', 'missing'] as const) expect(subagentPresetResourceLabel({ kind: 'unknown', reason }, locale, t)).toBe(t(`settings.presetScoring.unknownResource.${reason}`));
+      expect(subagentPresetResourceLabel({ kind: 'subscription' }, locale, t)).toBe(t('header.subagentPresetQuotaNoData'));
+    });
+  });
+
+  it('covers every availability and all scoring locale keys without fallback', () => {
+    const availability = {
+      healthy: true, route_unresolved: true, quota_unknown: true, quota_below_floor: true, circuit_open: true,
+      balance_empty: true, balance_unknown: true, balance_invalid: true, account_unavailable: true, time_restricted: true,
+      capability_unavailable: true, provider_unsupported: true, model_disabled: true, partial: true, unavailable: true,
+    } satisfies Record<AutoSubagentPresetCandidateAvailability, boolean>;
+    const paths = (value: object, prefix = ''): string[] => Object.entries(value).flatMap(([key, v]) => typeof v === 'object' ? paths(v, `${prefix}${key}.`) : [`${prefix}${key}`]).sort();
+    expect(paths(enHeader)).toEqual(paths(zhHeader));
+    expect(paths(enSettings)).toEqual(paths(zhSettings));
+    for (const locale of ['en', 'zh'] as const) withLocale(locale, () => {
+      for (const key of Object.keys(availability) as AutoSubagentPresetCandidateAvailability[]) expect(subagentPresetAvailabilityLabel(key, t)).not.toContain('header.');
+      for (const key of [...paths(enHeader).map((k) => `header.${k}`), ...paths(enSettings.presetScoring).map((k) => `settings.presetScoring.${k}`)]) expect(i18n.global.te(key, locale)).toBe(true);
+    });
+  });
+
+  it('keeps settings overview outside snapshot and manual-lock conditions with a real role table', () => {
+    const settings = readFileSync(new URL('../src/components/settings/SettingsDialog.vue', import.meta.url), 'utf8');
+    const table = readFileSync(new URL('../src/components/settings/PresetRoleScores.vue', import.meta.url), 'utf8');
+    const header = readFileSync(new URL('../src/components/chat/ChatHeader.vue', import.meta.url), 'utf8');
+    expect(settings).toContain('<Card class="scheduler-card">');
+    expect(settings).toContain('v-for="row in schedulerRows"');
+    expect(settings).not.toContain('v-else-if="autoSubagentPresetStatus"');
+    expect(settings).toContain('<PresetRoleScores :candidate="row.candidate" :now="schedulerNow" />');
+    expect(table).toContain('<table class="preset-role-table">');
+    expect(table).toContain('role.original');
+    expect(table).toContain('role.effective');
+    expect(table).toContain('role.fallbackPenalty');
+    expect(table).toContain('route.resource');
+    expect(table).toContain('route.resource.blockedUntil');
+    expect(table).toContain('route.resource.resetPriority');
+    expect(table).toContain('subagentPresetResetFloorRelaxedLabel');
+    expect(table).toContain('subagentPresetRolePeakLabel(route.resource, locale, t)');
+    expect(settings).toContain('subagentPresetPeakSummary(row.candidate, t)');
+    expect(settings).toContain("autoSubagentPresetStatus ? 'settings.presetScoring.peakEvaluation' : 'settings.presetScoring.peakConfigured'");
+    expect(settings).toContain('if (props.autoSubagentPresetStatus !== undefined) return props.autoSubagentPresetStatus.policy;');
+    expect(table).toContain('settings.presetScoring.temporary');
+    expect(header).not.toContain('hasPresetCandidate');
+  });
+
+  it('reserves a full wrapping line for preset names instead of letting badges truncate them', () => {
+    const settings = readFileSync(new URL('../src/components/settings/SettingsDialog.vue', import.meta.url), 'utf8');
+    const nameRule = settings.match(/\.scheduler-candidate-name\s*\{([^}]+)\}/)?.[1];
+    expect(nameRule).toBeDefined();
+    expect(nameRule).toContain('flex: 0 0 100%');
+    expect(nameRule).toContain('overflow-wrap: anywhere');
+    expect(nameRule).toContain('white-space: normal');
+    expect(nameRule).not.toContain('ellipsis');
+    expect(nameRule).not.toContain('overflow: hidden');
+    expect(settings).toMatch(/\.scheduler-candidate-head\s*\{[^}]*flex-wrap: wrap/);
   });
 
   it('derives cooldown and circuit-breaker countdowns from an explicit clock input', () => {

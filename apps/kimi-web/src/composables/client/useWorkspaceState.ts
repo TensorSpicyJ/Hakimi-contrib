@@ -11,7 +11,8 @@ import { reactive, type ComputedRef, type Ref } from 'vue';
 import { getKimiWebApi } from '../../api';
 import { i18n } from '../../i18n';
 import { useConfirmDialog } from '../useConfirmDialog';
-import { isDaemonApiError } from '../../api/errors';
+import { isDaemonApiError, isDaemonNetworkError } from '../../api/errors';
+import { autoSubagentPresetResultLabel, autoSubagentPresetSupported } from '../../lib/subagentPreset';
 import { SERVER_AUTH_UNAUTHORIZED_CODE } from '../../api/daemon/http';
 import { isPlaceholderSessionUsage } from '../../api/daemon/mappers';
 import type {
@@ -49,7 +50,7 @@ import type {
 } from '../../types';
 import type { ExtendedState, PromptAttachment } from '../useKimiWebClient';
 import type { UseModelProviderState } from './useModelProviderState';
-import type { ResearchRequestCoordinator } from './researchRequest';
+import { RESEARCH_REQUEST_INVALIDATED, type ResearchRequestCoordinator } from './researchRequest';
 import type { UseSideChat } from './useSideChat';
 import type { UseTaskPoller } from './useTaskPoller';
 
@@ -71,6 +72,16 @@ const ALREADY_RESOLVED_CODE = 40902;
 const FIRST_LOAD_AUTH_RETRY_MS = 2000;
 
 type AuthCheckResult = 'proceed' | 'retry' | 'server-auth-required';
+
+/** Compare HTTP/WS config snapshots independently of JSON object-key order. */
+function configSnapshot(config: AppConfig | null): string {
+  return JSON.stringify(config, (_key, value: unknown) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+    return Object.fromEntries(Object.entries(value).sort(([left], [right]) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    ));
+  });
+}
 
 function isAlreadyResolvedError(err: unknown): boolean {
   return isDaemonApiError(err) && err.code === ALREADY_RESOLVED_CODE;
@@ -496,6 +507,7 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
   // A revision protects live updates from older HTTP responses; request ids also
   // prevent overlapping GETs or POSTs from landing out of order.
   let serverMetaRequestId = 0;
+  let pendingSidecarRecovery = false;
   let configRevision = 0;
   let configRequestId = 0;
   let configMutationRequestId = 0;
@@ -532,17 +544,28 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     operation: string,
     request: () => Promise<AppConfig>,
     changesExperimental: boolean,
+    onCommit?: (config: AppConfig) => void,
   ): Promise<boolean> {
     const requestId = ++configMutationRequestId;
     // A user mutation outranks any reconnect GET that began before it.
     configRequestId += 1;
     configMutationsInFlight += 1;
     const revisionAtRequest = configRevision;
-    if (changesExperimental) rawState.experimentalFlags = {};
+    if (changesExperimental) {
+      rawState.experimentalFlags = {};
+      autoPresetAction.metaStatus = 'refreshing';
+    }
     try {
       const next = await request();
-      if (requestId === configMutationRequestId && revisionAtRequest === configRevision) {
-        applyConfig(next);
+      if (requestId === configMutationRequestId) {
+        if (revisionAtRequest === configRevision) {
+          applyConfig(next);
+          onCommit?.(next);
+        } else if (onCommit && configSnapshot(rawState.config) === configSnapshot(next)) {
+          // The server can broadcast this mutation before its HTTP response.
+          // Keep the live config, but still report the matching request result.
+          onCommit(next);
+        }
       }
       return true;
     } catch (error) {
@@ -578,6 +601,61 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
       async () => (await getKimiWebApi().activateSubagentPreset(preset)).config,
       false,
     );
+  }
+
+  const autoPresetAction = reactive<{
+    pending: boolean;
+    feedback: string;
+    unsupported: boolean;
+    supported?: boolean;
+    metaStatus: 'unknown' | 'refreshing' | 'ready' | 'error';
+  }>({ pending: false, feedback: '', unsupported: false, metaStatus: 'unknown' });
+
+  async function autoSelectSubagentPreset(sessionId?: string): Promise<boolean> {
+    if (autoPresetAction.pending || configMutationsInFlight > 0) return false;
+    autoPresetAction.pending = true;
+    autoPresetAction.feedback = '';
+    const api = getKimiWebApi();
+    let result: Awaited<ReturnType<typeof api.autoSelectSubagentPreset>> | undefined;
+    try {
+      const saved = await commitConfigMutation('autoSelectSubagentPreset', async () => {
+        try {
+          result = await api.autoSelectSubagentPreset(sessionId);
+          return result.config;
+        } catch (error) {
+          const unsupported = (isDaemonApiError(error) && error.code === 404) ||
+            (isDaemonNetworkError(error) && error.status === 404);
+          autoPresetAction.unsupported = unsupported;
+          autoPresetAction.feedback = unsupported
+            ? i18n.global.t('header.subagentPresetAutoUnsupported')
+            : i18n.global.t('header.subagentPresetAutoFailed', {
+                error: error instanceof Error ? error.message : String(error),
+              });
+          throw error;
+        }
+      }, true, (config) => {
+        // Config, status and notices share the revision guard. A newer live
+        // evaluation also suppresses the older status and feedback.
+        if (!result || (rawState.autoSubagentPresetStatus &&
+            rawState.autoSubagentPresetStatus.evaluatedAt > result.status.evaluatedAt)) return;
+        rawState.autoSubagentPresetStatus = result.status;
+        autoPresetAction.feedback = autoSubagentPresetResultLabel(
+          config, result.status, i18n.global.locale.value, i18n.global.t,
+        );
+        if (result.warning) autoPresetAction.feedback += ` · ${result.warning}`;
+        rawState.warnings = [...rawState.warnings, {
+          severity: result.warning ? 'warning' : 'info',
+          title: i18n.global.t('header.subagentPresetLatestEvaluation'),
+          message: autoPresetAction.feedback,
+        }];
+      });
+      if (saved && !autoPresetAction.feedback) {
+        autoPresetAction.feedback = i18n.global.t('header.subagentPresetAutoSuperseded');
+      }
+      return saved;
+    } finally {
+      autoPresetAction.pending = false;
+    }
   }
 
   /** Query provider usage on demand; only the latest overlapping request may commit state. */
@@ -938,17 +1016,43 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     failClosedBackend = false,
   ): Promise<void> {
     const requestId = ++serverMetaRequestId;
+    autoPresetAction.metaStatus = 'refreshing';
     if (failClosedFlags) rawState.experimentalFlags = {};
-    if (failClosedBackend) rawState.backend = 'v1';
+    if (failClosedBackend) {
+      pendingSidecarRecovery = true;
+      rawState.backend = 'v1';
+      autoPresetAction.supported = undefined;
+      autoPresetAction.unsupported = false;
+    }
     const m = await getKimiWebApi()
       .getMeta()
       .catch(() => null);
-    if (m === null || requestId !== serverMetaRequestId) return;
+    if (requestId !== serverMetaRequestId) return;
+    if (m === null) {
+      autoPresetAction.metaStatus = 'error';
+      return;
+    }
+    // Capability survives fail-closed flag clearing, but never a confirmed
+    // backend change. Unknown metadata allows an explicit, server-validated retry.
+    autoPresetAction.metaStatus = 'ready';
+    autoPresetAction.supported = m.backend === 'v2' && autoSubagentPresetSupported(m.experimentalFlags);
     rawState.serverVersion = m.serverVersion;
     rawState.availableOpenInApps = m.openInApps;
     rawState.dangerousBypassAuth = m.dangerousBypassAuth;
     rawState.experimentalFlags = m.experimentalFlags;
     rawState.backend = m.backend;
+    // A flags-only read may supersede reconnect metadata. Keep recovery pending
+    // across stale/failed reads until the latest read confirms the backend.
+    if (pendingSidecarRecovery) {
+      pendingSidecarRecovery = false;
+      const sessionId = rawState.activeSessionId;
+      const workspaceId = rawState.activeWorkspaceId ?? workspacesView.value[0]?.id;
+      if (workspaceId) void modelProvider.loadSkillsForWorkspace(workspaceId);
+      if (sessionId) {
+        if (m.backend === 'v2') await refreshSessionResearch(sessionId);
+        else await modelProvider.loadSkillsForSession(sessionId);
+      }
+    }
   }
 
   async function load(options?: { remoteSessionId?: string }): Promise<void> {
@@ -2406,7 +2510,7 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
         return getKimiWebApi().commandSessionResearch(sessionId, command);
       });
     } catch (err) {
-      if (err === RESEARCH_UNAVAILABLE) return null;
+      if (err === RESEARCH_UNAVAILABLE || err === RESEARCH_REQUEST_INVALIDATED) return null;
       if (isDaemonApiError(err) && err.code === VALIDATION_FAILED_CODE) {
         // Validation includes stale expectedRevision. Re-read the same session;
         // an active-session switch must never redirect this recovery request.
@@ -2943,6 +3047,8 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     applyConfig,
     updateConfig,
     activateSubagentPreset,
+    autoSelectSubagentPreset,
+    autoPresetAction,
     refreshProviderUsage,
     listAllSessionsGlobal,
     load,

@@ -3,7 +3,7 @@
  *
  * Research Mode is now only a lightweight toggle: it makes the official AITP
  * Skills visible and points at the local knowledge conventions (plain files
- * for knowledge, official AITP Skills + CLI for long-term memory). The legacy
+ * for knowledge, the official AITP Skills for long-term memory). The legacy
  * host Research executor (lines, questions, plans, checkpoints, Goal
  * alignment, loop pause/resume) is retired: those subcommands parse to an
  * explicit `unsupported` result and are never sent to the server. Historical
@@ -121,7 +121,7 @@ export async function handleResearchCommand(
       host.showStatus(
         `\`/research ${parsed.subcommand}\` is no longer supported: the host Research executor is retired. ` +
           'Historical records are preserved read-only and do not resume. ' +
-          'Keep project knowledge in plain files; the official AITP Skills and their CLI maintain long-term research memory.',
+          'Keep project knowledge in plain files; the official AITP Skills maintain long-term research memory.',
       );
       if (canRestoreSubmittedInput(host)) host.restoreInputText(`/research ${args}`);
       return;
@@ -177,7 +177,7 @@ async function showResearchStatus(host: SlashCommandHost): Promise<void> {
 
   const lines = [
     `Research memory mode: ${snapshot.enabled ? 'on' : 'off'} · official AITP Skills: ${snapshot.skillsAvailable ? 'available' : 'unavailable'}`,
-    'Knowledge lives in plain project files; long-term research memory is maintained by the official AITP Skills and their CLI.',
+    'Knowledge lives in plain project files; long-term research memory is maintained by the official AITP Skills (start with `aitp-memory`).',
     'Legacy Research records (lines/questions/checkpoints) are preserved read-only; they are not live state and never resume automatically.',
   ];
   host.state.transcriptContainer.addChild(new StatusMessageComponent(lines.join('\n')));
@@ -201,7 +201,7 @@ async function setResearchMode(host: SlashCommandHost, enabled: boolean): Promis
   host.track(enabled ? 'research_on' : 'research_off');
   host.showStatus(
     enabled
-      ? 'Research memory mode on — official AITP Skills are visible; knowledge stays in plain files.'
+      ? 'Research memory mode on — official AITP Skills are visible; knowledge stays in plain files, and the Skills own long-term memory.'
       : 'Research memory mode off.',
   );
 }

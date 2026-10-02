@@ -7,22 +7,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Emitter, Event } from '#/_base/event';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import { IAgentProfileService, type ResolvedAgentProfile } from '#/agent/profile/profile';
+import { profilePromptDiagnosticsKey } from '#/agent/profile/profileService';
+import { PROFILE_COMPACT_PROMPT_FLAG_ID } from '#/agent/profile/flag';
+import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
 import type { Runtime, RuntimeCapability, RuntimeStatus } from '#/runtime/runtime';
 import { normalizeAgentProfile } from '#/app/agentProfileCatalog/agentProfileCatalog';
+import { IBuiltinAgentProfileLoader } from '#/app/agentProfileCatalog/builtinAgentProfileLoader';
+import { IFlagService } from '#/app/flag/flag';
+import { IHostClock } from '#/os/interface/hostClock';
 import { IPluginService } from '#/app/plugin/plugin';
 import type { EnabledPluginSystemPrompt } from '#/app/plugin/types';
 import { InMemorySkillCatalog } from '#/app/skillCatalog/registry';
 import type { SkillCatalog } from '#/app/skillCatalog/types';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
+import { ISessionToolPolicy } from '#/session/sessionToolPolicy/sessionToolPolicy';
 import {
   BUILTIN_SKILL_SOURCE_ID,
   PLUGIN_SKILL_SOURCE_ID,
 } from '#/app/skillCatalog/skillSource';
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
-import { DEFAULT_PRODUCT_NAME } from '#/app/agentProfileCatalog/profile-shared';
+import { DEFAULT_PRODUCT_NAME, renderPromptTemplateResult } from '#/app/agentProfileCatalog/profile-shared';
 
 import { stubAgentIdentity } from '../../app/agentIdentity/stubs';
+import { stubFlag } from '../../app/flag/stubs';
 
 import {
   agentService,
@@ -106,6 +114,154 @@ describe('AgentProfileService.applyProfile', () => {
     );
     return { ctx, profile: ctx.get(IAgentProfileService) };
   }
+
+  describe('compact prompt experiment', () => {
+    it('defaults to the standard builtin prompt and keeps its permission rules', async () => {
+      const { profile: svc } = buildContext(appService(IFlagService, stubFlag()));
+
+      await svc.applyProfile(ctx.get(IBuiltinAgentProfileLoader).getDefault());
+
+      expect(svc.getSystemPrompt()).toContain('# General Guidelines for Coding');
+      expect(svc.getSystemPrompt()).toContain('Do not retry the same call unchanged');
+      expect(ctx.get(IAgentStateService).get(profilePromptDiagnosticsKey)).toEqual({
+        compactPromptEnabled: false,
+        policy: 'standard',
+        systemPromptBytes: Buffer.byteLength(svc.getSystemPrompt(), 'utf8'),
+      });
+    });
+
+    it('uses the explicit builtin role without adding unrelated role instructions', async () => {
+      const { profile: svc } = buildContext(
+        appService(IFlagService, stubFlag((id) => id === PROFILE_COMPACT_PROMPT_FLAG_ID)),
+      );
+      const profiles = ctx.get(IBuiltinAgentProfileLoader);
+
+      await svc.applyProfile(profiles.getDefault());
+      const general = svc.getSystemPrompt();
+      expect(general).toContain('# Working principles');
+      expect(general).not.toContain('For software engineering work, inspect existing architecture');
+      expect(general).not.toContain('# General Guidelines for Research and Data Processing');
+
+      await svc.applyProfile(profiles.get('coder')!);
+      expect(svc.getSystemPrompt()).toContain('For software engineering work, inspect existing architecture');
+      expect(svc.getSystemPrompt()).toContain('Your final message is the entire handoff');
+
+      await svc.applyProfile(profiles.get('explore')!);
+      expect(svc.getSystemPrompt()).toContain('NEVER use Bash for any file creation or modification commands');
+      expect(svc.getActiveToolNames()).not.toContain('Write');
+      expect(svc.getSystemPrompt()).not.toContain('For software engineering work, inspect existing architecture');
+    });
+
+    it('preserves full instructions across refresh and records no prompt content in diagnostics', async () => {
+      const initialInstructions = 'Keep all measured inputs. Never alter the calibration.\n'.repeat(800);
+      await writeFile(join(workDir, 'AGENTS.md'), initialInstructions, 'utf-8');
+      let now = '2026-07-29T04:00:00.000Z';
+      let enabled = true;
+      const { profile: svc } = buildContext(
+        appService(IFlagService, stubFlag((id) => enabled && id === PROFILE_COMPACT_PROMPT_FLAG_ID)),
+        appService(IHostClock, {
+          _serviceBrand: undefined,
+          now: () => new Date(now),
+          timeZone: () => 'Asia/Shanghai',
+        }),
+      );
+      const builtin = ctx.get(IBuiltinAgentProfileLoader).getDefault();
+      await svc.applyProfile(builtin);
+      const before = svc.getSystemPrompt();
+      expect(before).toContain(initialInstructions.trim());
+      expect(svc.getAgentsMdWarning()).toContain('exceeds the recommended');
+
+      now = '2026-07-29T08:00:00.000Z';
+      await svc.refreshSystemPrompt();
+      expect(svc.getSystemPrompt()).toBe(before);
+      const diagnostics = ctx.get(IAgentStateService).get(profilePromptDiagnosticsKey);
+      expect(diagnostics).toEqual({
+        compactPromptEnabled: true,
+        policy: 'compact',
+        systemPromptBytes: Buffer.byteLength(before, 'utf8'),
+      });
+      expect(JSON.stringify(diagnostics)).not.toContain('calibration');
+      expect(JSON.stringify(diagnostics)).not.toContain(workDir);
+
+      await writeFile(join(workDir, 'AGENTS.md'), 'Keep the new validated constraint.', 'utf-8');
+      await svc.refreshSystemPrompt();
+      expect(svc.getSystemPrompt()).toContain('Keep the new validated constraint.');
+      expect(svc.getSystemPrompt()).not.toContain(initialInstructions.trim());
+
+      enabled = false;
+      await svc.refreshSystemPrompt();
+      expect(svc.getSystemPrompt()).toContain('# General Guidelines for Coding');
+      expect(ctx.get(IAgentStateService).get(profilePromptDiagnosticsKey)?.policy).toBe('standard');
+    });
+
+    it('leaves a user template and its base_prompt expansion unchanged', async () => {
+      const { profile: svc } = buildContext(
+        appService(IFlagService, stubFlag((id) => id === PROFILE_COMPACT_PROMPT_FLAG_ID)),
+      );
+      const builtin = ctx.get(IBuiltinAgentProfileLoader).getDefault();
+      const custom = normalizeAgentProfile({
+        name: 'user-template',
+        renderSystemPrompt: (context) => renderPromptTemplateResult(
+          'Custom instructions\n${base_prompt}',
+          context,
+          { skillActive: true },
+          builtin.renderSystemPrompt,
+        ),
+      });
+
+      await svc.applyProfile(custom);
+
+      expect(svc.getSystemPrompt()).toContain('Custom instructions');
+      expect(svc.getSystemPrompt()).toContain('# General Guidelines for Coding');
+      expect(svc.getSystemPrompt()).not.toContain('# Working principles');
+      expect(ctx.get(IAgentStateService).get(profilePromptDiagnosticsKey)?.policy).toBe('standard');
+    });
+
+    it('refreshes Skill visibility from the effective session policy in compact mode', async () => {
+      const skillMarker = 'Project skill: inspect-local-evidence';
+      const change = new Emitter<string>();
+      const { profile: svc } = buildContext(
+        appService(IFlagService, stubFlag((id) => id === PROFILE_COMPACT_PROMPT_FLAG_ID)),
+        skillCatalogWithChange(change, {
+          getModelSkillListing: () => skillMarker,
+        } as unknown as SkillCatalog),
+      );
+      try {
+        await svc.applyProfile(ctx.get(IBuiltinAgentProfileLoader).getDefault());
+        expect(svc.getSystemPrompt()).toContain(skillMarker);
+
+        await ctx.get(ISessionToolPolicy).setDisabledTools(['Skill']);
+        expect(svc.getSystemPrompt()).not.toContain(skillMarker);
+        expect(svc.getSystemPrompt()).toContain('# Working principles');
+
+        await ctx.get(ISessionToolPolicy).setDisabledTools([]);
+        expect(svc.getSystemPrompt()).toContain(skillMarker);
+      } finally {
+        change.dispose();
+      }
+    });
+
+    it('preserves restored and explicit prompt text until a profile render is requested', async () => {
+      const { profile: svc } = buildContext(
+        appService(IFlagService, stubFlag((id) => id === PROFILE_COMPACT_PROMPT_FLAG_ID)),
+      );
+      const snapshotText = 'Persisted project constraints and user rules.';
+
+      svc.applyBindingSnapshot({
+        profileName: 'agent',
+        thinkingLevel: 'off',
+        systemPrompt: snapshotText,
+        activeToolNames: ['Read'],
+      });
+      expect(svc.getSystemPrompt()).toBe(snapshotText);
+      expect(svc.getActiveToolNames()).toEqual(['Read']);
+      expect(ctx.get(IAgentStateService).get(profilePromptDiagnosticsKey)?.policy).toBe('restored');
+
+      svc.update({ systemPrompt: 'Explicit host override.' });
+      expect(svc.getSystemPrompt()).toBe('Explicit host override.');
+      expect(ctx.get(IAgentStateService).get(profilePromptDiagnosticsKey)?.policy).toBe('override');
+    });
+  });
 
   describe('custom identity', () => {
     // The default builtin profile opens with `You are ${product_name}`.

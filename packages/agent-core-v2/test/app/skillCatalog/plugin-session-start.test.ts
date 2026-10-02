@@ -173,14 +173,14 @@ describe('plugin session-start dynamic injection', () => {
     const visibility: IAgentSkillVisibilityService = {
       _serviceBrand: undefined,
       onDidChange: modeChange.event,
-      isSkillVisible: (candidate) => active || candidate.plugin?.id !== 'aitp-research-protocol',
-      isSkillVisibleInFrozenListing: (candidate) => active || candidate.plugin?.id !== 'aitp-research-protocol',
+      isSkillVisible: (candidate) => active || candidate.plugin?.id !== 'aitp',
+      isSkillVisibleInFrozenListing: (candidate) => active || candidate.plugin?.id !== 'aitp',
       hiddenReason: () => undefined,
-      filterVisible: (skills) => skills.filter((candidate) => active || candidate.plugin?.id !== 'aitp-research-protocol'),
+      filterVisible: (skills) => skills.filter((candidate) => active || candidate.plugin?.id !== 'aitp'),
     };
     const { ctx, warnings } = sessionStartRuntime({
-      sessionStarts: [{ pluginId: 'aitp-research-protocol', skillName: 'aitp' }],
-      skills: [skill('aitp', 'AITP guidance', { id: 'aitp-research-protocol' })],
+      sessionStarts: [{ pluginId: 'aitp', skillName: 'aitp' }],
+      skills: [skill('aitp', 'AITP guidance', { id: 'aitp' })],
       visibility,
     });
 
@@ -196,14 +196,14 @@ describe('plugin session-start dynamic injection', () => {
     const visibility: IAgentSkillVisibilityService = {
       _serviceBrand: undefined,
       onDidChange: modeChange.event,
-      isSkillVisible: (candidate) => active || candidate.plugin?.id !== 'aitp-research-protocol',
-      isSkillVisibleInFrozenListing: (candidate) => active || candidate.plugin?.id !== 'aitp-research-protocol',
+      isSkillVisible: (candidate) => active || candidate.plugin?.id !== 'aitp',
+      isSkillVisibleInFrozenListing: (candidate) => active || candidate.plugin?.id !== 'aitp',
       hiddenReason: () => undefined,
-      filterVisible: (skills) => skills.filter((candidate) => active || candidate.plugin?.id !== 'aitp-research-protocol'),
+      filterVisible: (skills) => skills.filter((candidate) => active || candidate.plugin?.id !== 'aitp'),
     };
     const { ctx } = sessionStartRuntime({
-      sessionStarts: [{ pluginId: 'aitp-research-protocol', skillName: 'aitp' }],
-      skills: [skill('aitp', 'AITP guidance', { id: 'aitp-research-protocol' })],
+      sessionStarts: [{ pluginId: 'aitp', skillName: 'aitp' }],
+      skills: [skill('aitp', 'AITP guidance', { id: 'aitp' })],
       visibility,
     });
 
@@ -224,14 +224,14 @@ describe('plugin session-start dynamic injection', () => {
     const visibility: IAgentSkillVisibilityService = {
       _serviceBrand: undefined,
       onDidChange: modeChange.event,
-      isSkillVisible: (candidate) => active || candidate.plugin?.id !== 'aitp-research-protocol',
-      isSkillVisibleInFrozenListing: (candidate) => active || candidate.plugin?.id !== 'aitp-research-protocol',
+      isSkillVisible: (candidate) => active || candidate.plugin?.id !== 'aitp',
+      isSkillVisibleInFrozenListing: (candidate) => active || candidate.plugin?.id !== 'aitp',
       hiddenReason: () => undefined,
-      filterVisible: (skills) => skills.filter((candidate) => active || candidate.plugin?.id !== 'aitp-research-protocol'),
+      filterVisible: (skills) => skills.filter((candidate) => active || candidate.plugin?.id !== 'aitp'),
     };
     const { ctx } = sessionStartRuntime({
       sessionStarts: [],
-      skills: [skill('aitp', 'AITP listing body', { id: 'aitp-research-protocol' })],
+      skills: [skill('aitp', 'AITP listing body', { id: 'aitp' })],
       visibility,
     });
 
@@ -253,14 +253,14 @@ describe('plugin session-start dynamic injection', () => {
     const visibility: IAgentSkillVisibilityService = {
       _serviceBrand: undefined,
       onDidChange: modeChange.event,
-      isSkillVisible: (candidate) => active || candidate.plugin?.id !== 'aitp-research-protocol',
-      isSkillVisibleInFrozenListing: (candidate) => active || candidate.plugin?.id !== 'aitp-research-protocol',
+      isSkillVisible: (candidate) => active || candidate.plugin?.id !== 'aitp',
+      isSkillVisibleInFrozenListing: (candidate) => active || candidate.plugin?.id !== 'aitp',
       hiddenReason: () => undefined,
-      filterVisible: (skills) => skills.filter((candidate) => active || candidate.plugin?.id !== 'aitp-research-protocol'),
+      filterVisible: (skills) => skills.filter((candidate) => active || candidate.plugin?.id !== 'aitp'),
     };
     const { ctx } = sessionStartRuntime({
       sessionStarts: [],
-      skills: [skill('aitp', 'AITP listing body', { id: 'aitp-research-protocol' })],
+      skills: [skill('aitp', 'AITP listing body', { id: 'aitp' })],
       visibility,
     });
 
@@ -406,9 +406,9 @@ describe('plugin session-start dynamic injection', () => {
 });
 
 describe('AITP skill visibility feature wiring', () => {
-  it('keeps AITP skills dynamic-only while preserving ordinary skills', async () => {
+  it('keeps the dynamic AITP listing available across Research Mode changes', async () => {
     const catalog = new InMemorySkillCatalog();
-    const aitpSkill = skill('aitp', 'AITP listing body', { id: 'aitp-research-protocol' });
+    const aitpSkill = skill('aitp', 'AITP listing body', { id: 'aitp' });
     const ordinarySkill = skill('ordinary', 'ordinary listing body');
     catalog.register(aitpSkill);
     catalog.register(ordinarySkill);
@@ -439,37 +439,39 @@ describe('AITP skill visibility feature wiring', () => {
       const injector = ctx.get(IAgentContextInjectorService);
       await profile.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: 'mock-model' });
 
-      expect(visibility.isSkillVisible(aitpSkill)).toBe(false);
+      expect(visibility.isSkillVisible(aitpSkill)).toBe(true);
+      expect(visibility.hiddenReason(aitpSkill)).toBeUndefined();
+      expect(visibility.isSkillVisibleInFrozenListing(aitpSkill)).toBe(false);
       expect(visibility.isSkillVisible(ordinarySkill)).toBe(true);
       expect(profile.getSystemPrompt()).not.toContain('/fake/aitp/SKILL.md');
       expect(profile.getSystemPrompt()).toContain('/fake/ordinary/SKILL.md');
 
+      await injector.reconcileWhenIdle('aitp_skill_visibility');
+      const initialListing = aitpSkillVisibilityMessages(ctx).at(-1);
+      expect(initialListing).toBeDefined();
+      expect(messageText(initialListing!)).toContain('/fake/aitp/SKILL.md');
+      expect(messageText(initialListing!)).not.toContain('/fake/ordinary/SKILL.md');
+      expect(aitpSkillVisibilityMessages(ctx)).toHaveLength(1);
+
       let visibilityChanges = 0;
       const visibilitySubscription = visibility.onDidChange(() => visibilityChanges++);
       await mode.enter({ actor: 'user' });
-      expect(visibilityChanges).toBe(1);
+      expect(visibilityChanges).toBe(0);
       expect(visibility.isSkillVisible(aitpSkill)).toBe(true);
       expect(visibility.isSkillVisibleInFrozenListing(aitpSkill)).toBe(false);
       expect(profile.getSystemPrompt()).not.toContain('/fake/aitp/SKILL.md');
 
       await injector.reconcileWhenIdle('aitp_skill_visibility');
-      const activeListing = aitpSkillVisibilityMessages(ctx).at(-1);
-      expect(activeListing).toBeDefined();
-      expect(messageText(activeListing!)).toContain('aitp');
-      expect(messageText(activeListing!)).toContain('/fake/aitp/SKILL.md');
-      expect(messageText(activeListing!)).not.toContain('/fake/ordinary/SKILL.md');
+      expect(aitpSkillVisibilityMessages(ctx)).toHaveLength(1);
+      expect(aitpSkillVisibilityMessages(ctx).at(-1)).toEqual(initialListing);
 
       await mode.exit();
-      expect(visibilityChanges).toBe(2);
-      expect(visibility.isSkillVisible(aitpSkill)).toBe(false);
+      expect(visibilityChanges).toBe(0);
+      expect(visibility.isSkillVisible(aitpSkill)).toBe(true);
       expect(visibility.isSkillVisible(ordinarySkill)).toBe(true);
       await injector.reconcileWhenIdle('aitp_skill_visibility');
-      const neutralizer = aitpSkillVisibilityMessages(ctx).at(-1);
-      expect(neutralizer).toBeDefined();
-      expect(messageText(neutralizer!)).toContain('no active AITP Research skills');
-      expect(messageText(neutralizer!)).toContain(
-        'supersedes any earlier aitp_skill_visibility reminder',
-      );
+      expect(aitpSkillVisibilityMessages(ctx)).toHaveLength(1);
+      expect(aitpSkillVisibilityMessages(ctx).at(-1)).toEqual(initialListing);
       visibilitySubscription.dispose();
     } finally {
       await ctx.dispose();

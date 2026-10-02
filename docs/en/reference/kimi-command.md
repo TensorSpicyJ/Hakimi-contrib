@@ -153,7 +153,7 @@ hakimi login --provider openai-codex --no-open
 | `--enable-experimental` | Deprecated compatibility option; has no effect. |
 | `--no-open` | Print the device URL and user code without attempting to open a browser. |
 
-ChatGPT / OpenAI Codex OAuth is available without an experimental switch. Its generated model aliases are `openai-codex/gpt-5.6-sol`, `openai-codex/gpt-5.6-terra`, `openai-codex/gpt-5.6-luna`, and `openai-codex/gpt-6-astra`. OAuth network activity occurs only through an explicit login or an API/token request that needs authentication; Hakimi never logs in merely because it starts. Press `Ctrl-C` at any time during polling to cancel; the exit code is `1` on cancellation or failure, and `0` on success.
+ChatGPT / OpenAI Codex OAuth is available without an experimental switch. Its generated model aliases include `openai-codex/gpt-6-sol`, `openai-codex/gpt-6-luna`, and `openai-codex/gpt-6-astra`, as well as the existing GPT-5.6 Sol, Terra, and Luna aliases. The first Codex login sets GPT-6 Sol as the default. Already-configured Codex OAuth providers receive missing built-in aliases on startup or model-list refresh without another login; existing model settings and selections stay unchanged unless you explicitly change them. Providers with `model_source = "static"` remain manually managed. OAuth network activity occurs only through an explicit login or an API/token request that needs authentication; Hakimi never logs in merely because it starts. Press `Ctrl-C` at any time during polling to cancel; the exit code is `1` on cancellation or failure, and `0` on success.
 
 ### `hakimi acp`
 

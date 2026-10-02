@@ -85,6 +85,10 @@
  * before materializing the model, whose resolution reads the identity through
  * the host-headers port — a fast bootstrap must wait, not trip the pre-freeze
  * guard. Bound at Agent scope.
+ * Explicitly opted-in profiles may render a compact prompt under the
+ * `flag` domain's experimental policy. Content-free render diagnostics are
+ * registered in `agentState`; snapshots and explicit prompt overrides are
+ * identified without inferring their provenance from prompt text.
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
@@ -108,12 +112,13 @@ import {
   type ThinkingConfig,
 } from '#/kosong/model/thinking';
 import { THINKING_SECTION } from '#/app/kosongConfig/configSection';
-import { DEFAULT_AGENT_PROFILE_NAME } from '#/app/agentProfileCatalog/agentProfileCatalog';
+import { DEFAULT_AGENT_PROFILE_NAME, type SystemPromptRenderResult } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { IBuiltinAgentProfileLoader } from '#/app/agentProfileCatalog/builtinAgentProfileLoader';
 import { ErrorCodes, Error2 } from "#/errors";
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
+import { IFlagService } from '#/app/flag/flag';
 import type { LoopControl } from '#/agent/loop/configSection';
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
 import { RuntimeWorkspaceView } from '#/runtime/runtimeWorkspaceView';
@@ -149,12 +154,14 @@ import type {
   ProfileBindingSnapshot,
   ProfileData,
   ProfileModelContext,
+  ProfilePromptDiagnostics,
   ProfileRebindData,
   ProfileServiceOptions,
   ProfileSetModelResult,
   ProfileUpdateData,
 } from './profile';
 import { IAgentProfileService, ProfileError, ProfileErrors } from './profile';
+import { PROFILE_COMPACT_PROMPT_FLAG_ID } from './flag';
 import { TOOLS_SECTION, type ToolsConfig } from '#/agent/toolPolicy/configSection';
 import { isToolActiveComposed, findInactiveToolPatterns, literalToolNames, type InactiveToolPattern } from '#/agent/toolPolicy/evaluate';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
@@ -219,6 +226,10 @@ export const profileEmittedPluginBudgetWarningsKey = defineState<Set<string>>(
   'profile.emittedPluginBudgetWarnings',
   () => new Set(),
 );
+export const profilePromptDiagnosticsKey = defineState<ProfilePromptDiagnostics | undefined>(
+  'profile.promptDiagnostics',
+  () => undefined as ProfilePromptDiagnostics | undefined,
+);
 
 // NOTE: stays Disposable — its own 'config' collides with the Fiber
 export class AgentProfileService extends Disposable implements IAgentProfileService {
@@ -268,6 +279,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     @IAgentIdentity private readonly identity: IAgentIdentity,
     @IAgentAgentsMdReminderService private readonly agentsMdReminder: IAgentAgentsMdReminderService,
     @IAgentSkillVisibilityService private readonly skillVisibility: IAgentSkillVisibilityService,
+    @IFlagService private readonly flags: IFlagService,
   ) {
     super();
     this.states.register(profileActiveToolNamesOverlayKey);
@@ -275,6 +287,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     this.states.register(profileEmittedThinkingEffortWarningsKey);
     this.states.register(profileEmittedToolPatternWarningsKey);
     this.states.register(profileEmittedPluginBudgetWarningsKey);
+    this.states.register(profilePromptDiagnosticsKey);
     this.configure({});
     this._register(
       this.sessionToolPolicy.onDidChange((event) => {
@@ -352,6 +365,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     if (Object.keys(configChanged).length > 0) {
       this.wire.dispatch(configUpdate(this.resolveConfigPayload(configChanged)));
       this.afterConfigDispatch(configChanged);
+      if (configChanged.systemPrompt !== undefined) this.recordPromptDiagnostics('override');
     }
     if (activeToolNames !== undefined) {
       this.setActiveTools(activeToolNames);
@@ -402,6 +416,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       disallowedTools: snapshot.disallowedTools ?? [],
     });
     this.agentsMdReminder.seedInjected(agentsMdPaths, this.sessionContext.cwd);
+    this.recordPromptDiagnostics('restored');
   }
 
   async bind(input: BindAgentInput): Promise<void> {
@@ -437,7 +452,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     const context = await this.buildSystemPromptContext(profile);
     this.assertBindable(profile.name);
     const currentProfileName = this.profileName;
-    const rendered = profile.renderSystemPrompt(context);
+    const rendered = this.renderProfilePrompt(profile, context);
     this.activeProfile = profile;
     this.cacheAgentsMdWarning(context);
 
@@ -466,6 +481,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       disallowedTools: profile.disallowedTools ?? [],
     });
     this.seedAgentsMdReminder(context);
+    this.recordProfilePromptDiagnostics(profile);
 
     this.publishAgentsMdWarning();
     this.publishToolPatternWarnings(profile);
@@ -522,7 +538,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
 
   useProfile(profile: ResolvedAgentProfile, context: SystemPromptContext): void {
     this.activeProfile = profile;
-    const rendered = profile.renderSystemPrompt(context);
+    const rendered = this.renderProfilePrompt(profile, context);
     this.update({
       profileName: profile.name,
       systemPrompt: rendered.text,
@@ -531,6 +547,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       disallowedTools: profile.disallowedTools ?? [],
     });
     this.setActiveTools(profile.tools);
+    this.recordProfilePromptDiagnostics(profile);
   }
 
   async applyProfile(profile: ResolvedAgentProfile, options?: ApplyProfileOptions): Promise<void> {
@@ -558,7 +575,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       return;
     }
     this.activeProfile = profile;
-    const rendered = profile.renderSystemPrompt(context);
+    const rendered = this.renderProfilePrompt(profile, context);
     this.update({
       profileName: profile.name,
       systemPrompt: rendered.text,
@@ -566,6 +583,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       agentsMdPaths: context.agentsMdPaths ?? [],
     });
     this.seedAgentsMdReminder(context);
+    this.recordProfilePromptDiagnostics(profile);
     this.cacheAgentsMdWarning(context);
     this.publishAgentsMdWarning();
   }
@@ -575,6 +593,32 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       context.agentsMdPaths ?? [],
       context.cwd ?? this.sessionContext.cwd,
     );
+  }
+
+  private renderProfilePrompt(
+    profile: ResolvedAgentProfile,
+    context: SystemPromptContext,
+  ): SystemPromptRenderResult {
+    if (this.flags.enabled(PROFILE_COMPACT_PROMPT_FLAG_ID) && profile.renderCompactSystemPrompt) {
+      return profile.renderCompactSystemPrompt(context);
+    }
+    return profile.renderSystemPrompt(context);
+  }
+
+  private recordProfilePromptDiagnostics(profile: ResolvedAgentProfile): void {
+    this.recordPromptDiagnostics(
+      this.flags.enabled(PROFILE_COMPACT_PROMPT_FLAG_ID) && profile.renderCompactSystemPrompt
+        ? 'compact'
+        : 'standard',
+    );
+  }
+
+  private recordPromptDiagnostics(policy: ProfilePromptDiagnostics['policy']): void {
+    this.states.set(profilePromptDiagnosticsKey, {
+      compactPromptEnabled: this.flags.enabled(PROFILE_COMPACT_PROMPT_FLAG_ID),
+      policy,
+      systemPromptBytes: Buffer.byteLength(this.systemPrompt, 'utf8'),
+    });
   }
 
   getAgentsMdWarning(): string | undefined {

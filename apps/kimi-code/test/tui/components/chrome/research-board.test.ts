@@ -48,6 +48,9 @@ describe('ResearchBoardComponent', () => {
     expect(lines[2]).toContain('Knowledge in plain files');
     expect(lines.join('\n')).not.toContain('loop');
     expect(lines.join('\n')).not.toContain('checkpoint');
+    // The official plugin has no CLI and no ledger.
+    expect(lines.join('\n')).not.toContain('CLI');
+    expect(lines.join('\n')).not.toContain('ledger');
   });
 
   it('warns when the official AITP Skills are unavailable', () => {

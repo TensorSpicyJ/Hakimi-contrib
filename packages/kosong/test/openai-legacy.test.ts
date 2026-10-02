@@ -970,7 +970,16 @@ describe('OpenAILegacyChatProvider', () => {
       expect(body['max_tokens']).toBe(1024);
     });
 
-    it.each(['gpt-5', 'gpt-5-codex', 'o3', 'gpt-6-astra', 'gpt-6-astra-2026-08-01'])(
+    it.each([
+      'gpt-5',
+      'gpt-5-codex',
+      'o3',
+      'gpt-6-astra',
+      'gpt-6-astra-2026-08-01',
+      'gpt-6-sol',
+      'gpt-6-luna',
+      'GPT-6-LUNA',
+    ])(
       'withMaxCompletionTokens sets max_completion_tokens for %s',
       async (model) => {
         const provider = createProvider({ model }).withMaxCompletionTokens(1024);
@@ -983,6 +992,19 @@ describe('OpenAILegacyChatProvider', () => {
         expect(body['max_tokens']).toBeUndefined();
       },
     );
+
+    it('keeps max_tokens for uncatalogued gpt-6 slugs', async () => {
+      for (const model of ['gpt-6-terra', 'gpt-6-solar']) {
+        const provider = createProvider({ model }).withMaxCompletionTokens(1024);
+        const history: Message[] = [
+          { role: 'user', content: [{ type: 'text', text: 'Hi' }], toolCalls: [] },
+        ];
+        const body = await captureRequestBody(provider, '', [], history);
+
+        expect(body['max_tokens']).toBe(1024);
+        expect(body['max_completion_tokens']).toBeUndefined();
+      }
+    });
 
     it('keeps max_tokens for OpenAI-compatible non-OpenAI reasoning models', async () => {
       const provider = createProvider({ model: 'deepseek-reasoner' }).withMaxCompletionTokens(

@@ -53,6 +53,7 @@ describe('cron-fired steer turn context', () => {
       onDidCreate: onDidCreate.event,
       onDidDispose: Event.None as Event<string>,
       create: () => Promise.reject(new Error('not supported in this test')),
+      restore: () => Promise.reject(new Error('not supported in this test')),
       fork: () => Promise.reject(new Error('not supported in this test')),
       get: (agentId) => (agentId === 'main' ? mainHandle : undefined),
       list: () => (mainHandle === undefined ? [] : [mainHandle]),

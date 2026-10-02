@@ -1,10 +1,10 @@
 /**
  * `subagent` domain — resume-time model-binding reconciliation.
  *
- * Waits for the Session profile catalog, applies active `[subagent]` preset
- * field overrides to an existing agent profile, and preserves profiles that
- * explicitly own their binding policy. This helper is stateless and shared by
- * the Agent and AgentSwarm resume routes.
+ * Waits for the Session profile catalog and applies a validated dispatch binding
+ * to an existing agent profile, falling back to canonical `[subagent]` resolution
+ * only when none is supplied. Preserves profiles that own their binding policy.
+ * This helper is stateless and shared by the Agent and AgentSwarm resume routes.
  */
 
 import type { IConfigService } from '#/app/config/config';
@@ -16,6 +16,7 @@ import type { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileC
 
 import {
   resolveSubagentBinding,
+  type SubagentBindingResolution,
   type SubagentRouteKind,
 } from './configSection';
 
@@ -27,8 +28,11 @@ export async function refreshSubagentBindingOnResume(
   profileService: IAgentProfileService,
   caller: ProfileData,
   route: SubagentRouteKind,
+  validatedBinding?: SubagentBindingResolution,
+  signal?: AbortSignal,
 ): Promise<ProfileData> {
   await catalog.ready;
+  signal?.throwIfAborted();
   const current = profileService.data();
   const profileName = current.profileName;
   if (profileName === undefined) return current;
@@ -36,22 +40,25 @@ export async function refreshSubagentBindingOnResume(
   const profile: AgentProfile | undefined = catalog.get(profileName);
   if (profile?.preserveBindingOnResume === true) return current;
 
-  if (caller.modelAlias === undefined || current.modelAlias === undefined) return current;
-  const resolution = resolveSubagentBinding(config, flags, modelCatalog, {
-    route,
-    profileName,
-    modelPreference: profile?.modelPreference,
-    caller: {
-      modelAlias: caller.modelAlias,
-      thinkingLevel: caller.thinkingLevel,
-    },
-  });
+  let resolution = validatedBinding;
+  if (resolution === undefined) {
+    if (caller.modelAlias === undefined || current.modelAlias === undefined) return current;
+    resolution = resolveSubagentBinding(config, flags, modelCatalog, {
+      route,
+      profileName,
+      modelPreference: profile?.modelPreference,
+      caller: {
+        modelAlias: caller.modelAlias,
+        thinkingLevel: caller.thinkingLevel,
+      },
+    });
+  }
   const modelChanged = resolution.model !== current.modelAlias;
   const thinkingChanged =
     resolution.thinking !== undefined && resolution.thinking !== current.thinkingLevel;
-  const clearsLegacyThinking =
-    resolution.thinking === undefined && resolution.modelSource === 'legacy-secondary';
-  if (modelChanged || thinkingChanged || clearsLegacyThinking) {
+  const clearsThinking = resolution.thinking === undefined &&
+    (resolution.modelSource === 'legacy-secondary' || resolution.modelSource === 'auto-fallback');
+  if (modelChanged || thinkingChanged || clearsThinking) {
     profileService.rebind({
       modelAlias: resolution.model,
       thinkingLevel: resolution.thinking,

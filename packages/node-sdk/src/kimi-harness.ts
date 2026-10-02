@@ -36,6 +36,8 @@ import type {
   RenameSessionInput,
   ResumeSessionInput,
   ReloadSessionInput,
+  SessionHandoffOptions,
+  SessionInteractionSettledEvent,
   SessionSummary,
   SessionSummaryPage,
   SkillSummary,
@@ -271,6 +273,72 @@ export class KimiHarness {
 
   getSession(id: string): Session | undefined {
     return this.activeSessions.get(id);
+  }
+
+  /**
+   * Whether this harness's engine can host a session handed off from another
+   * session (the `StartSession` tool). False on the legacy v1 engine.
+   */
+  supportsSessionHandoff(): boolean {
+    return this.rpc.supportsSessionHandoff();
+  }
+
+  /**
+   * Opt in to hosting cross-project session handoffs: this process becomes a
+   * host for source sessions matching `options.matches` (by default, the
+   * sessions this harness owns), and every handed-off target is adopted as a
+   * live {@link Session} here. `onSessionReady` resolves before the target's
+   * first prompt is submitted. Returns false when the engine cannot host one
+   * — the print runner and remote clients never call this, so they neither
+   * register a host nor offer the tool.
+   *
+   * Call it before the sessions that may hand work off exist: the tool's
+   * visibility is folded per agent, so a host registered after a source
+   * agent's activation pass needs that agent refreshed (there is no
+   * handoff-specific refresh channel). The terminal UI calls it at startup,
+   * before any session is created.
+   *
+   * First call wins: a later call keeps the first registration and its options
+   * and returns false, because it registered nothing new.
+   */
+  enableSessionHandoff(options: SessionHandoffOptions): boolean {
+    return this.rpc.enableSessionHandoff({
+      ...options,
+      adoptSession: (summary) => this.adoptSession(summary),
+    });
+  }
+
+  /** Subscribe to pending approvals/questions the engine stopped waiting for. */
+  onSessionInteractionSettled(
+    listener: (event: SessionInteractionSettledEvent) => void,
+  ): Unsubscribe {
+    return this.rpc.onSessionInteractionSettled(listener);
+  }
+
+  /**
+   * Register a session materialized outside this harness's own create / resume
+   * paths (a handoff target) as a live session. Deliberately skips the resume
+   * binding, the startup mode application and the `session_started` telemetry
+   * that {@link createSession} / {@link resumeSession} perform: the engine
+   * already started this session with its own project settings, and the host's
+   * job is only to expose it.
+   */
+  adoptSession(summary: SessionSummary): Session {
+    const existing = this.activeSessions.get(summary.id);
+    if (existing !== undefined && !existing.isClosed) return existing;
+    const session = new Session({
+      id: summary.id,
+      workDir: summary.workDir,
+      summary,
+      rpc: this.rpc,
+      onClose: () => {
+        if (this.activeSessions.get(summary.id) === session) {
+          this.activeSessions.delete(summary.id);
+        }
+      },
+    });
+    this.activeSessions.set(session.id, session);
+    return session;
   }
 
   async closeSession(id: string): Promise<void> {

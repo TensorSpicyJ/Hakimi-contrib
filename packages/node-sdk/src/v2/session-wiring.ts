@@ -20,7 +20,12 @@
  *   no-handler cancellation, the handler-failure error event) are inherited
  *   verbatim — and writes the outcome back through the typed session
  *   services. The kernel's `respond` no-ops on an id that is no longer
- *   pending, so a late answer after a turn cancellation is safe.
+ *   pending, so a late answer after a turn cancellation is safe. The initial
+ *   pending set is bridged at construction (a session adopted with something
+ *   already parked never misses its request), each interaction is bridged
+ *   once, and an interaction that leaves the pending set is reported back
+ *   through the optional `notifyInteractionSettled` so the host can drop the
+ *   panel it mounted for it instead of leaving a stale one.
  */
 import type {
   ApprovalRequest,
@@ -64,6 +69,12 @@ export interface SessionEventSink {
     request: QuestionRequest & { sessionId: string; agentId: string },
   ): Promise<QuestionResult>;
   toolCall(request: ToolCallRequest): Promise<ToolCallResponse>;
+  /**
+   * A pending interaction handed to this sink earlier is no longer pending —
+   * the engine answered it, cancelled its turn, or the session closed. Lets a
+   * host drop the UI it mounted for it instead of leaving a stale panel.
+   */
+  notifyInteractionSettled?(sessionId: string, toolCallIds: readonly string[]): void;
 }
 
 /**
@@ -102,8 +113,13 @@ interface UserToolInteractionPayload {
 export class SessionEventWiring {
   private readonly disposables: IDisposable[] = [];
   private readonly agentSubscriptions = new Map<string, IDisposable>();
-  /** Pending interactions already handed to the sink (the kernel re-fires the full pending set on every change). */
-  private readonly bridgedInteractionIds = new Set<string>();
+  /**
+   * Interactions already handed to the sink, mapped to the tool-call id the
+   * sink's panel is keyed by. The kernel re-fires the full pending set on every
+   * change, so this doubles as the dedupe set and as the source of the settled
+   * notifications for interactions that leave the pending set.
+   */
+  private readonly bridgedInteractions = new Map<string, string>();
   private disposed = false;
 
   constructor(
@@ -113,7 +129,7 @@ export class SessionEventWiring {
     const interactions = session.accessor.get(ISessionInteractionService);
     this.disposables.push(
       interactions.onDidChangePending(() => {
-        this.bridgeNewPendingInteractions();
+        this.bridgePendingInteractions();
       }),
     );
     const lifecycle = session.accessor.get(IAgentLifecycleService);
@@ -128,6 +144,11 @@ export class SessionEventWiring {
     for (const agent of lifecycle.list()) {
       this.attachAgent(agent);
     }
+    // A session can already have a parked interaction when the wiring is
+    // installed (a handoff target adopted between creation and its first
+    // prompt, a reload after the engine parked something): bridge it now
+    // instead of waiting for the next change, which may never come.
+    this.bridgePendingInteractions();
   }
 
   dispose(): void {
@@ -164,12 +185,24 @@ export class SessionEventWiring {
     subscription.dispose();
   }
 
-  private bridgeNewPendingInteractions(): void {
+  private bridgePendingInteractions(): void {
     if (this.disposed) return;
     const pending = this.session.accessor.get(ISessionInteractionService).listPending();
+    const pendingIds = new Set(pending.map((interaction) => interaction.id));
+    // Interactions that left the pending set are settled (answered by the
+    // engine, dropped with a cancelled turn, or dismissed with the session).
+    // Report them before bridging new ones so a host never re-uses a stale
+    // panel id.
+    const settled: string[] = [];
+    for (const [interactionId, toolCallId] of this.bridgedInteractions) {
+      if (pendingIds.has(interactionId)) continue;
+      this.bridgedInteractions.delete(interactionId);
+      settled.push(toolCallId);
+    }
+    if (settled.length > 0) this.sink.notifyInteractionSettled?.(this.session.id, settled);
     for (const interaction of pending) {
-      if (this.bridgedInteractionIds.has(interaction.id)) continue;
-      this.bridgedInteractionIds.add(interaction.id);
+      if (this.bridgedInteractions.has(interaction.id)) continue;
+      this.bridgedInteractions.set(interaction.id, toolCallIdOf(interaction));
       switch (interaction.kind) {
         case 'approval':
           void this.bridgeApproval(interaction);
@@ -196,7 +229,7 @@ export class SessionEventWiring {
     try {
       const response = await this.sink.requestApproval({
         turnId: payload.turnId,
-        toolCallId: payload.toolCallId ?? interaction.id,
+        toolCallId: toolCallIdOf(interaction),
         toolName: payload.toolName,
         action: payload.action,
         display: payload.display,
@@ -221,7 +254,7 @@ export class SessionEventWiring {
     try {
       const result = await this.sink.requestQuestion({
         turnId: payload.turnId,
-        toolCallId: payload.toolCallId,
+        toolCallId: toolCallIdOf(interaction),
         questions: payload.questions,
         sessionId: this.session.id,
         agentId: interaction.origin.agentId ?? MAIN_AGENT_ID,
@@ -247,7 +280,7 @@ export class SessionEventWiring {
     try {
       const result = await this.sink.toolCall({
         turnId: payload.turnId,
-        toolCallId: payload.toolCallId,
+        toolCallId: toolCallIdOf(interaction),
         args: payload.args,
       });
       this.session.accessor.get(ISessionInteractionService).respond(interaction.id, result);
@@ -255,6 +288,17 @@ export class SessionEventWiring {
       // See bridgeApproval.
     }
   }
+}
+
+/**
+ * The id a host keys its panel by: the tool call id both engines already carry
+ * on the interaction payload, falling back to the kernel's interaction id for
+ * the shapes that omit it. Shared by the bridges and the settled
+ * notifications so a host can match a dropped panel to its request.
+ */
+function toolCallIdOf(interaction: Interaction): string {
+  const payload = interaction.payload as { readonly toolCallId?: string };
+  return payload.toolCallId ?? interaction.id;
 }
 
 /**

@@ -9,6 +9,13 @@
  * fire-and-forget: a persistence failure must never block a generation or
  * turn a successful request into a retry. App-scoped — shared across the
  * process so every workspace/agent aggregates into one ledger.
+ *
+ * Queries accept a provider name or a group of configured aliases whose account
+ * equivalence the caller has already verified. Duplicate names and attempt IDs
+ * never multiply usage. This is local recording history, not an official account
+ * bill; the ledger performs no account matching or network queries. Group
+ * trackingStartedAt is the latest known member coverage start; an unknown member
+ * or any member's coverage gap keeps the affected period partial.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
@@ -40,7 +47,7 @@ export interface IProviderUsageLedgerService {
   finishAttempt(attemptId: string, finish: MeteredAttemptFinish): void;
 
   getMeteredUsage(
-    providerName: string,
+    providerName: string | readonly string[],
     options?: { readonly signal?: AbortSignal },
   ): Promise<LocalMeteredUsage>;
 }

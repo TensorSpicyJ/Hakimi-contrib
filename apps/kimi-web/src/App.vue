@@ -58,7 +58,9 @@ import { commitLevel, effectiveThinkingLevel, segmentsFor } from './lib/modelThi
 import {
   mainRouteForPreset,
   subagentPresetManualLock,
-  subagentPresetResumeAutoPatch,
+  autoSubagentPresetEnabled,
+  autoSubagentPresetActionLabel,
+  autoSubagentPresetUnavailableReason,
 } from './lib/subagentPreset';
 import {
   parseResearchSlashCommand,
@@ -97,6 +99,12 @@ const showServerAuth = computed(
   () => !client.dangerousBypassAuth.value && authRequired.value,
 );
 provide('resolveImage', client.resolveImageUrl);
+// In-app session switch for tool cards that point at another session (the
+// cross-project `StartSession` result). Keeps the current session's live state
+// instead of reloading the page the way a raw `/sessions/<id>` link would.
+provide('openSession', (sessionId: string) => {
+  void client.selectSession(sessionId);
+});
 // Live swarm member roster for the inline AgentSwarm tool card. Sourced from the
 // AppTask store so the card shows each subagent's live phase; on refresh the
 // tasks are gone and the card falls back to the parsed tool result. Includes
@@ -445,6 +453,23 @@ const subagentPresetNames = computed(() =>
 /** `autoPreset.manualLock` — a manually activated preset paused automatic
  *  switching; drives the header lock badge and the settings lock row. */
 const subagentPresetLocked = computed(() => subagentPresetManualLock(client.config.value));
+const autoPresetControl = computed(() => {
+  const automatic = !subagentPresetLocked.value &&
+    autoSubagentPresetEnabled(client.config.value, client.experimentalFlags.value);
+  return {
+    automatic,
+    label: autoSubagentPresetActionLabel(automatic, subagentPresetLocked.value, t),
+    disabledReason: client.autoPresetAction.unsupported
+      ? t('header.subagentPresetAutoUnsupported')
+      : autoSubagentPresetUnavailableReason(
+          client.config.value, client.experimentalFlags.value, t, client.autoPresetAction.supported,
+        ),
+    feedback: client.autoPresetAction.metaStatus === 'error'
+      ? [client.autoPresetAction.feedback, t('header.subagentPresetAutoMetaRetry')].filter(Boolean).join(' · ')
+      : client.autoPresetAction.feedback,
+    pending: client.autoPresetAction.pending,
+  };
+});
 
 async function openModelPicker(): Promise<void> {
   modelsLoading.value = true;
@@ -546,6 +571,7 @@ async function confirmDeleteProvider(id: string): Promise<void> {
 }
 
 async function handleUpdateConfig(patch: Partial<AppConfig>): Promise<boolean> {
+  if (configSaving.value) return false;
   configSaving.value = true;
   try {
     const saved = await client.updateConfig(patch);
@@ -581,13 +607,13 @@ async function handleActivatePreset(preset: string): Promise<void> {
   }
 }
 
-/** Resume automatic switching: minimal patch that clears only the manual lock —
- *  the active preset and the auto gates stay exactly as configured. */
+/** All preset surfaces share the fresh-evaluation action, even without a session. */
 async function handleResumeAutoPreset(): Promise<void> {
-  if (configSaving.value) return;
+  if (configSaving.value || autoPresetControl.value.disabledReason) return;
+  const targetSessionId = client.activeSessionId.value;
   configSaving.value = true;
   try {
-    await client.updateConfig(subagentPresetResumeAutoPatch());
+    await client.autoSelectSubagentPreset(targetSessionId);
   } finally {
     configSaving.value = false;
   }
@@ -1077,6 +1103,8 @@ function openPr(url: string): void {
       :todos="client.todos.value"
       :goal="client.goal.value"
       :research="client.research.value"
+      :aitp-plugin="client.aitpPlugin.value"
+      :plugin-metadata-status="client.pluginMetadataStatus.value"
       :research-enabled="client.researchEnabled.value"
       :research-expand-signal="researchExpandSignal"
       :activation-badges="client.activationBadges.value"
@@ -1112,8 +1140,10 @@ function openPr(url: string): void {
       :git-diff-stats="client.gitDiffStats.value"
       :subagent-preset="client.config.value?.subagent?.preset"
       :subagent-preset-names="subagentPresetNames"
+      :subagent-preset-candidates="client.config.value?.subagent?.autoPreset?.candidates"
       :subagent-preset-saving="configSaving"
       :subagent-preset-locked="subagentPresetLocked"
+      :auto-preset-control="autoPresetControl"
       :auto-subagent-preset-status="client.autoSubagentPresetStatus.value"
       :workspaces="client.workspacesView.value"
       :active-workspace-id="client.activeWorkspaceId.value"
@@ -1318,6 +1348,8 @@ function openPr(url: string): void {
       :sound="client.soundOnComplete.value"
       :conversation-toc="client.conversationToc.value"
       :config="client.config.value"
+      :auto-preset-control="autoPresetControl"
+      @resume-auto-preset="handleResumeAutoPreset"
       :auto-subagent-preset-status="client.autoSubagentPresetStatus.value"
       :models="client.models.value"
       :config-saving="configSaving"
@@ -1464,8 +1496,11 @@ function openPr(url: string): void {
       :pr="client.activePullRequest.value"
       :subagent-preset="client.config.value?.subagent?.preset"
       :subagent-preset-names="subagentPresetNames"
+      :subagent-preset-candidates="client.config.value?.subagent?.autoPreset?.candidates"
       :subagent-preset-saving="configSaving"
       :subagent-preset-locked="subagentPresetLocked"
+      :auto-preset-control="autoPresetControl"
+      :auto-subagent-preset-status="client.autoSubagentPresetStatus.value"
       @pick-model="openModelPicker()"
       @set-thinking="client.setThinking($event)"
       @toggle-plan="handleTogglePlanMode"

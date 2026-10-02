@@ -102,17 +102,17 @@ Prompt mode exits with code `0` when the goal completes, `3` when it blocks, and
 
 ## Research Mode
 
-**Locally implemented and installed; running processes need a restart.** The lightweight Research Mode retains only the basic mode commands for local-knowledge and long-term-memory guidance. Turning it on makes discoverable official AITP skills visible; turning it off hides those skills while preserving existing project knowledge and AITP records. `/research status` reads local mode state. None of these commands installs AITP, probes or initializes a store, runs CLI maintenance, writes the ledger, or starts a background loop.
+**Locally implemented and installed; running processes need a restart.** The lightweight Research Mode retains only the basic mode commands for local-knowledge and long-term-memory guidance. Turning it on makes the discoverable official AITP skills visible; turning it off hides those skills while preserving existing project knowledge and AITP memory. `/research status` reads local mode state. None of these commands installs AITP, initializes a store, runs an external process, writes any memory file, or starts a background loop.
 
 | Command | Action | Surfaces / availability |
 | --- | --- | --- |
 | `/research on` | Enable the lightweight mode and official AITP skill visibility | TUI and Web; available locally |
-| `/research status` | Read local mode status without running the AITP CLI | TUI and Web; available locally |
-| `/research off` | Disable the mode and skill visibility; existing knowledge and records remain | TUI and Web; available locally |
+| `/research status` | Read local mode state without running any AITP process | TUI and Web; available locally |
+| `/research off` | Disable the mode and skill visibility; existing knowledge and memory remain | TUI and Web; available locally |
 
 The old research-management and advancement commands — including pause/resume, Manager, question and line mutations, alignment, and checkpoint operations — are no longer supported. Do not infer aliases, extra flags, or a legacy command workflow from historical records. Read those records through raw session logs or session exports; there is no structured Research history API or Manager. The CLI wrapper currently points at the built workspace output, so newly started processes use this implementation; already-running processes keep the previous code until restarted, and no user session has been force-restarted.
 
-Research Mode does not create a second Goal, Plan mode, or permission layer. Goal remains responsible for cross-turn continuation, budgets, and completion; ordinary tool permissions continue to apply. The retired host Research veto does not become a new guarantee that ordinary file tools cannot touch canonical AITP files: official CLI validation constrains only its own operations and is not OS-level isolation.
+Research Mode does not create a second Goal, Plan mode, or permission layer. Goal remains responsible for cross-turn continuation, budgets, and completion; ordinary tool permissions continue to apply. The retired host Research veto does not become a new guarantee that ordinary file tools cannot touch a topic's AITP memory files: the official skills' file conventions constrain only their own operations and are not OS-level isolation.
 
 ## Information & Status
 

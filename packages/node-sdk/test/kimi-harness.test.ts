@@ -5,9 +5,15 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { createKimiHarness, ImageLimits, KimiHarness, SDKRpcClientBase } from '#/index';
+import type { SessionHandoffHostOptions, SessionSummary } from '#/index';
 
 import { recordingTelemetry } from './telemetry';
 import { TEST_IDENTITY } from './test-identity';
+
+const TARGET_SUMMARY = {
+  id: 'ses_target',
+  workDir: '/tmp/target',
+} as unknown as SessionSummary;
 
 const tempDirs: string[] = [];
 
@@ -136,5 +142,47 @@ read_byte_budget = 65536
 
     expect(harness.imageLimits).toBe(limits);
     expect(harness.imageLimits?.maxEdgePx()).toBe(900);
+  });
+});
+
+describe('KimiHarness cross-project session handoff', () => {
+  it('reports the legacy engine as unable to host a handoff', () => {
+    const harness = makeHarnessWithRpc(new StubRpc());
+
+    expect(harness.supportsSessionHandoff()).toBe(false);
+    // The base client answers false and registers nothing, so a v1-backed
+    // harness never advertises the handoff tool.
+    expect(harness.enableSessionHandoff({ onSessionReady: () => undefined })).toBe(false);
+  });
+
+  it('adopts a handed-off session without resuming or binding it', async () => {
+    const calls: string[] = [];
+    class HandoffRpc extends StubRpc {
+      override supportsSessionHandoff(): boolean {
+        return true;
+      }
+      override enableSessionHandoff(options: SessionHandoffHostOptions): boolean {
+        // The client-side contract: the harness supplies the adopter, which is
+        // what lets the client register the created session as a live Session.
+        adopted = options.adoptSession(TARGET_SUMMARY);
+        return true;
+      }
+      override async resumeSession(): Promise<never> {
+        calls.push('resume');
+        throw new Error('adoptSession must not resume');
+      }
+    }
+    let adopted: unknown;
+    const harness = makeHarnessWithRpc(new HandoffRpc());
+
+    expect(harness.enableSessionHandoff({ onSessionReady: () => undefined })).toBe(true);
+    const session = harness.getSession('ses_target');
+    expect(session).toBeDefined();
+    expect(adopted).toBe(session);
+    expect(session?.workDir).toBe('/tmp/target');
+    expect(session?.isClosed).toBe(false);
+    expect(calls).toEqual([]);
+    // Idempotent: a second adoption of the same id returns the live facade.
+    expect(harness.adoptSession(TARGET_SUMMARY)).toBe(session);
   });
 });

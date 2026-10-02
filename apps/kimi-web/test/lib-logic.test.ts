@@ -37,6 +37,8 @@ import AgentTool from '../src/components/chat/tool-calls/AgentTool.vue';
 import BashTool from '../src/components/chat/tool-calls/BashTool.vue';
 import EditTool from '../src/components/chat/tool-calls/EditTool.vue';
 import GenericTool from '../src/components/chat/tool-calls/GenericTool.vue';
+import StartSessionTool from '../src/components/chat/tool-calls/StartSessionTool.vue';
+import { parseStartSessionResult } from '../src/lib/startSessionResult';
 import type { ToolCall } from '../src/types';
 import {
   clearTrace,
@@ -501,6 +503,57 @@ describe('resolveToolRenderer', () => {
 
   it('falls back to the Generic renderer for unknown tools', () => {
     expect(resolveToolRenderer(tool('read'))).toBe(GenericTool);
+  });
+
+  it('routes StartSession calls to the handoff renderer', () => {
+    expect(resolveToolRenderer(tool('StartSession'))).toBe(StartSessionTool);
+    expect(resolveToolRenderer(tool('start_session'))).toBe(StartSessionTool);
+  });
+});
+
+describe('parseStartSessionResult', () => {
+  it('reads the session id, target directory, and status off the handoff tag', () => {
+    expect(
+      parseStartSessionResult([
+        '<session_handoff session_id="sess_target" workspace_id="wd_target" work_dir="/home/me/project" status="running" prompt_id="prompt_1">',
+        'Started an independent session…',
+        '</session_handoff>',
+      ]),
+    ).toEqual({
+      sessionId: 'sess_target',
+      workDir: '/home/me/project',
+      status: 'running',
+    });
+  });
+
+  it('surfaces an unfinished handoff and decodes escaped attribute values', () => {
+    expect(
+      parseStartSessionResult([
+        '<session_handoff session_id="sess_target" work_dir="/home/me/a&amp;b" status="failed" error="the first prompt failed">',
+        'The session exists but its first task did not run to completion…',
+        '</session_handoff>',
+      ]),
+    ).toEqual({
+      sessionId: 'sess_target',
+      workDir: '/home/me/a&b',
+      status: 'failed',
+      error: 'the first prompt failed',
+    });
+  });
+
+  it('returns an empty result for absent or unrecognised output', () => {
+    expect(parseStartSessionResult(undefined)).toEqual({});
+    expect(parseStartSessionResult([])).toEqual({});
+    expect(parseStartSessionResult(['plain output with no tag'])).toEqual({});
+    expect(parseStartSessionResult(['failed for session_id="not-a-target"'])).toEqual({});
+  });
+
+  it('ignores attributes in the body and inherited object keys', () => {
+    expect(parseStartSessionResult([
+      '<session_handoff __proto__="ignored" constructor="ignored" session_id="target">',
+      'status="failed" work_dir="not-the-target"',
+      '</session_handoff>',
+    ])).toEqual({ sessionId: 'target' });
   });
 });
 

@@ -4,8 +4,9 @@
  * Appends started/finished run-ledger records through the append-log store at
  * `bootstrap.scope('store')` under key `agent-run-usage/runs.jsonl` and
  * exposes read-only iteration plus the by-`runId` fold over schema- and
- * version-validated records. Pairs live started/finished runIds in process,
- * fires `onDidFinishRun` once per completed pair, and bounds the live tracking
+ * version-validated records. Announces each live `onDidStartRun` synchronously
+ * with an immutable started snapshot, pairs starts/finishes in process, fires
+ * `onDidFinishRun` once per completed pair, and bounds the live tracking
  * state (started records are dropped on completion; the started map is
  * capacity-capped so the ledger's in-process view never grows without bound
  * over the App lifetime). All persistence goes through `IAppendLogStore`.
@@ -40,6 +41,8 @@ export class AgentRunUsageService extends Disposable implements IAgentRunUsageSe
   private readonly scope: string;
   private readonly appendOptions: AppendLogOptions;
   private readonly startedByRunId = new Map<string, AgentRunUsageStartedRecord>();
+  private readonly _onDidStartRun = new Emitter<AgentRunUsageStartedRecord>('agentRunUsage.onDidStartRun');
+  readonly onDidStartRun: Event<AgentRunUsageStartedRecord> = this._onDidStartRun.event;
   private readonly _onDidFinishRun = new Emitter<AgentRunUsageEntry>('agentRunUsage.onDidFinishRun');
   readonly onDidFinishRun: Event<AgentRunUsageEntry> = this._onDidFinishRun.event;
 
@@ -51,22 +54,26 @@ export class AgentRunUsageService extends Disposable implements IAgentRunUsageSe
     super();
     this.scope = bootstrap.scope('store');
     this._register(this.appendLog.acquire(this.scope, AGENT_RUN_USAGE_LOG_KEY));
+    this._register(this._onDidStartRun);
     this._register(this._onDidFinishRun);
     this.appendOptions = { onError: () => this.onAppendError() };
   }
 
   appendStarted(record: AgentRunUsageStartedRecord): void {
-    if (!this.startedByRunId.has(record.runId) && this.startedByRunId.size >= MAX_LIVE_STARTED_RUNS) {
+    const first = !this.startedByRunId.has(record.runId);
+    const snapshot = Object.freeze({ ...record });
+    if (first && this.startedByRunId.size >= MAX_LIVE_STARTED_RUNS) {
       const oldest = this.startedByRunId.keys().next().value;
       if (oldest !== undefined) this.startedByRunId.delete(oldest);
     }
-    this.startedByRunId.set(record.runId, record);
+    if (first) this.startedByRunId.set(record.runId, snapshot);
     this.appendLog.append<AgentRunUsageStartedRecord>(
       this.scope,
       AGENT_RUN_USAGE_LOG_KEY,
-      record,
+      snapshot,
       this.appendOptions,
     );
+    if (first) this._onDidStartRun.fire(snapshot);
   }
 
   appendFinished(record: AgentRunUsageFinishedRecord): void {

@@ -5,21 +5,26 @@
  * into a Profile + Model binding, creates (or resumes) an agent through
  * `IAgentLifecycleService`, drives one turn via `ISessionSubagentService.run`,
  * and mirrors the run onto the calling agent's record stream
- * (`mirrorAgentRun`). The tool also owns the JSON schema + description,
- * approval rule, background-task registration (so the LLM can see the run
+ * (`mirrorAgentRun`). A resume target the session has on disk but not live
+ * (cold resume materializes `main` only) is restored lazily: its persisted
+ * ownership and subagent kind are validated first and the tool's abort signal is
+ * re-checked around the restore, so an unknown, foreign, non-subagent or
+ * cancelled resume never materializes a scope. The already-running check runs
+ * after the restore, because it reads the agent's loop. The tool also owns the
+ * JSON
+ * schema + description, approval rule, background-task registration (so the
+ * LLM can see the run
  * under TaskList/TaskOutput/TaskStop when `run_in_background=true` or after
  * detach), and terminal text formatting.
  *
- * Spawn bindings are resolved through the canonical `[subagent]` route table:
- * the active preset takes precedence, followed by `agents`, then the caller's
- * binding. Before resolving, the tool asks the App-scope automatic preset
- * decider (`autoSubagentPreset`) to evaluate the soon-to-spawn route — for
- * fresh spawns and rebindable resumes alike — so the decider may activate a
- * better `[subagent]` preset ahead of the resolve; the decision is fail-open
- * and only writes `[subagent].preset`. The legacy `[secondary_model]` section
- * is consulted only as a compatibility fallback when no preset is active. On
- * resume, ordinary profiles reconcile the same route before the run and event
- * snapshot, while profiles that own their binding preserve it.
+ * Fresh spawns and rebindable resumes consume the final binding returned by
+ * the App-scope `autoSubagentPreset` decider, including temporary role fallbacks.
+ * Unavailable automatic routes fail before allocation; disabled or locked
+ * automatic routing retains canonical `[subagent]` resolution. The binding is
+ * fixed for the run and its display snapshot. Profiles that own their binding
+ * preserve it on resume without consulting the decider. Tool cancellation applies
+ * throughout launch and registration; successfully registered background runs
+ * detach from the caller's signal.
  *
  * Registered via the module-level `registerAgentToolService(ISubagentTool,
  * SubagentTool)` at the bottom of this file — the same "import = register"
@@ -95,7 +100,6 @@ import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAg
 import { ISessionSubagentService } from '#/session/subagent/subagent';
 import {
   formatSubagentTimeoutDescription,
-  resolveSubagentBinding,
   resolveSubagentTimeoutMs,
   wrapSubagentModelError,
 } from '#/session/subagent/configSection';
@@ -265,42 +269,49 @@ export class SubagentTool implements ISubagentTool {
     let displayModel: string | undefined;
     let promptText = args.prompt;
     if (isResume) {
-      const target = this.lifecycle.get(resumeAgentId);
+      controller.signal.throwIfAborted();
+      await this.assertPersistedSubagent(resumeAgentId);
+      controller.signal.throwIfAborted();
+      const target = await this.lifecycle.restore(resumeAgentId);
       if (target === undefined) {
         throw new Error2(ErrorCodes.AGENT_NOT_FOUND, `Agent instance "${resumeAgentId}" does not exist`, {
           details: { agentId: resumeAgentId },
         });
       }
-      await this.ensureOwnedIdleSubagent(resumeAgentId, target);
+      this.assertSubagentIdle(target);
       agentId = target.id;
       const targetProfileService = target.accessor.get(IAgentProfileService);
       const targetProfileName = targetProfileService.data().profileName;
       await this.catalog.ready;
+      controller.signal.throwIfAborted();
       const targetProfile =
         targetProfileName === undefined ? undefined : this.catalog.get(targetProfileName);
       const own = this.profile.data();
-      if (
-        own.modelAlias !== undefined &&
+      const validatedBinding = own.modelAlias !== undefined &&
+        targetProfileName !== undefined &&
+        targetProfileService.data().modelAlias !== undefined &&
         targetProfile?.preserveBindingOnResume !== true
-      ) {
-        await this.autoPreset.evaluate(
-          {
-            route: 'agent',
-            profileName: targetProfileName,
-            modelPreference: targetProfile?.modelPreference,
-            caller: { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
-          },
-          { sessionId: this.sessionContext.sessionId, signal: controller.signal },
-        );
-      }
+        ? await this.autoPreset.resolveBinding(
+            {
+              route: 'agent',
+              profileName: targetProfileName,
+              modelPreference: targetProfile?.modelPreference,
+              caller: { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
+            },
+            { sessionId: this.sessionContext.sessionId, signal: controller.signal },
+          )
+        : undefined;
+      controller.signal.throwIfAborted();
       const resumed = await refreshSubagentBindingOnResume(
         this.config,
         this.flags,
         this.catalog,
         this.modelCatalog,
         targetProfileService,
-        this.profile.data(),
+        own,
         'agent',
+        validatedBinding,
+        controller.signal,
       );
       profileName = resumed.profileName ?? RESUMED_LABEL;
       displayModel = resumed.modelAlias;
@@ -309,6 +320,7 @@ export class SubagentTool implements ISubagentTool {
         ? args.subagent_type
         : DEFAULT_PROFILE_NAME;
       await this.catalog.ready;
+      controller.signal.throwIfAborted();
       const own = this.profile.data();
       const allowlist = subagentAllowlistFor(this.catalog, own);
       if (allowlist !== undefined && !allowlist.includes(requestedProfileName)) {
@@ -329,7 +341,7 @@ export class SubagentTool implements ISubagentTool {
           details: { agentId: this.callerAgentId },
         });
       }
-      await this.autoPreset.evaluate(
+      const binding = await this.autoPreset.resolveBinding(
         {
           route: 'agent',
           profileName: profile.name,
@@ -341,15 +353,7 @@ export class SubagentTool implements ISubagentTool {
         },
         { sessionId: this.sessionContext.sessionId, signal: controller.signal },
       );
-      const binding = resolveSubagentBinding(this.config, this.flags, this.modelCatalog, {
-        route: 'agent',
-        profileName: profile.name,
-        modelPreference: profile.modelPreference,
-        caller: {
-          modelAlias: own.modelAlias,
-          thinkingLevel: own.thinkingLevel,
-        },
-      });
+      controller.signal.throwIfAborted();
       let created: IAgentScopeHandle;
       try {
         this.modelCatalog.get(binding.model);
@@ -379,6 +383,7 @@ export class SubagentTool implements ISubagentTool {
       });
     }
 
+    controller.signal.throwIfAborted();
     const runInBackground = args.run_in_background === true;
     emitAgentRunSpawned(requester, agentId, {
       profileName,
@@ -414,11 +419,13 @@ export class SubagentTool implements ISubagentTool {
     };
   }
 
-  private async ensureOwnedIdleSubagent(
-    agentId: string,
-    target: IAgentScopeHandle,
-  ): Promise<void> {
+  private async assertPersistedSubagent(agentId: string): Promise<void> {
     const meta = (await this.sessionMetadata.read()).agents?.[agentId];
+    if (meta === undefined) {
+      throw new Error2(ErrorCodes.AGENT_NOT_FOUND, `Agent instance "${agentId}" does not exist`, {
+        details: { agentId },
+      });
+    }
     if (!isSubagentMeta(meta)) {
       throw new Error2(ErrorCodes.AGENT_NOT_A_SUBAGENT, `Agent instance "${agentId}" is not a subagent`, {
         details: { agentId },
@@ -431,11 +438,14 @@ export class SubagentTool implements ISubagentTool {
         { details: { agentId, callerAgentId: this.callerAgentId } },
       );
     }
+  }
+
+  private assertSubagentIdle(target: IAgentScopeHandle): void {
     if (target.accessor.get(IAgentLoopService).status().state === 'running') {
       throw new Error2(
         ErrorCodes.AGENT_ALREADY_RUNNING,
-        `Agent instance "${agentId}" is already running and cannot run concurrently`,
-        { details: { agentId } },
+        `Agent instance "${target.id}" is already running and cannot run concurrently`,
+        { details: { agentId: target.id } },
       );
     }
   }
@@ -466,7 +476,9 @@ export class SubagentTool implements ISubagentTool {
       const abortBeforeRegister = (): void => {
         controller.abort(signal.reason);
       };
-      if (!runInBackground) {
+      if (signal.aborted) {
+        abortBeforeRegister();
+      } else {
         signal.addEventListener('abort', abortBeforeRegister, { once: true });
       }
 
@@ -490,6 +502,7 @@ export class SubagentTool implements ISubagentTool {
 
       let taskId: string;
       try {
+        controller.signal.throwIfAborted();
         const registerOptions: RegisterAgentTaskOptions = {
           detached: runInBackground,
           timeoutMs,

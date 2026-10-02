@@ -253,6 +253,7 @@ export type {
 export {
   applyOpenAICodexConfig,
   extractOpenAICodexAccountId,
+  getMissingOpenAICodexModels,
   OPENAI_CODEX_API_BASE_URL,
   OPENAI_CODEX_CLIENT_ID,
   OPENAI_CODEX_ISSUER,

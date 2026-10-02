@@ -141,7 +141,7 @@ const OPENAI_LEGACY_CAPABILITY_CATALOG: readonly CapabilityCatalogEntry[] = [
     capability: OPENAI_REASONING_CAPABILITY,
   },
   {
-    matches: (name) => isOpenAIGpt6AstraModel(name),
+    matches: (name) => isOpenAIGpt6Model(name),
     capability: OPENAI_THINKING_VISION_TOOL_CAPABILITY,
   },
   {
@@ -164,7 +164,7 @@ const OPENAI_RESPONSES_CAPABILITY_CATALOG: readonly CapabilityCatalogEntry[] = [
     capability: OPENAI_REASONING_CAPABILITY,
   },
   {
-    matches: (name) => isOpenAIGpt6AstraModel(name),
+    matches: (name) => isOpenAIGpt6Model(name),
     capability: OPENAI_THINKING_VISION_TOOL_CAPABILITY,
   },
   {
@@ -196,8 +196,14 @@ function isOpenAIReasoningModel(modelName: string): boolean {
   return /^o\d/.test(modelName);
 }
 
-export function isOpenAIGpt6AstraModel(modelName: string): boolean {
-  return /^gpt-6-astra(?:$|[-.])/.test(normalizeModelName(modelName));
+// Catalogued GPT-6 slugs, matched as a whole token with an explicit suffix
+// boundary so lookalikes (`gpt-6-astral`, `gpt-6-solar`) and other unlisted
+// `gpt-6-*` slugs fall through to UNKNOWN_CAPABILITY instead of being
+// silently treated as vision/reasoning models.
+const OPENAI_GPT6_PATTERN = /^gpt-6-(?:astra|sol|luna)(?:$|[-.])/;
+
+export function isOpenAIGpt6Model(modelName: string): boolean {
+  return OPENAI_GPT6_PATTERN.test(normalizeModelName(modelName));
 }
 
 function capabilityFromCatalog(
@@ -238,7 +244,7 @@ export function getGoogleGenAIModelCapability(modelName: string): ModelCapabilit
 
 export function usesOpenAIResponsesDeveloperRole(modelName: string): boolean {
   const normalized = normalizeModelName(modelName);
-  if (isOpenAIGpt6AstraModel(normalized)) return true;
+  if (isOpenAIGpt6Model(normalized)) return true;
   if (OPENAI_RESPONSES_DEVELOPER_ROLE_MODELS.has(normalized)) return true;
   for (const cataloguedModel of OPENAI_RESPONSES_DEVELOPER_ROLE_MODELS) {
     if (normalized.startsWith(cataloguedModel + '-')) return true;

@@ -101,11 +101,11 @@ describe('AgentSkillVisibilityService', () => {
         this.provide(SkillVisibilityContribution, {
           id: 'aitpResearch',
           isVisible: (skill: SkillDefinition, accessor: ServicesAccessor) => {
-            if (skill.plugin?.id !== 'aitp-research-protocol') return true;
+            if (skill.plugin?.id !== 'aitp') return true;
             return accessor.get(ITestModeService).isActive;
           },
           describeHidden: (skill: SkillDefinition, accessor: ServicesAccessor) => {
-            if (skill.plugin?.id === 'aitp-research-protocol' && !accessor.get(ITestModeService).isActive) {
+            if (skill.plugin?.id === 'aitp' && !accessor.get(ITestModeService).isActive) {
               return 'AITP Research Mode is not active.';
             }
             return undefined;
@@ -117,7 +117,7 @@ describe('AgentSkillVisibilityService', () => {
     disposables.add(ix.createInstance(ModeFilterProvider));
 
     const svc = ix.get(IAgentSkillVisibilityService);
-    const aitpSkill = makeSkill('aitp', 'aitp-research-protocol');
+    const aitpSkill = makeSkill('aitp', 'aitp');
     const normalSkill = makeSkill('normal');
 
     expect(svc.isSkillVisible(aitpSkill)).toBe(false);

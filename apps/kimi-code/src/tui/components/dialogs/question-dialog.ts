@@ -453,6 +453,13 @@ export class QuestionDialogComponent extends Container implements Focusable {
 
     const renderWidth = Math.max(1, width);
     const lines: string[] = [accent('─'.repeat(renderWidth)), currentTheme.boldFg('primary', ' question'), ''];
+    // A question raised by a session other than the one on screen (a
+    // handed-off background session) carries its identity so the answer is
+    // never attributed to the wrong project.
+    if (this.request.data.session_label !== undefined) {
+      lines.push(dim(`   session: ${this.request.data.session_label}`));
+      lines.push('');
+    }
     this.pushTabs(lines);
     lines.push('');
 
@@ -551,6 +558,13 @@ export class QuestionDialogComponent extends Container implements Focusable {
 
     const renderWidth = Math.max(1, width);
     const lines: string[] = [accent('─'.repeat(renderWidth)), currentTheme.boldFg('primary', ' question'), ''];
+    // A question raised by a session other than the one on screen (a
+    // handed-off background session) carries its identity so the answer is
+    // never attributed to the wrong project.
+    if (this.request.data.session_label !== undefined) {
+      lines.push(dim(`   session: ${this.request.data.session_label}`));
+      lines.push('');
+    }
     this.pushTabs(lines);
     lines.push('');
     lines.push(currentTheme.boldFg('text', ` ${REVIEW_TITLE}`));

@@ -1,8 +1,9 @@
 /**
  * `agentLifecycle` domain — flat registry of the session's agents.
  *
- * Owns agent *existence* — the creation pipeline (`create` / `fork`), the
- * registry (`get` / `list` / `remove`), and the lifecycle events — plus the
+ * Owns agent *existence* — the creation pipeline (`create` / `fork` /
+ * `restore`), the registry (`get` / `list` / `remove`), and the lifecycle
+ * events — plus the
  * session-wide fan-outs only the live registry can reach
  * (`broadcastPermissionMode`). Session-scoped — one instance per session.
  *
@@ -17,6 +18,19 @@
  * - Creation is single-flight per explicit agent id (concurrent creations
  *   join), an already-created agent is returned as-is, and a failed bootstrap
  *   drops the incomplete handle.
+ * - A persisted record wins over the create options: when an id already has a
+ *   record, `create` keeps it verbatim, so the record — not the options that
+ *   happen to accompany a restore — defines the agent's labels, parentage and
+ *   fork provenance.
+ * - `restore(agentId)` returns the live agent, materializing one from its
+ *   persisted record when the session has a record but no live scope (a cold
+ *   session resume materializes `main` only). An id with no record is never
+ *   materialized: `restore` returns `undefined` instead of creating an empty
+ *   agent, and the caller keeps ownership of the id's identity checks.
+ * - An id that is being removed is not materializable: `create` and `restore`
+ *   refuse it until the removal settled, so a caller cannot race a session
+ *   close into a second scope for the same agent (and with it, the same wire
+ *   journal).
  * - `forkedFrom` is provenance only (a recorded value); business logic must
  *   not branch on it.
  */
@@ -55,6 +69,8 @@ export interface IAgentLifecycleService {
   create(opts?: CreateAgentOptions): Promise<IAgentScopeHandle>;
 
   fork(sourceAgentId: string, opts?: ForkAgentOptions): Promise<IAgentScopeHandle>;
+
+  restore(agentId: string): Promise<IAgentScopeHandle | undefined>;
 
   get(agentId: string): IAgentScopeHandle | undefined;
   list(filter?: AgentListFilter): readonly IAgentScopeHandle[];

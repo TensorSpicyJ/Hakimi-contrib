@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { inflateRawSync } from 'node:zlib';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { WebSocket } from 'ws';
 
 import {
   Error2,
@@ -25,17 +26,38 @@ import {
   IAgentProfileService,
   IEventBus,
   IEventService,
+  IProtocolAdapterRegistry,
+  ISessionApprovalService,
+  ISessionContext,
+  ISessionHandoffCoordinator,
+  ISessionManager,
+  ISessionMetadata,
+  IWorkspaceInstanceManager,
   MAIN_AGENT_ID,
+  UNKNOWN_CAPABILITY,
   closeSessionById,
   getLiveSessionById,
   sessionDirOf,
+  type ChatProvider,
+  type FinishReason,
+  type IDisposable,
   type ServiceIdentifier,
+  type Scope,
   type ScopeSeed,
+  type SessionHandoffDenyGuard,
+  type SessionHandoffHost,
+  type StreamedMessage,
+  type StreamedMessagePart,
+  type TokenUsage,
 } from '@moonshot-ai/agent-core-v2';
 import { sessionWarningsResponseSchema } from '@moonshot-ai/agent-core-v2/app/sessionLegacy/sessionProtocol';
 import { encodeWorkDirKey } from '@moonshot-ai/agent-core-v2/_base/utils/workdir-slug';
 
 import { type RunningServer, startServer } from '../src/start';
+import type { RemoteAccessOptions } from '../src/middleware/remoteAccess';
+import { registerSessionHandoffBridge } from '../src/sessionHandoff/sessionHandoffBridge';
+import { ensureMainAgent } from '../src/transport/mainAgent';
+import type { SessionEventBroadcaster } from '../src/transport/ws/v1/sessionEventBroadcaster';
 import { TEST_HOST_IDENTITY } from './helpers/hostIdentity';
 import { authHeaders } from './helpers/auth';
 
@@ -1469,6 +1491,159 @@ describe('server-v2 /api/v1/sessions', () => {
     expect(meta).toBeDefined();
     expect((meta?.payload as { title?: string } | undefined)?.title).toBe('hello web title');
   });
+
+  it('reaches an unsubscribed WebSocket with an internally created session and its first pending approval', async () => {
+    // End-to-end version of the handoff acceptance: the target session is
+    // created through `ISessionManager` (as the coordinator does), and a
+    // connection that never subscribed to it must still learn it exists and see
+    // its work state go busy/pending — while the session-grained interaction
+    // frame stays subscription-only.
+    const targetDir = join(home as string, 'handoff-target');
+    await mkdir(targetDir, { recursive: true });
+
+    const wsUrl = `ws://127.0.0.1:${(server as RunningServer).port}/api/v1/ws`;
+    const token = (server as RunningServer).authTokenService.getToken();
+    const frames: Array<Record<string, unknown>> = [];
+    const ws = new WebSocket(wsUrl, [`kimi-code.bearer.${token}`]);
+    ws.on('message', (data) => {
+      const text = Array.isArray(data)
+        ? Buffer.concat(data).toString('utf8')
+        : Buffer.isBuffer(data)
+          ? data.toString('utf8')
+          : Buffer.from(new Uint8Array(data)).toString('utf8');
+      try {
+        frames.push(JSON.parse(text) as Record<string, unknown>);
+      } catch {
+        // ignore non-JSON control frames
+      }
+    });
+    const waitForFrame = async (
+      predicate: (frame: Record<string, unknown>) => boolean,
+    ): Promise<Record<string, unknown>> => {
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline) {
+        const found = frames.find(predicate);
+        if (found !== undefined) return found;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error('timed out waiting for a WS frame');
+    };
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', () => {
+          resolve();
+        });
+        ws.once('error', reject);
+      });
+
+      const handle = await (server as RunningServer).core.accessor
+        .get(ISessionManager)
+        .create({ workDir: targetDir });
+      const targetId = handle.accessor.get(ISessionContext).sessionId;
+
+      const created = await waitForFrame((frame) => frame['type'] === 'event.session.created');
+      expect(created['session_id']).toBe(targetId);
+      expect(
+        frames.filter(
+          (frame) =>
+            frame['type'] === 'event.session.created' && frame['session_id'] === targetId,
+        ),
+      ).toHaveLength(1);
+
+      handle.accessor.get(ISessionApprovalService).enqueue({
+        toolCallId: 'tc-handoff',
+        toolName: 'Bash',
+        action: 'run',
+        display: { kind: 'command', command: 'echo hi' },
+      });
+
+      const work = await waitForFrame(
+        (frame) =>
+          frame['type'] === 'event.session.work_changed' && frame['session_id'] === targetId,
+      );
+      expect(work['payload']).toMatchObject({ pending_interaction: 'approval' });
+      // The session-grained request frame is NOT fanned out to a connection
+      // that never subscribed; the target's REST routes remain the way to read
+      // and answer it.
+      expect(frames.some((frame) => frame['type'] === 'event.approval.requested')).toBe(false);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it('publishes event.session.created exactly once per created session and never for a resume', async () => {
+    // One producer for the creation fact: the handoff bridge listens on
+    // `ISessionManager.onDidCreateSession`, so the REST create, fork, and child
+    // routes all arrive through the same path (they publish nothing
+    // themselves), and a cold resume must not masquerade as a creation.
+    const created: { sessionId: string; payloadSessionId: string }[] = [];
+    const subscription = (server as RunningServer).core.accessor
+      .get(IEventService)
+      .subscribe((event) => {
+        if (event.type === 'event.session.created') {
+          const payload = event.payload as {
+            sessionId: string;
+            session: { id: string };
+          };
+          created.push({ sessionId: payload.sessionId, payloadSessionId: payload.session.id });
+        }
+      });
+
+    let sourceId: string;
+    let titledId: string;
+    try {
+      const source = await postJson<SessionWire>('/api/v1/sessions', {
+        metadata: { cwd: home as string },
+      });
+      expect(source.body.code).toBe(0);
+      sourceId = source.body.data.id;
+
+      const titled = await postJson<SessionWire>('/api/v1/sessions', {
+        title: 'handoff target',
+        metadata: { cwd: home as string },
+      });
+      titledId = titled.body.data.id;
+      expect(titled.body.data.title).toBe('handoff target');
+
+      const fork = await postJson<SessionWire>(`/api/v1/sessions/${sourceId}:fork`, {});
+      const child = await postJson<SessionWire>(`/api/v1/sessions/${sourceId}/children`, {});
+
+      const ids = created.map((entry) => entry.sessionId);
+      expect(ids).toEqual([sourceId, titledId, fork.body.data.id, child.body.data.id]);
+      // A fork/child is announced for its TARGET: the wrapper id and the
+      // projected session id agree, and the source session is announced exactly
+      // once (its own creation) instead of twice under the fork's name.
+      expect(created.map((entry) => entry.payloadSessionId)).toEqual(ids);
+      expect(fork.body.data.id).not.toBe(sourceId);
+      expect(child.body.data.id).not.toBe(sourceId);
+      expect(ids.filter((id) => id === sourceId)).toHaveLength(1);
+      expect(ids.filter((id) => id === titledId)).toHaveLength(1);
+    } finally {
+      subscription.dispose();
+    }
+
+    // A cold session coming back is a resume, not a creation.
+    await restartWithConfig('');
+    const resumed: string[] = [];
+    const resumedSubscription = (server as RunningServer).core.accessor
+      .get(IEventService)
+      .subscribe((event) => {
+        if (event.type === 'event.session.created') {
+          resumed.push((event.payload as { sessionId: string }).sessionId);
+        }
+      });
+    try {
+      const warnings = await getJson<{ warnings: unknown[] }>(
+        `/api/v1/sessions/${sourceId}/warnings`,
+      );
+      expect(warnings.body.code).toBe(0);
+      expect(getLiveSessionById((server as RunningServer).core.accessor, sourceId)).toBeDefined();
+      expect(resumed).toEqual([]);
+    } finally {
+      resumedSubscription.dispose();
+    }
+  });
 });
 
 async function listExportTempDirs(sessionId: string): Promise<string[]> {
@@ -1782,4 +1957,569 @@ describe('server-v2 /api/v1/sessions (minidb read model)', () => {
     const fetched = await getJson<{ id: string }>(`/api/v1/sessions/${id}`);
     expect(fetched.body.data.id).toBe(id);
   });
+});
+
+// ---------------------------------------------------------------------------
+// sessionHandoff bridge — the single creation-event producer, the server's
+// handoff host, and the restricted-embedding refusal guard.
+// ---------------------------------------------------------------------------
+
+describe('server-v2 sessionHandoff bridge', () => {
+  interface BridgeHarness {
+    readonly bridge: IDisposable;
+    readonly hosts: SessionHandoffHost[];
+    readonly guards: SessionHandoffDenyGuard[];
+    readonly created: unknown[];
+    readonly activated: string[];
+    emitCreated(event: {
+      sessionId: string;
+      source: 'startup' | 'resume' | 'fork';
+    }): Promise<void>;
+  }
+
+  function makeHarness(remoteAccess?: RemoteAccessOptions): BridgeHarness {
+    const hosts: SessionHandoffHost[] = [];
+    const guards: SessionHandoffDenyGuard[] = [];
+    const created: unknown[] = [];
+    const activated: string[] = [];
+    const createHandlers: Array<(event: never) => void> = [];
+    const coordinator = {
+      registerHost(host: SessionHandoffHost) {
+        hosts.push(host);
+        return {
+          dispose: () => {
+            const index = hosts.indexOf(host);
+            if (index >= 0) hosts.splice(index, 1);
+          },
+        };
+      },
+      registerDenyGuard(guard: SessionHandoffDenyGuard) {
+        guards.push(guard);
+        return {
+          dispose: () => {
+            const index = guards.indexOf(guard);
+            if (index >= 0) guards.splice(index, 1);
+          },
+        };
+      },
+    };
+    const handle = {
+      accessor: {
+        get: (token: unknown) => {
+          if (token === ISessionMetadata) {
+            return {
+              read: async () => ({
+                id: 's-created',
+                title: '',
+                createdAt: 1_000,
+                updatedAt: 1_000,
+                archived: false,
+              }),
+            };
+          }
+          if (token === ISessionContext) {
+            return { sessionId: 's-created', workspaceId: 'wd_target', cwd: '/work/target' };
+          }
+          return undefined;
+        },
+      },
+    };
+    const manager = {
+      get: () => undefined,
+      onDidCreateSession: (handler: (event: never) => void) => {
+        createHandlers.push(handler);
+        return {
+          dispose: () => {
+            const index = createHandlers.indexOf(handler);
+            if (index >= 0) createHandlers.splice(index, 1);
+          },
+        };
+      },
+    };
+    const core = {
+      accessor: {
+        get: (token: unknown) => {
+          if (token === ISessionHandoffCoordinator) return coordinator;
+          if (token === ISessionManager) return manager;
+          if (token === IEventService) {
+            return {
+              publish: (event: { type: string }) => {
+                created.push(event);
+              },
+            };
+          }
+          return undefined;
+        },
+      },
+    } as unknown as Scope;
+    const broadcaster = {
+      activate: async (sessionId: string) => {
+        activated.push(sessionId);
+      },
+    } as unknown as SessionEventBroadcaster;
+    const bridge = registerSessionHandoffBridge({ core, broadcaster, remoteAccess });
+    return {
+      bridge,
+      hosts,
+      guards,
+      created,
+      activated,
+      async emitCreated(event) {
+        const pending: Promise<unknown>[] = [];
+        const full = {
+          ...event,
+          handle,
+          waitUntil: (promise: Promise<unknown>) => pending.push(promise),
+        };
+        for (const handler of [...createHandlers]) handler(full as never);
+        await Promise.all(pending);
+      },
+    };
+  }
+
+  it('projects creation from the session manager, skipping resumes and duplicates', async () => {
+    const harness = makeHarness();
+
+    await harness.emitCreated({ sessionId: 's-created', source: 'resume' });
+    expect(harness.created).toEqual([]);
+
+    await harness.emitCreated({ sessionId: 's-created', source: 'startup' });
+    expect(harness.created).toMatchObject([
+      {
+        type: 'event.session.created',
+        payload: {
+          agentId: 'main',
+          sessionId: 's-created',
+          session: { id: 's-created', workspace_id: 'wd_target' },
+        },
+      },
+    ]);
+
+    // A second announcement for the same session is not a second creation.
+    await harness.emitCreated({ sessionId: 's-created', source: 'fork' });
+    expect(harness.created).toHaveLength(1);
+
+    harness.bridge.dispose();
+  });
+
+  it('registers a host that activates the target session before its first prompt', async () => {
+    const harness = makeHarness();
+    expect(harness.hosts).toHaveLength(1);
+    const host = harness.hosts[0]!;
+    expect(host.matches('any-session')).toBe(true);
+
+    await host.prepare({
+      target: { sessionId: 's-target', workspaceId: 'wd_target', workDir: '/work/target' },
+    } as never);
+    expect(harness.activated).toEqual(['s-target']);
+
+    // No restricted embedding → no refusal guard at all.
+    expect(harness.guards).toEqual([]);
+
+    harness.bridge.dispose();
+    expect(harness.hosts).toEqual([]);
+  });
+
+  it('refuses handoff from the sessions a restricted embedding serves, and revokes the guard on close', () => {
+    const single = makeHarness({ sessionId: 'shared' });
+    const guard = single.guards[0]!;
+    expect(guard.denyReason('shared')).toBeTypeOf('string');
+    // A session outside the share belongs to another client, not to this
+    // embedding — the guard abstains instead of switching the core off.
+    expect(guard.denyReason('other')).toBeUndefined();
+    single.bridge.dispose();
+    expect(single.guards).toEqual([]);
+
+    // The all-sessions share narrows reads/writes but still forbids creation,
+    // so every source is refused (a handoff would slip past that boundary).
+    const all = makeHarness({ sessionId: null });
+    expect(all.guards[0]!.denyReason('any-session')).toBeTypeOf('string');
+    all.bridge.dispose();
+    expect(all.guards).toEqual([]);
+
+    // An ordinary server passes no `remoteAccess` and keeps the capability.
+    const ordinary = makeHarness(undefined);
+    expect(ordinary.guards).toEqual([]);
+    ordinary.bridge.dispose();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-project handoff end to end — the real App-scope coordinator resolved
+// from a real server core, a real target workspace/session/profile, and a
+// scripted in-process model (no HTTP, no external LLM).
+// ---------------------------------------------------------------------------
+
+const HANDOFF_FLAG_ENV = 'KIMI_CODE_EXPERIMENTAL_CROSS_PROJECT_SESSIONS';
+const HANDOFF_NOTE = 'handoff-note.txt';
+
+/**
+ * The one ChatProvider the seeded registry returns. Its first request asks for
+ * the approval-gated `Write` tool; every later request answers in plain text,
+ * so the target's first turn reaches a real approval and then completes once
+ * that approval is resolved.
+ */
+class ScriptedChatProvider implements ChatProvider {
+  readonly name = 'scripted';
+  readonly thinkingEffort = null;
+  private requests = 0;
+
+  constructor(
+    readonly modelName: string,
+    private readonly notePath: string,
+    /** Witness for the ordering assertion: the first request only. */
+    private readonly onFirstRequest: () => void = () => {},
+  ) {}
+
+  async generate(): Promise<StreamedMessage> {
+    this.requests += 1;
+    if (this.requests === 1) this.onFirstRequest();
+    const toolCall: StreamedMessagePart = {
+      type: 'function',
+      id: 'call_handoff_note',
+      name: 'Write',
+      arguments: JSON.stringify({ path: this.notePath, content: 'written by the handoff target' }),
+    };
+    const answer: StreamedMessagePart = { type: 'text', text: 'handoff task done' };
+    const parts = this.requests === 1 ? [toolCall] : [answer];
+    const finishReason: FinishReason = this.requests === 1 ? 'tool_calls' : 'completed';
+    const usage: TokenUsage = {
+      inputOther: 1,
+      output: 1,
+      inputCacheRead: 0,
+      inputCacheCreation: 0,
+    };
+    return {
+      id: 'scripted-response',
+      usage,
+      finishReason,
+      rawFinishReason: finishReason,
+      async *[Symbol.asyncIterator]() {
+        for (const part of parts) yield part;
+      },
+    };
+  }
+
+  withThinking(): ChatProvider {
+    return this;
+  }
+}
+
+/** Seed replacing the whole model transport: every configured model resolves to
+ *  the scripted provider, so a turn never touches a network. */
+function scriptedAdapterRegistry(provider: ChatProvider): IProtocolAdapterRegistry {
+  return {
+    _serviceBrand: undefined,
+    supportedProtocols: () => ['openai'],
+    resolveAdapterIdentity: (protocol) => ({ baseId: protocol, traits: [] }),
+    resolveProviderBaseId: (protocol) => protocol,
+    resolveCapability: () => UNKNOWN_CAPABILITY,
+    explainCapability: () => ({ capability: UNKNOWN_CAPABILITY, source: { kind: 'none' } }),
+    createChatProvider: () => provider,
+  };
+}
+
+describe('server-v2 /api/v1 cross-project session handoff (end to end)', () => {
+  let server: RunningServer | undefined;
+  let home: string;
+  let targetDir: string;
+  let base: string;
+  let socket: WebSocket | undefined;
+  /** Witness log for the pre-prompt ordering: `prepare:<session>`, then `model`. */
+  let order: string[];
+
+  // A wire name, a resolvable alias, and a declared tool capability: the scripted
+  // registry answers UNKNOWN for capability detection, so the model must say it
+  // takes tools. `manual` keeps the first `Write` behind a real approval.
+  const HANDOFF_CONFIG = [
+    'default_model = "stub"',
+    'default_permission_mode = "manual"',
+    '',
+    '[providers.stub]',
+    'type = "openai"',
+    'base_url = "http://127.0.0.1:1"',
+    'api_key = "stub"',
+    '',
+    '[models.stub]',
+    'provider = "stub"',
+    'model = "stub"',
+    'max_context_size = 131072',
+    'capabilities = ["tool_use"]',
+    '',
+  ].join('\n');
+
+  beforeEach(async () => {
+    vi.stubEnv(HANDOFF_FLAG_ENV, 'true');
+    order = [];
+    home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-handoff-'));
+    targetDir = join(home, 'target-project');
+    await mkdir(targetDir, { recursive: true });
+    await writeFile(join(home, 'config.toml'), HANDOFF_CONFIG, 'utf8');
+    server = await startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: home,
+      logLevel: 'silent',
+      debugEndpoints: true,
+      seeds: [
+        [
+          IProtocolAdapterRegistry,
+          scriptedAdapterRegistry(
+            new ScriptedChatProvider('stub', join(targetDir, HANDOFF_NOTE), () =>
+              order.push('model'),
+            ),
+          ),
+        ],
+      ] as ScopeSeed,
+    });
+    base = `http://127.0.0.1:${server.port}`;
+  });
+
+  afterEach(async () => {
+    socket?.close();
+    socket = undefined;
+    vi.unstubAllEnvs();
+    if (server !== undefined) {
+      await server.close();
+      server = undefined;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 } as never);
+  });
+
+  async function postJson<T>(
+    path: string,
+    body?: unknown,
+  ): Promise<{ status: number; body: Envelope<T> }> {
+    const hasBody = body !== undefined;
+    const res = await fetch(`${base}${path}`, {
+      method: 'POST',
+      headers: authHeaders(
+        server as RunningServer,
+        hasBody ? { 'content-type': 'application/json' } : {},
+      ),
+      body: hasBody ? JSON.stringify(body) : undefined,
+    } as never);
+    return { status: res.status, body: (await res.json()) as Envelope<T> };
+  }
+
+  async function getJson<T>(path: string): Promise<{ status: number; body: Envelope<T> }> {
+    const res = await fetch(`${base}${path}`, {
+      headers: authHeaders(server as RunningServer),
+    } as never);
+    return { status: res.status, body: (await res.json()) as Envelope<T> };
+  }
+
+  /** An established WS connection that never subscribes to any session. */
+  async function connectUnsubscribed(): Promise<Array<Record<string, unknown>>> {
+    const frames: Array<Record<string, unknown>> = [];
+    const token = (server as RunningServer).authTokenService.getToken();
+    const next = new WebSocket(`ws://127.0.0.1:${(server as RunningServer).port}/api/v1/ws`, [
+      `kimi-code.bearer.${token}`,
+    ]);
+    next.on('message', (data) => {
+      const text = Array.isArray(data)
+        ? Buffer.concat(data).toString('utf8')
+        : Buffer.isBuffer(data)
+          ? data.toString('utf8')
+          : Buffer.from(new Uint8Array(data)).toString('utf8');
+      try {
+        frames.push(JSON.parse(text) as Record<string, unknown>);
+      } catch {
+        // ignore non-JSON control frames
+      }
+    });
+    await new Promise<void>((resolve, reject) => {
+      next.once('open', () => {
+        resolve();
+      });
+      next.once('error', reject);
+    });
+    socket = next;
+    return frames;
+  }
+
+  async function waitForFrame(
+    frames: Array<Record<string, unknown>>,
+    predicate: (frame: Record<string, unknown>) => boolean,
+  ): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const found = frames.find(predicate);
+      if (found !== undefined) return found;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error('timed out waiting for a WS frame');
+  }
+
+  it(
+    'starts a trusted target from a real source session and serves its first-turn approval',
+    async () => {
+      const core = (server as RunningServer).core;
+      const coordinator = core.accessor.get(ISessionHandoffCoordinator);
+
+      // A: a real session with a real main agent, in the home project.
+      const source = await postJson<SessionWire>('/api/v1/sessions', {
+        metadata: { cwd: home },
+      });
+      expect(source.body.code).toBe(0);
+      const sourceId = source.body.data.id;
+      const sourceHandle = getLiveSessionById(core.accessor, sourceId);
+      expect(sourceHandle).toBeDefined();
+      const sourceAgent = await ensureMainAgent(sourceHandle!);
+
+      // The host + guard this server registered are the instance the SOURCE
+      // AGENT's tool resolves — App-scope registration is not a parallel copy.
+      const agentCoordinator = sourceAgent.accessor.get(ISessionHandoffCoordinator);
+      expect(agentCoordinator).toBe(coordinator);
+      expect(agentCoordinator.isAvailable(sourceId)).toBe(true);
+
+      // B: the target directory is already trusted (the tool never self-trusts).
+      const target = await core.accessor
+        .get(IWorkspaceInstanceManager)
+        .getOrCreate({ root: targetDir });
+      await target.program.trust.trust();
+
+      const created: string[] = [];
+      const createdSubscription = core.accessor.get(IEventService).subscribe((event) => {
+        if (event.type === 'event.session.created') {
+          created.push((event.payload as { sessionId: string }).sessionId);
+        }
+      });
+      const frames = await connectUnsubscribed();
+
+      // A second host that matches this source too: the coordinator prepares
+      // EVERY matching host in registration order, so this witness must be
+      // prepared (with the server's own host) before the first prompt is
+      // enqueued — which is what the scripted model's first request markers.
+      const witnessSubscription = coordinator.registerHost({
+        id: 'test-witness-host',
+        matches: () => true,
+        prepare: (context) => {
+          order.push(`prepare:${context.target.sessionId}`);
+        },
+      });
+
+      try {
+        const result = await coordinator.start({
+          sourceSessionId: sourceId,
+          sourceAgentId: MAIN_AGENT_ID,
+          sourceWorkDir: home,
+          workDir: targetDir,
+          prompt: 'Write the handoff note in this project and report back.',
+          title: 'Handoff target',
+          signal: new AbortController().signal,
+        });
+
+        expect(created).toEqual([result.sessionId]);
+        expect(result.workspaceId).toBe(target.id);
+        expect(result.workDir).toBe(targetDir);
+        expect(result.promptId).toBeTypeOf('string');
+        expect(['running', 'pending']).toContain(result.status);
+        expect(result.failure).toBeUndefined();
+
+        // The target is a normal session of its own project: listable there and
+        // readable with the coordinator's title and cwd.
+        const listed = await getJson<PageWire>(
+          `/api/v1/sessions?workspace_id=${result.workspaceId}`,
+        );
+        expect(listed.body.data.items.map((item) => item.id)).toEqual([result.sessionId]);
+        const fetched = await getJson<SessionWire>(`/api/v1/sessions/${result.sessionId}`);
+        expect(fetched.body.data).toMatchObject({
+          id: result.sessionId,
+          title: 'Handoff target',
+          workspace_id: result.workspaceId,
+        });
+        expect(fetched.body.data.metadata.cwd).toBe(targetDir);
+
+        // A connection that never subscribed learns the session exists exactly
+        // once, with the real project on the frame, and then sees its work go
+        // pending on the first approval.
+        const createdFrame = await waitForFrame(
+          frames,
+          (frame) => frame['type'] === 'event.session.created' && frame['session_id'] === result.sessionId,
+        );
+        const createdSession = (
+          createdFrame['payload'] as {
+            session: { id: string; workspace_id: string; metadata: { cwd: string } };
+          }
+        ).session;
+        expect(createdSession).toMatchObject({
+          id: result.sessionId,
+          workspace_id: result.workspaceId,
+        });
+        expect(createdSession.metadata.cwd).toBe(targetDir);
+        // The creation frame precedes the explicit title; its follow-up patch
+        // must reach even clients that have not subscribed to the target.
+        const titleFrame = await waitForFrame(
+          frames,
+          (frame) => frame['type'] === 'session.meta.updated' &&
+            frame['session_id'] === result.sessionId &&
+            (frame['payload'] as { title?: string }).title === 'Handoff target',
+        );
+        expect(titleFrame['payload']).toMatchObject({
+          title: 'Handoff target',
+          patch: { title: 'Handoff target', isCustomTitle: true },
+        });
+        expect(
+          frames.filter(
+            (frame) =>
+              frame['type'] === 'event.session.created' && frame['session_id'] === result.sessionId,
+          ),
+        ).toHaveLength(1);
+
+        const pending = await waitForFrame(
+          frames,
+          (frame) =>
+            frame['type'] === 'event.session.work_changed' &&
+            frame['session_id'] === result.sessionId &&
+            (frame['payload'] as { pending_interaction?: string }).pending_interaction ===
+              'approval',
+        );
+        expect((pending['payload'] as { busy?: boolean }).busy).toBe(true);
+
+        // The pre-prompt ordering, witnessed in-process: every matching host was
+        // prepared for the real target before the model was ever asked.
+        expect(order).toEqual([`prepare:${result.sessionId}`, 'model']);
+
+        // Approving through the same REST surface the Web client uses unblocks
+        // the turn, and the target finishes on its own.
+        const approvals = await getJson<{ items: { approval_id: string; tool_name: string }[] }>(
+          `/api/v1/sessions/${result.sessionId}/approvals?status=pending`,
+        );
+        expect(approvals.body.code).toBe(0);
+        expect(approvals.body.data.items.map((item) => item.tool_name)).toEqual(['Write']);
+        const approvalId = approvals.body.data.items[0]!.approval_id;
+        const resolved = await postJson<{ resolved: true }>(
+          `/api/v1/sessions/${result.sessionId}/approvals/${approvalId}`,
+          { decision: 'approved', scope: 'session' },
+        );
+        expect(resolved.body.code).toBe(0);
+        expect(resolved.body.data.resolved).toBe(true);
+        await waitForFrame(
+          frames,
+          (frame) =>
+            frame['type'] === 'event.session.work_changed' &&
+            frame['session_id'] === result.sessionId &&
+            (frame['payload'] as { busy?: boolean }).busy === false,
+        );
+
+        // A was neither switched away from nor disturbed by any of this.
+        expect(getLiveSessionById(core.accessor, sourceId)).toBeDefined();
+        const sourceAfter = await getJson<SessionWire>(`/api/v1/sessions/${sourceId}`);
+        expect(sourceAfter.body.data).toMatchObject({
+          id: sourceId,
+          busy: false,
+          pending_interaction: 'none',
+          workspace_id: source.body.data.workspace_id,
+        });
+        expect(sourceAfter.body.data.title).toBe(source.body.data.title);
+      } finally {
+        createdSubscription.dispose();
+        witnessSubscription.dispose();
+      }
+    },
+    20_000,
+  );
 });

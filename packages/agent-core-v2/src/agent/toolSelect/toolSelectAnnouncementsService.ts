@@ -8,7 +8,9 @@
  * and the post-compaction inject — so no local boundary state is needed.
  * Reads announcement text from `IAgentToolSelectService`; the folded history
  * itself remains the ledger, so undo/compaction/resume all self-heal by
- * re-folding. Bound at Agent scope.
+ * re-folding. The ordinary catalog also reconciles at intermediate steps
+ * so configuration and availability changes cannot hide tools before their
+ * catalog is announced. Bound at Agent scope.
  */
 
 import { Service } from '#/_base/di/service';
@@ -30,7 +32,7 @@ export class AgentToolSelectAnnouncementsService extends Service implements IAge
     super();
     this._register(
       injector.register(LOADABLE_TOOLS_VARIANT, ({ isNewTurn }) =>
-        isNewTurn ? toolSelect.loadableToolsAnnouncement() : undefined,
+        toolSelect.loadableToolsAnnouncement(isNewTurn),
       ),
     );
   }

@@ -3,16 +3,23 @@
      note. The legacy host Research executor (lines/questions/plans/loop) is
      retired — this board intentionally has no mutation actions. -->
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
-import type { ResearchModeSnapshot } from '../../api/types';
+import type { AppPlugin, AppSkill, ResearchModeSnapshot } from '../../api/types';
+import { availableAitpSkills, aitpPluginStatus } from '../../lib/research';
 import Badge from '../ui/Badge.vue';
 import Card from '../ui/Card.vue';
 import Icon from '../ui/Icon.vue';
 
-defineProps<{
+const props = defineProps<{
   snapshot: ResearchModeSnapshot;
+  skills?: AppSkill[];
+  aitpPlugin?: AppPlugin | null;
+  pluginMetadataStatus?: 'unknown' | 'loading' | 'ready' | 'error';
 }>();
 const { t } = useI18n();
+const coreSkills = computed(() => availableAitpSkills(props.skills ?? []));
+const pluginStatus = computed(() => aitpPluginStatus(props.aitpPlugin, props.pluginMetadataStatus));
 </script>
 
 <template>
@@ -38,6 +45,19 @@ const { t } = useI18n();
     </template>
 
     <div class="research-body">
+      <p class="research-plugin">
+        {{ t('research.pluginVersion') }}:
+        <span class="research-version">{{ aitpPlugin?.version || t('research.versionUnknown') }}</span>
+        <span class="research-plugin-state">{{ t(`research.pluginState.${pluginStatus}`) }}</span>
+      </p>
+      <p class="research-purpose">{{ t('research.availableSkills') }}</p>
+      <ul v-if="coreSkills.length" class="research-skills">
+        <li v-for="skill in coreSkills" :key="skill.name">
+          <code>/skill:{{ skill.name }}</code>
+        </li>
+      </ul>
+      <p v-else class="research-history">{{ t('research.noSessionSkills') }}</p>
+      <p class="research-history">{{ t('research.skillUsage') }}</p>
       <p class="research-purpose">{{ t('research.purpose') }}</p>
       <ul class="research-guidance">
         <li>{{ t('research.guidanceKnowledge') }}</li>
@@ -61,6 +81,7 @@ const { t } = useI18n();
 .research-identity {
   min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
 }
@@ -88,9 +109,30 @@ const { t } = useI18n();
   font-size: var(--text-sm);
 }
 
-.research-purpose {
+.research-purpose,
+.research-plugin {
   margin: 0;
   color: var(--color-text);
+}
+
+.research-plugin,
+.research-skills {
+  overflow-wrap: anywhere;
+}
+
+.research-version,
+.research-skills code {
+  font-family: var(--font-mono);
+}
+
+.research-plugin-state {
+  display: block;
+  color: var(--color-text-muted);
+}
+
+.research-skills {
+  margin: 0;
+  padding-left: var(--space-5);
 }
 
 .research-guidance {

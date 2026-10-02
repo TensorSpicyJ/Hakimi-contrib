@@ -3,9 +3,11 @@
  * harness (mirror of `test/goal/goal-wire.test.ts`): a `TestInstantiationService`
  * + `InMemoryStorageService` + `AppendLogStore` + `WireService` + stub
  * `IAgentBlobService`. Covers the context Ops' NEW-reference + flat-record
- * shape, the live-only `context.spliced` event (silent on replay), and —
- * load-bearing — the blob dehydrate-on-dispatch ↔ rehydrate-on-replay
- * round-trip via `ContextModel.blobs`.
+ * shape, the live-only `context.spliced` event (silent on replay), the
+ * blob dehydrate-on-dispatch ↔ rehydrate-on-replay round-trip via
+ * `ContextModel.blobs` (load-bearing), and the Responses item-identity
+ * metadata surviving both that round-trip and a regenerated compaction
+ * summary.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -18,6 +20,7 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import { AgentContextMemoryService } from '#/agent/contextMemory/contextMemoryService';
 import {
   ContextModel,
+  contextAppendLoopEvent,
   contextAppendMessage,
   contextApplyCompaction,
   contextClear,
@@ -455,6 +458,95 @@ describe('AgentContextMemoryService (wire-backed)', () => {
     const rebuilt = replay.wire.getModel(ContextModel) as readonly ContextMessage[];
     expect(rebuilt).toEqual(live);
     expect(mediaUrl(rebuilt[0]!)).toBe(dataUri);
+  });
+
+  it('persists and replays Responses item identity on folded content parts', async () => {
+    const host = buildHost(KEY);
+    host.wire.dispatch(
+      contextAppendMessage({ message: userMessage('q') }),
+      contextAppendLoopEvent({ event: { type: 'step.begin', uuid: 's1', turnId: '0', step: 1 } }),
+      contextAppendLoopEvent({
+        event: {
+          type: 'content.part',
+          uuid: 'p1',
+          turnId: '0',
+          step: 1,
+          stepUuid: 's1',
+          part: {
+            type: 'think',
+            think: 'why',
+            encrypted: 'enc-1',
+            openaiResponses: { itemId: 'rs_1' },
+          },
+        },
+      }),
+      contextAppendLoopEvent({
+        event: {
+          type: 'content.part',
+          uuid: 'p2',
+          turnId: '0',
+          step: 1,
+          stepUuid: 's1',
+          part: {
+            type: 'text',
+            text: 'answer',
+            openaiResponses: { itemId: 'msg_1', phase: 'final_answer' },
+          },
+        },
+      }),
+      contextAppendLoopEvent({ event: { type: 'step.end', uuid: 's1', turnId: '0', step: 1 } }),
+    );
+    await host.wire.flush();
+
+    const records = await readRecords(host.log);
+    const replay = buildHost(REPLAY_KEY);
+    await restoreTestAgentWire(
+      replay.wire,
+      replay.log,
+      testWireScope(SCOPE, REPLAY_KEY),
+      records,
+    );
+
+    const model = replay.wire.getModel(ContextModel) as readonly ContextMessage[];
+    expect(model[1]!.content).toEqual([
+      { type: 'think', think: 'why', encrypted: 'enc-1', openaiResponses: { itemId: 'rs_1' } },
+      {
+        type: 'text',
+        text: 'answer',
+        openaiResponses: { itemId: 'msg_1', phase: 'final_answer' },
+      },
+    ]);
+    expect(model[1]!.partial).toBeUndefined();
+  });
+
+  it('does not inherit Responses item identity into a regenerated compaction summary', async () => {
+    const host = buildHost(KEY);
+    host.wire.dispatch(
+      contextAppendMessage({ message: userMessage('old user') }),
+      contextAppendMessage({
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'text',
+              text: 'old answer',
+              openaiResponses: { itemId: 'msg_1', phase: 'final_answer' },
+            },
+          ],
+          toolCalls: [],
+        },
+      }),
+      contextApplyCompaction({
+        summary: 'fresh summary',
+        compactedCount: 2,
+        tokensBefore: 100,
+        tokensAfter: 10,
+      }),
+    );
+
+    const model = host.wire.getModel(ContextModel) as readonly ContextMessage[];
+    expect(model[0]).toMatchObject({ origin: { kind: 'compaction_summary' } });
+    expect(model[0]?.content).toEqual([{ type: 'text', text: 'fresh summary' }]);
   });
 
   it('publishes context.spliced on live dispatch and is silent on replay', async () => {

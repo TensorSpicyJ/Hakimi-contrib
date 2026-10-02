@@ -1,5 +1,5 @@
 // apps/kimi-web/src/composables/useSlashMenu.ts
-import { nextTick, ref, type Ref } from 'vue';
+import { computed, nextTick, ref, watch, type Ref } from 'vue';
 import type { AppSkill } from '../api/types';
 import { buildSlashItems, filterCommands, type SlashCommand } from '../lib/slashCommands';
 
@@ -46,11 +46,21 @@ export function useSlashMenu(deps: SlashMenuDeps) {
     clearDraft,
   } = deps;
 
-  const open = ref(false);
+  const visible = ref(false);
+  let dismissed = false;
+  // Composer writes false for Escape/submission. Internal zero-match updates
+  // use `visible` directly so temporary empty results are not a dismissal.
+  const open = computed({
+    get: () => visible.value,
+    set: (value: boolean) => {
+      dismissed = !value;
+      visible.value = value;
+    },
+  });
   const items = ref<SlashCommand[]>([]);
   const active = ref(0);
 
-  function update(): void {
+  function refresh(): void {
     const val = text.value;
     // Only show for a single slash token. Any Unicode whitespace means the user
     // has started entering arguments, so the menu should close.
@@ -61,11 +71,22 @@ export function useSlashMenu(deps: SlashMenuDeps) {
         buildSlashItems(skills(), { researchEnabled: researchEnabled?.() }),
       );
       active.value = 0;
-      open.value = items.value.length > 0;
+      visible.value = items.value.length > 0;
     } else {
-      open.value = false;
+      visible.value = false;
     }
   }
+
+  function update(): void {
+    dismissed = false;
+    refresh();
+  }
+
+  // Sidecar replies can restore matches for a still-valid prefix, including
+  // after a temporary empty list. Only explicit dismissal suppresses reopening.
+  watch([skills, () => researchEnabled?.()], () => {
+    if (!dismissed) refresh();
+  });
 
   function select(item: SlashCommand): void {
     open.value = false;

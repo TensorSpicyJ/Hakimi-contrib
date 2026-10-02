@@ -1,3 +1,10 @@
+/**
+ * `fullCompaction` domain — full-history compaction control and diagnostics.
+ *
+ * Defines the Agent-scope service for starting and cancelling handoffs and
+ * inspecting content-free policy counters for its most recent run.
+ */
+
 import type {
   CompactionResult,
   CompactionSource,
@@ -19,12 +26,29 @@ export interface FullCompactionTask {
   readonly traceId?: string;
 }
 
+export interface CompactionContinuityRun {
+  readonly policy: 'baseline' | 'continuity';
+  readonly outcome: 'running' | 'completed' | 'failed' | 'cancelled';
+  readonly inputMessageCount: number;
+  readonly preparedMessageCount: number;
+  readonly duplicateReminderCount: number;
+  readonly repeatedToolLineCount: number;
+  readonly retryDroppedMessageCount: number;
+  readonly requestCount: number;
+}
+
+export interface CompactionContinuityDiagnostics {
+  readonly enabled: boolean;
+  readonly lastRun: CompactionContinuityRun | null;
+}
+
 export interface IAgentFullCompactionService {
   readonly _serviceBrand: undefined;
 
   readonly compacting: FullCompactionTask | null;
   begin(input: FullCompactionInput): boolean;
   cancel(): void;
+  diagnostics(): CompactionContinuityDiagnostics;
 
   readonly hooks: Hooks<{
     onWillCompact: FullCompactionTask;

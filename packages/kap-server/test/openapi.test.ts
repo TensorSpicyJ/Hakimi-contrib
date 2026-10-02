@@ -67,6 +67,60 @@ describe('server-v2 OpenAPI', () => {
     expect(paths['/api/v1/sessions']).toBeDefined();
     expect(paths['/api/v1/files']).toBeDefined();
     expect(paths['/api/v1/sessions/{session_id}/fs/{*}']).toBeDefined();
+
+    const automaticPreset = operation(doc, '/api/v1/config/subagent-preset/auto', 'post');
+    const body = asRecord(automaticPreset['requestBody']);
+    const content = asRecord(body['content']);
+    const schema = asRecord(asRecord(content['application/json'])['schema']);
+    expect(schema).toMatchObject({
+      type: 'object',
+      properties: { session_id: { type: 'string', minLength: 1 } },
+      additionalProperties: false,
+    });
+    expect(schema['required'] ?? []).not.toContain('session_id');
+  });
+
+  it('documents optional aggregate roles and discriminated resource evidence on automatic selection', async () => {
+    const doc = await fetchOpenApi();
+    const op = operation(doc, '/api/v1/config/subagent-preset/auto', 'post');
+    const response = asRecord(asRecord(op['responses'])['200']);
+    const schema = asRecord(asRecord(asRecord(response['content'])['application/json'])['schema']);
+    const success = asRecord((schema['oneOf'] as unknown[])[0]);
+    const data = asRecord(asRecord(success['properties'])['data']);
+    const status = asRecord(asRecord(data['properties'])['status']);
+    const fields = asRecord(status['properties']);
+    expect(fields['evaluation_scope']).toMatchObject({ type: 'string', enum: ['preset'] });
+    expect(status['required']).not.toContain('evaluation_scope');
+    const candidate = asRecord(asRecord(fields['candidates'])['items']);
+    const candidateFields = asRecord(candidate['properties']);
+    expect(candidate['required']).not.toContain('role_scores');
+    const role = asRecord(asRecord(candidateFields['role_scores'])['items']);
+    const original = asRecord(asRecord(role['properties'])['original']);
+    const resource = asRecord(asRecord(original['properties'])['resource']);
+    const branches = resource['oneOf'] ?? resource['anyOf'];
+    expect(branches).toHaveLength(3);
+    const metered = asRecord((branches as unknown[]).find((branch) => {
+      const kind = asRecord(asRecord(asRecord(branch)['properties'])['kind']);
+      return (kind['enum'] as string[]).includes('metered');
+    }));
+    expect(asRecord(metered['properties'])['balance_cny']).toMatchObject({ type: 'string' });
+    expect(metered['required']).not.toContain('balance_cny');
+    expect(asRecord(metered['properties'])['quota_remaining_percent']).toBeUndefined();
+    expect(asRecord(metered['properties'])['peak_penalty']).toMatchObject({
+      type: 'object', properties: { points: { type: 'number', minimum: 0 }, until: { type: 'integer', minimum: 0 } },
+      required: ['points', 'until'],
+    });
+    expect(metered['required']).not.toContain('peak_penalty');
+    expect(candidateFields['deepseek_role_share']).toMatchObject({ type: 'number', minimum: 0, maximum: 1 });
+    expect(candidate['required']).not.toContain('deepseek_role_share');
+    const contributions = asRecord(candidateFields['contributions']);
+    expect(asRecord(contributions['properties'])['peak_penalty']).toMatchObject({ type: 'number', minimum: 0 });
+    expect(contributions['required']).not.toContain('peak_penalty');
+    const policy = asRecord(fields['policy']);
+    expect(asRecord(policy['properties'])['deepseek_peak_policy']).toMatchObject({ enum: ['block', 'penalize', 'off'] });
+    expect(asRecord(policy['properties'])['deepseek_peak_penalty']).toMatchObject({ type: 'number', minimum: 0 });
+    expect(policy['required']).not.toContain('deepseek_peak_policy');
+    expect(policy['required']).not.toContain('deepseek_peak_penalty');
   });
 
   it('projects the session-action dispatcher into archive only', async () => {

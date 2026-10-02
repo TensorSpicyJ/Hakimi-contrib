@@ -65,6 +65,25 @@ You can manage sessions without leaving the terminal. The following slash comman
 - **`/fork`**: fork the current session (see below).
 - **`/title <text>`** (alias `/rename`): set a session title for easier identification; without arguments, displays the current title.
 
+## Cross-project task handoff
+
+The main agent can create an independent session in another project and submit its first task, without you copying the prompt. This feature is enabled by default in the terminal UI and Web. When a separate session would help, the agent can propose the target project and task, ask for your confirmation, and then create and start it. If you already explicitly requested that handoff, it does not ask twice.
+
+No environment variable is needed to enable it. To disable it, set `KIMI_CODE_EXPERIMENTAL_CROSS_PROJECT_SESSIONS=false` or `[experimental] cross_project_sessions = false`.
+
+The target must be an existing, trusted project directory on the computer running Hakimi, and a default model must be configured. Then make the destination and task explicit:
+
+```
+Create a new session in /path/to/project-b and check its API compatibility.
+Include the constraints and acceptance criteria we discussed, and start the task there.
+```
+
+The agent uses [`StartSession`](../reference/tools.md#cross-project-sessions) to pass a self-contained task description. The call follows normal tool approval rules and is blocked in Plan mode. The target loads its own project instructions and new-session defaults; it does not copy your chat history, current permission overrides, or temporary directory grants. If the project's trust check fails, open and trust it first rather than asking the agent to bypass the check.
+
+In Web, the target appears in its project's session list without switching you away from the current conversation. Open it to follow the task and respond to its approvals or questions. In the terminal UI, `/sessions` provides a separate viewer for sessions started this way in the current process. Viewing or closing that panel does not close either session. Answer any pending approval or question before opening `/sessions`. Target-session approval and question panels identify the project, and a session-scoped approval never authorizes another session.
+
+The tool reports whether the prompt was accepted, started, blocked, failed, cancelled, or already completed; a session ID alone does not mean the task succeeded. If creation succeeds but startup fails, inspect the existing target rather than automatically creating another one. The target runs independently of the source turn, but not independently of the host process: keep the originating TUI or Web server running. Closing the host stops live work; persisted history remains available to resume later. Print mode and hosts without a handoff interaction bridge do not expose this tool.
+
 ## Remote control from another device
 
 Web remote control lets a phone or another computer use Hakimi Web over the internet. Your current computer remains the server: Hakimi opens an authenticated full Web listener on `127.0.0.1`, then `cloudflared` exposes it through a temporary Cloudflare Quick Tunnel. You do not need a VPS, Tailscale, a Cloudflare account, or a public inbound port.
@@ -127,6 +146,12 @@ You can pass a hint to tell the model what to prioritize when compressing:
 ```
 /compact Keep the discussion about database migrations
 ```
+
+The optional `context_continuity` [experimental switch](../configuration/config-files.md#experimental) asks the compression model to carry forward the current goal, user constraints, decisions, verification evidence, and unfinished work. It prepares a quieter copy of the history for compression and protects real user inputs and the latest handoff during overflow retries. Tool calls and results remain paired. If the request cannot be reduced safely, compression fails without replacing the original history.
+
+This is still model-generated compression, not a guarantee of lossless memory. The existing bounded retention of original user messages remains in effect; details omitted from those retained messages depend on the generated summary. Review critical facts after a long session. The switch uses the existing portable compression path and does not enable native OpenAI compaction or interpret opaque provider items as a summary. Turn it off to return to the existing compression policy.
+
+In either policy, a refused or filtered compression response fails without replacing recoverable history. It is not treated as a summary or retried with fewer constraints.
 
 ## Forking a session
 

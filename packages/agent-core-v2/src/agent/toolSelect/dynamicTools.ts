@@ -3,7 +3,7 @@
  * select_tools progressive-disclosure protocol context.
  *
  * Exposes pure helpers for recognizing injected tool-schema messages,
- * folding loadable-tool announcements, rendering announcement text, and
+ * folding loadable-tool announcements and bounded purpose excerpts, rendering announcement text, and
  * stripping dynamic-tool protocol context from an outgoing history view.
  *
  * Two kinds of messages carry the protocol state in the history:
@@ -52,15 +52,33 @@ export function stripDynamicToolContext(
   for (const message of history) {
     if (isLoadableToolsAnnouncement(message)) continue;
     if (isDynamicToolSchemaMessage(message)) {
-      const { tools: _tools, ...rest } = message;
-      void _tools;
-      if (rest.content.length === 0 && rest.toolCalls.length === 0) continue;
-      out.push(rest);
+      const stripped = stripToolSchemasFromMessage(message);
+      if (stripped !== undefined) out.push(stripped);
       continue;
     }
     out.push(message);
   }
   return out;
+}
+
+export function stripToolSchemaContext(
+  history: readonly ContextMessage[],
+): readonly ContextMessage[] {
+  if (!history.some(isDynamicToolSchemaMessage)) return history;
+  return history.flatMap((message) => {
+    if (!isDynamicToolSchemaMessage(message)) return [message];
+    const stripped = stripToolSchemasFromMessage(message);
+    return stripped === undefined ? [] : [stripped];
+  });
+}
+
+export function stripToolSchemasFromMessage(message: ContextMessage): ContextMessage | undefined {
+  const { tools: _tools, ...rest } = message;
+  void _tools;
+  if (rest.role === 'system' && rest.content.length === 0 && rest.toolCalls.length === 0 &&
+      rest.toolCallId === undefined && rest.providerMessageId === undefined &&
+      rest.partial === undefined && rest.name === undefined) return undefined;
+  return rest;
 }
 
 export function collectLoadedDynamicToolNames(
@@ -78,6 +96,45 @@ export function collectLoadedDynamicToolNames(
 
 const TOOLS_ADDED_BLOCK = /<tools_added>\n?([\s\S]*?)\n?<\/tools_added>/g;
 const TOOLS_REMOVED_BLOCK = /<tools_removed>\n?([\s\S]*?)\n?<\/tools_removed>/g;
+const TOOL_PURPOSES_BLOCK = /<tool_purposes>\n?([\s\S]*?)\n?<\/tool_purposes>/g;
+
+export interface ToolPurpose {
+  readonly name: string;
+  readonly purpose: string;
+}
+
+export function summarizeToolPurpose(description: string): string {
+  const paragraph = description.split(/\n\s*\n/).find(
+    (part) => part.trim().length > 0 && !/^\s*#{1,6}\s+[^\n]+$/.test(part),
+  ) ?? description;
+  const compact = paragraph.replace(/\s+/g, ' ').trim();
+  if (compact.length === 0) return 'No description provided; load the definition to inspect its inputs.';
+  return compact.length > 200 ? `${compact.slice(0, 199)}…` : compact;
+}
+
+export function foldAnnouncedToolPurposes(history: readonly ContextMessage[]): Map<string, string> {
+  const purposes = new Map<string, string>();
+  for (const message of history) {
+    if (!isLoadableToolsAnnouncement(message)) continue;
+    const text = message.content.map((part) => part.type === 'text' ? part.text : '').join('');
+    for (const name of matchToolNameBlocks(text, TOOLS_REMOVED_BLOCK)) purposes.delete(name);
+    TOOL_PURPOSES_BLOCK.lastIndex = 0;
+    for (const match of text.matchAll(TOOL_PURPOSES_BLOCK)) {
+      for (const line of (match[1] ?? '').split('\n')) {
+        try {
+          const value: unknown = JSON.parse(line);
+          if (value !== null && typeof value === 'object' && 'name' in value && 'purpose' in value &&
+              typeof value.name === 'string' && typeof value.purpose === 'string') {
+            purposes.set(value.name, value.purpose);
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+  return purposes;
+}
 
 export function foldAnnouncedToolNames(history: readonly ContextMessage[]): Set<string> {
   const announced = new Set<string>();
@@ -112,6 +169,7 @@ function matchToolNameBlocks(text: string, pattern: RegExp): string[] {
 export function renderLoadableToolsAnnouncement(
   added: readonly string[],
   removed: readonly string[],
+  purposes: readonly ToolPurpose[] = [],
 ): string {
   const sections: string[] = [];
   if (added.length > 0) {
@@ -119,6 +177,10 @@ export function renderLoadableToolsAnnouncement(
   }
   if (removed.length > 0) {
     sections.push(`<tools_removed>\n${removed.join('\n')}\n</tools_removed>`);
+  }
+  if (purposes.length > 0) {
+    const entries = purposes.map((entry) => JSON.stringify(entry).replace(/</g, '\\u003c').replace(/>/g, '\\u003e'));
+    sections.push(`<tool_purposes>\n${entries.join('\n')}\n</tool_purposes>`);
   }
   sections.push(
     'Use the select_tools tool with exact names to load full tool definitions before calling them. ' +

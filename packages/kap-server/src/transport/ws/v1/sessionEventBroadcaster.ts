@@ -400,6 +400,20 @@ export class SessionEventBroadcaster {
     if (state.targets.has(target)) state.transcriptSeeded.add(target);
   }
 
+  /**
+   * Activate a session's broadcast state without subscribing a connection: open
+   * its journal, attach the work-view / agent / interaction listeners, and
+   * return once the pending dispatch queue has drained. Idempotent, and a
+   * no-op for a session that is not live in this process. Used by the handoff
+   * host to guarantee the target session's activity and interaction facts are
+   * observable before its first prompt is enqueued, so a turn that raises an
+   * approval or question is never missed by clients that subscribe later.
+   */
+  async activate(sessionId: string): Promise<void> {
+    const state = await this.ensureState(sessionId);
+    if (state !== undefined) await state.queue;
+  }
+
   unsubscribe(sessionId: string, target: BroadcastTarget): void {
     const state = this.sessions.get(sessionId);
     if (state === undefined) return;

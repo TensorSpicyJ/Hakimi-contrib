@@ -4,9 +4,14 @@ import { join } from 'node:path';
 
 import {
   IAutoSubagentPresetService,
+  IAgentProfileService,
   IConfigService,
   IEventService,
+  IProviderUsageService,
+  ISessionManager,
   ISubagentPresetActivationService,
+  ensureMainAgent,
+  resumeSessionById,
   type AutoSubagentPresetStatus,
   type GlobalEvent,
 } from '@moonshot-ai/agent-core-v2';
@@ -14,6 +19,7 @@ import { ErrorCode } from '../src/protocol/error-codes';
 import {
   configResponseSchema,
   subagentPresetActivationResponseSchema,
+  subagentPresetAutoResponseSchema,
   subagentPresetStatusResponseSchema,
   type ConfigResponse,
   type SubagentPresetActivationResponse,
@@ -87,10 +93,46 @@ const AUTO_PRESET_STATUS_FIXTURE = {
   },
 } satisfies AutoSubagentPresetStatus;
 
+const AUTO_PRESET_TOML = `
+default_model = "main"
+[thinking]
+effort = "low"
+[providers.example]
+type = "openai"
+base_url = "https://example.test/v1"
+api_key = "TEST_SECRET_SENTINEL"
+[models.main]
+provider = "example"
+model = "main"
+max_context_size = 10000
+[models.alternate]
+provider = "example"
+model = "alternate"
+max_context_size = 10000
+[experimental]
+auto_subagent_preset = false
+other_flag = true
+[subagent]
+preset = "manual"
+[subagent.auto_preset]
+enabled = false
+manual_lock = true
+candidates = ["automatic"]
+[subagent.presets.manual.coder]
+model = "main"
+[subagent.presets.automatic.coder]
+model = "main"
+`;
+
 describe('server-v2 /api/v1/config', () => {
   let server: RunningServer | undefined;
   let home: string | undefined;
   let base: string;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
 
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-config-'));
@@ -156,6 +198,184 @@ describe('server-v2 /api/v1/config', () => {
     expect(res.status).toBe(200);
     return (await res.json()) as Envelope<unknown>;
   }
+
+  async function selectAutomatically(body: Record<string, unknown> = {}): Promise<Envelope<unknown>> {
+    const response = await authedFetch(server as RunningServer, base, '/api/v1/config/subagent-preset/auto', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return await response.json() as Envelope<unknown>;
+  }
+
+  function stubQuota() {
+    return vi.spyOn((server as RunningServer).core.accessor.get(IProviderUsageService), 'queryUsage')
+      .mockResolvedValue([{ kind: 'ok', provider: 'example', summary: null, limits: [{ used: 10, limit: 100 }], extraUsage: null }]);
+  }
+
+  it('POST auto unlocks and evaluates with global defaults without creating a session', async () => {
+    await boot(AUTO_PRESET_TOML);
+    const quota = stubQuota();
+    const running = server as RunningServer;
+    const evaluate = vi.spyOn(running.core.accessor.get(IAutoSubagentPresetService), 'selectAutomatically');
+    const events: GlobalEvent[] = [];
+    const subscription = running.core.accessor.get(IEventService).onDidPublish((event) => events.push(event));
+    try {
+      const response = await selectAutomatically();
+      expect(response.code).toBe(0);
+      const data = subagentPresetAutoResponseSchema.parse(response.data);
+      expect(data.status).toMatchObject({ evaluation_scope: 'preset', current_preset: 'manual', activated_preset: 'automatic', route: 'agent' });
+      expect(data.status.profile_name).toBeUndefined();
+      expect(data.status.candidates[0]?.role_scores?.some((role) => role.key === 'coder')).toBe(true);
+      expect(data.config.subagent).toMatchObject({ preset: 'automatic', autoPreset: { enabled: true, manualLock: false } });
+      expect(data.config.experimental).toMatchObject({ auto_subagent_preset: true, other_flag: true });
+      expect(data.config.default_model).toBe('main');
+      expect(data.config.thinking).toMatchObject({ effort: 'low' });
+      expect(evaluate).toHaveBeenCalledWith(
+        { route: 'agent', caller: { modelAlias: 'main', thinkingLevel: 'low' } },
+        { sessionId: undefined, manualRevision: 0 },
+      );
+      expect(quota).toHaveBeenCalledTimes(1);
+      expect(events.some((event) => event.type.startsWith('event.subagent.preset_'))).toBe(false);
+      expect(JSON.stringify(response)).not.toContain('TEST_SECRET_SENTINEL');
+      const sessions = await authedFetch(running, base, '/api/v1/sessions');
+      expect((await sessions.json() as Envelope<{ items: unknown[] }>).data.items).toEqual([]);
+    } finally {
+      subscription.dispose();
+    }
+  });
+
+  it('POST auto refreshes an already automatic selection and returns this request status', async () => {
+    await boot(AUTO_PRESET_TOML);
+    const quota = stubQuota();
+    await selectAutomatically();
+    quota.mockResolvedValue([{ kind: 'ok', provider: 'example', summary: null, limits: [{ used: 20, limit: 100 }], extraUsage: null }]);
+    vi.spyOn((server as RunningServer).core.accessor.get(IAutoSubagentPresetService), 'status').mockReturnValue(AUTO_PRESET_STATUS_FIXTURE);
+    const response = await selectAutomatically();
+    expect(response.code).toBe(0);
+    const data = subagentPresetAutoResponseSchema.parse(response.data);
+    expect(data.status).toMatchObject({ reason_code: 'current_optimal', current_preset: 'automatic', selected_preset: 'automatic' });
+    expect(data.status.evaluation_scope).toBe('preset');
+    const coder = data.status.candidates[0]?.role_scores?.find((role) => role.key === 'coder');
+    expect(coder?.original.resource).toMatchObject({ kind: 'subscription', quota_remaining_percent: 80 });
+    expect(quota).toHaveBeenCalledTimes(2);
+    expect(data.config.subagent).toMatchObject({ autoPreset: { manualLock: false } });
+  });
+
+  it('POST auto uses the real session main binding without changing it', async () => {
+    await boot(AUTO_PRESET_TOML);
+    stubQuota();
+    const running = server as RunningServer;
+    const created = await authedFetch(running, base, '/api/v1/sessions', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ metadata: { cwd: home as string }, agent_config: { model: 'alternate', thinking: 'high' } }),
+    });
+    const sessionId = (await created.json() as Envelope<{ id: string }>).data.id;
+    const session = await resumeSessionById(running.core.accessor, sessionId);
+    expect(session).toBeDefined();
+    const main = await ensureMainAgent(session!);
+    const profile = main.accessor.get(IAgentProfileService);
+    await profile.setModel('alternate');
+    profile.setThinking('high');
+    const evaluate = vi.spyOn(running.core.accessor.get(IAutoSubagentPresetService), 'selectAutomatically');
+    const response = await selectAutomatically({ session_id: sessionId });
+    expect(response.code).toBe(0);
+    expect(evaluate).toHaveBeenCalledWith(
+      { route: 'agent', caller: { modelAlias: 'alternate', thinkingLevel: 'high' } },
+      { sessionId, manualRevision: 0 },
+    );
+    expect(profile.getModel()).toBe('alternate');
+    expect(profile.getEffectiveThinkingLevel()).toBe('high');
+    expect((await getConfig()).default_model).toBe('main');
+  });
+
+  it('POST auto preserves a later manual choice while session restoration is pending', async () => {
+    await boot(AUTO_PRESET_TOML);
+    const running = server as RunningServer;
+    const quota = stubQuota();
+    const created = await authedFetch(running, base, '/api/v1/sessions', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ metadata: { cwd: home as string } }),
+    });
+    const sessionId = (await created.json() as Envelope<{ id: string }>).data.id;
+    const manager = running.core.accessor.get(ISessionManager);
+    const resume = manager.resume.bind(manager);
+    let entered!: () => void;
+    const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(manager, 'resume').mockImplementationOnce(async (...args) => {
+      entered();
+      await released;
+      return resume(...args);
+    });
+
+    const automatic = selectAutomatically({ session_id: sessionId });
+    await enteredPromise;
+    expect((await activateSubagentPreset('manual')).code).toBe(0);
+    release();
+    const response = await automatic;
+
+    expect(response.code).toBe(0);
+    const data = subagentPresetAutoResponseSchema.parse(response.data);
+    expect(data.status.reason_code).toBe('manual_override');
+    expect(data.config.subagent).toMatchObject({ preset: 'manual', autoPreset: { enabled: false, manualLock: true } });
+    expect(data.config.experimental).toMatchObject({ auto_subagent_preset: false });
+    expect(quota).not.toHaveBeenCalled();
+  });
+
+  it('POST auto validates an unknown session before modifying config', async () => {
+    await boot(AUTO_PRESET_TOML);
+    const before = await getConfig();
+    const response = await selectAutomatically({ session_id: 'missing-session' });
+    expect(response.code).toBe(ErrorCode.SESSION_NOT_FOUND);
+    expect(await getConfig()).toEqual(before);
+  });
+
+  it('POST auto rejects client-supplied routing context before evaluation', async () => {
+    await boot(AUTO_PRESET_TOML);
+    const before = await getConfig();
+    const response = await selectAutomatically({ caller: { modelAlias: 'alternate' }, profile: 'reviewer' });
+    expect(response.code).toBe(ErrorCode.VALIDATION_FAILED);
+    expect(await getConfig()).toEqual(before);
+  });
+
+  it('POST auto rejects a missing request status instead of substituting stale global status', async () => {
+    await boot();
+    const evaluator = (server as RunningServer).core.accessor.get(IAutoSubagentPresetService);
+    vi.spyOn(evaluator, 'selectAutomatically').mockImplementation(async (request) => ({ request, reason: 'failed' }));
+    vi.spyOn(evaluator, 'status').mockReturnValue(AUTO_PRESET_STATUS_FIXTURE);
+    expect((await selectAutomatically()).code).toBe(ErrorCode.VALIDATION_FAILED);
+  });
+
+  it('POST auto reports unavailable caller when no global default exists', async () => {
+    await boot();
+    const response = await selectAutomatically();
+    expect(response.code).toBe(0);
+    expect(subagentPresetAutoResponseSchema.parse(response.data).status.reason_code).toBe('caller_model_unavailable');
+  });
+
+  it('POST auto respects an environment-disabled flag without unlocking config', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', 'false');
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_AUTO_SUBAGENT_PRESET', 'false');
+    await boot(AUTO_PRESET_TOML);
+    const before = await getConfig();
+    const response = await selectAutomatically();
+    expect(response.code).toBe(0);
+    const data = subagentPresetAutoResponseSchema.parse(response.data);
+    expect(data.status.reason_code).toBe('flag_disabled');
+    expect(data.config).toEqual(before);
+  });
+
+  it('POST auto retains current routing on provider failure and returns honest evidence', async () => {
+    await boot(AUTO_PRESET_TOML);
+    stubQuota().mockRejectedValue(new Error('provider unavailable'));
+    const response = await selectAutomatically();
+    expect(response.code).toBe(0);
+    const data = subagentPresetAutoResponseSchema.parse(response.data);
+    expect(data.status.reason_code).toBe('no_quota_evidence');
+    expect(data.config.subagent).toMatchObject({ preset: 'manual', autoPreset: { manualLock: false } });
+  });
 
   /** Resolve when a matching `event.config.changed` is published on IEventService. */
   function waitForConfigChanged(
@@ -483,6 +703,20 @@ describe('server-v2 /api/v1/config', () => {
       autoPreset: { enabled: true },
       presets: { balanced: { agent: { model: 'provider/base' } } },
     });
+  });
+
+  it.each(['role_weights', 'roleWeights'])('preserves role identifiers through %s config patches', async (key) => {
+    await boot();
+    const weights = { custom_role: 2, tower_worker: 0, 'review-special': 1 };
+    const cfg = await patchConfig({ subagent: { auto_preset: { [key]: weights, deepseek_avoid_peak_hours: false,
+      deepseek_peak_policy: 'penalize', deepseek_peak_penalty: 60 } } });
+    expect(cfg.subagent).toMatchObject({ autoPreset: { roleWeights: weights, deepseekAvoidPeakHours: false,
+      deepseekPeakPolicy: 'penalize', deepseekPeakPenalty: 60 } });
+    expect((await getConfig()).subagent).toMatchObject({ autoPreset: { roleWeights: weights,
+      deepseekPeakPolicy: 'penalize', deepseekPeakPenalty: 60 } });
+    const persisted = await readFile(join(home as string, 'config.toml'), 'utf8');
+    expect(persisted).toContain('custom_role');
+    expect(persisted).not.toContain('customRole');
   });
 
   it('returns the latest automatic-preset status without persisting or leaking extra fields', async () => {

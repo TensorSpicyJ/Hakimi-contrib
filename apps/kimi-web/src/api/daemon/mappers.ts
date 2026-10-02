@@ -8,6 +8,11 @@ import type {
   AppEvent,
   AppGoal,
   AutoSubagentPresetCandidateScore,
+  AutoSubagentPresetResourceEvidence,
+  AutoSubagentPresetResetPriority,
+  AutoSubagentPresetRoleScore,
+  AutoSubagentPresetRouteScore,
+  LocalMeteredUsage,
   AutoSubagentPresetReasonCode,
   AutoSubagentPresetStatus,
   AppGoalWaitLease,
@@ -44,6 +49,7 @@ import type {
   WireApprovalRequest,
   WireApprovalResponse,
   WireAutoSubagentPresetCandidateScore,
+  WireAutoSubagentPresetResetPriority,
   WireAutoSubagentPresetStatus,
   WireTask,
   WireFsEntry,
@@ -600,14 +606,15 @@ const AUTO_PRESET_REASON_CODES = new Set<AutoSubagentPresetReasonCode>([
   'activation_no_effect',
 ]);
 const AUTO_PRESET_ROUTES = new Set(['agent', 'swarm', 'tower_worker', 'tower_reviewer']);
-const AUTO_PRESET_AVAILABILITY = new Set([
-  'healthy',
-  'route_unresolved',
-  'quota_unknown',
-  'quota_below_floor',
-  'circuit_open',
+const AUTO_PRESET_ROUTE_AVAILABILITY = new Set([
+  'healthy', 'route_unresolved', 'quota_unknown', 'quota_below_floor', 'circuit_open',
+  'balance_empty', 'balance_unknown', 'balance_invalid', 'account_unavailable',
+  'time_restricted', 'capability_unavailable', 'provider_unsupported', 'model_disabled',
 ]);
+const AUTO_PRESET_AVAILABILITY = new Set([...AUTO_PRESET_ROUTE_AVAILABILITY, 'partial', 'unavailable']);
+const AUTO_PRESET_BINDING_SOURCES = new Set(['preset', 'agents', 'legacy-secondary', 'caller', 'auto-fallback']);
 const AUTO_PRESET_EVIDENCE_SCOPE = new Set(['profile', 'provider', 'none']);
+const AUTO_PRESET_RESET_WINDOW_UNITS = new Set(['minute', 'hour', 'day', 'week']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -622,7 +629,7 @@ function isNonNegativeNumber(value: unknown): value is number {
 }
 
 function isNonNegativeInteger(value: unknown): value is number {
-  return isNonNegativeNumber(value) && Number.isInteger(value);
+  return isNonNegativeNumber(value) && Number.isSafeInteger(value);
 }
 
 function isRate(value: unknown): value is number {
@@ -649,31 +656,40 @@ function isOptionalNonEmptyString(value: unknown): boolean {
   return value === undefined || (typeof value === 'string' && value.length > 0);
 }
 
-function toAppAutoSubagentPresetCandidate(
-  value: unknown,
-): AutoSubagentPresetCandidateScore | undefined {
-  if (!isRecord(value)) return undefined;
+function isTimestamp(value: unknown): value is number {
+  return isNonNegativeInteger(value) && value <= 8_640_000_000_000_000;
+}
+
+function isOptionalTimestamp(value: unknown): boolean {
+  return value === undefined || isTimestamp(value);
+}
+
+function isDecimal(value: unknown): value is string {
+  return typeof value === 'string' && /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value);
+}
+
+function isIsoTime(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(value)) return false;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return false;
+  const [year, month, day] = value.slice(0, 10).split('-').map(Number);
+  return month! >= 1 && month! <= 12 && day! >= 1 && day! <= new Date(Date.UTC(year!, month!, 0)).getUTCDate();
+}
+
+function toAppPresetScoreDetails(value: Record<string, unknown>): Pick<AutoSubagentPresetCandidateScore, 'contributions' | 'localEvidence'> | undefined {
   const contributions = value['contributions'];
   const evidence = value['local_evidence'];
   if (!isRecord(contributions) || !isRecord(evidence)) return undefined;
   if (
-    typeof value['preset'] !== 'string' ||
-    value['preset'].length === 0 ||
-    !isOptionalNonEmptyString(value['provider']) ||
-    typeof value['availability'] !== 'string' ||
-    !AUTO_PRESET_AVAILABILITY.has(value['availability']) ||
-    typeof value['selectable'] !== 'boolean' ||
-    !isOptionalFiniteNumber(value['score']) ||
-    !isOptionalPercent(value['quota_remaining_percent']) ||
-    !isOptionalNonNegativeNumber(value['quota_reset_at']) ||
-    !isOptionalNonNegativeNumber(value['circuit_breaker_open_until']) ||
     !isOptionalPercent(contributions['quota_remaining']) ||
+    !isOptionalPercent(contributions['resource_score']) ||
     !isNonNegativeNumber(contributions['priority_bonus']) ||
     !isNonNegativeNumber(contributions['reset_bonus']) ||
     !isNonNegativeNumber(contributions['route_fit_bonus']) ||
     !isNonNegativeNumber(contributions['token_penalty']) ||
     !isNonNegativeNumber(contributions['reliability_penalty']) ||
     !isNonNegativeNumber(contributions['latency_penalty']) ||
+    !isOptionalNonNegativeNumber(contributions['peak_penalty']) ||
     typeof evidence['scope'] !== 'string' ||
     !AUTO_PRESET_EVIDENCE_SCOPE.has(evidence['scope']) ||
     !isNonNegativeInteger(evidence['sample_count']) ||
@@ -683,27 +699,19 @@ function toAppAutoSubagentPresetCandidate(
     !isOptionalNonNegativeNumber(evidence['average_first_token_latency_ms']) ||
     !isNonNegativeInteger(evidence['first_token_latency_sample_count']) ||
     !isNonNegativeInteger(evidence['llm_request_count'])
-  ) {
-    return undefined;
-  }
+  ) return undefined;
   const wire = value as unknown as WireAutoSubagentPresetCandidateScore;
   return {
-    preset: wire.preset,
-    provider: wire.provider,
-    availability: wire.availability,
-    selectable: wire.selectable,
-    score: wire.score,
-    quotaRemainingPercent: wire.quota_remaining_percent,
-    quotaResetAt: wire.quota_reset_at,
-    circuitBreakerOpenUntil: wire.circuit_breaker_open_until,
     contributions: {
       quotaRemaining: wire.contributions.quota_remaining,
+      resourceScore: wire.contributions.resource_score,
       priorityBonus: wire.contributions.priority_bonus,
       resetBonus: wire.contributions.reset_bonus,
       routeFitBonus: wire.contributions.route_fit_bonus,
       tokenPenalty: wire.contributions.token_penalty,
       reliabilityPenalty: wire.contributions.reliability_penalty,
       latencyPenalty: wire.contributions.latency_penalty,
+      peakPenalty: wire.contributions.peak_penalty,
     },
     localEvidence: {
       scope: wire.local_evidence.scope,
@@ -712,9 +720,185 @@ function toAppAutoSubagentPresetCandidate(
       adjustedFailureRate: wire.local_evidence.adjusted_failure_rate,
       tokenCount: wire.local_evidence.token_count,
       averageFirstTokenLatencyMs: wire.local_evidence.average_first_token_latency_ms,
-      firstTokenLatencySampleCount:
-        wire.local_evidence.first_token_latency_sample_count,
+      firstTokenLatencySampleCount: wire.local_evidence.first_token_latency_sample_count,
       llmRequestCount: wire.local_evidence.llm_request_count,
+    },
+  };
+}
+
+function toAppPresetMeteredPeriod(value: unknown): ProviderMeteredPeriod | undefined {
+  if (!isRecord(value) || !isIsoTime(value['start_at']) || !isIsoTime(value['end_at']) ||
+    !['request_count', 'measured_request_count', 'pending_request_count', 'missing_usage_request_count',
+      'unpriced_request_count', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'total_tokens']
+      .every((key) => isNonNegativeInteger(value[key])) ||
+    !(value['estimated_cost'] === null || isDecimal(value['estimated_cost'])) ||
+    typeof value['is_partial'] !== 'boolean') return undefined;
+  return toAppProviderMeteredPeriod(value as unknown as WireProviderMeteredPeriod);
+}
+
+function toAppPresetMeteredUsage(value: unknown): LocalMeteredUsage | undefined {
+  if (!isRecord(value) || value['source'] !== 'local' || value['cost_source'] !== 'estimated' ||
+    value['currency'] !== 'CNY' || value['timezone'] !== 'Asia/Shanghai' ||
+    !(value['tracking_started_at'] === null || isIsoTime(value['tracking_started_at'])) ||
+    typeof value['degraded'] !== 'boolean') return undefined;
+  const today = toAppPresetMeteredPeriod(value['today']);
+  const month = toAppPresetMeteredPeriod(value['month']);
+  if (today === undefined || month === undefined) return undefined;
+  return {
+    source: value['source'], costSource: value['cost_source'], currency: value['currency'],
+    timezone: value['timezone'], trackingStartedAt: value['tracking_started_at'],
+    degraded: value['degraded'], today, month,
+  };
+}
+
+/** Strictly validated expiring-quota evidence. Present-but-invalid data must
+ *  reject the whole snapshot instead of silently degrading to legacy fields. */
+function toAppPresetResetPriority(value: unknown): AutoSubagentPresetResetPriority | undefined {
+  if (!isRecord(value) || !isRecord(value['window'])) return undefined;
+  const window = value['window'];
+  if (!isFiniteNumber(window['duration']) || window['duration'] <= 0 ||
+    typeof window['unit'] !== 'string' || !AUTO_PRESET_RESET_WINDOW_UNITS.has(window['unit']) ||
+    !isTimestamp(value['reset_at']) || !isPercent(value['remaining_percent']) ||
+    !isNonNegativeNumber(value['horizon_ms']) || !isNonNegativeNumber(value['bonus']) ||
+    typeof value['floor_relaxed'] !== 'boolean') return undefined;
+  const wire = value as unknown as WireAutoSubagentPresetResetPriority;
+  return {
+    window: { duration: wire.window.duration, unit: wire.window.unit },
+    resetAt: wire.reset_at,
+    remainingPercent: wire.remaining_percent,
+    horizonMs: wire.horizon_ms,
+    bonus: wire.bonus,
+    floorRelaxed: wire.floor_relaxed,
+  };
+}
+
+function toAppPresetResource(value: unknown): AutoSubagentPresetResourceEvidence | undefined {
+  if (!isRecord(value) || !isOptionalTimestamp(value['blocked_until'])) return undefined;
+  const blockedUntil = value['blocked_until'] as number | undefined;
+  switch (value['kind']) {
+    case 'subscription': {
+      if (!isOptionalPercent(value['resource_score']) || !isOptionalPercent(value['quota_remaining_percent']) ||
+        !isOptionalTimestamp(value['quota_reset_at'])) return undefined;
+      const resetPriority = value['reset_priority'] === undefined
+        ? undefined : toAppPresetResetPriority(value['reset_priority']);
+      if (value['reset_priority'] !== undefined && resetPriority === undefined) return undefined;
+      return {
+        kind: 'subscription', blockedUntil,
+        resourceScore: value['resource_score'] as number | undefined,
+        quotaRemainingPercent: value['quota_remaining_percent'] as number | undefined,
+        quotaResetAt: value['quota_reset_at'] as number | undefined,
+        resetPriority,
+      };
+    }
+    case 'metered': {
+      if (value['currency'] !== 'CNY' ||
+        !(value['balance_cny'] === undefined || isDecimal(value['balance_cny'])) ||
+        !(value['is_available'] === undefined || typeof value['is_available'] === 'boolean') ||
+        !['known', 'query_failed', 'invalid', 'missing'].includes(value['balance_status'] as string) ||
+        !(value['resource_score'] === undefined || value['resource_score'] === 0 || value['resource_score'] === 100) ||
+        value['resource_score_basis'] !== 'funded_account') return undefined;
+      const meteredUsage = value['metered_usage'] === undefined ? undefined : toAppPresetMeteredUsage(value['metered_usage']);
+      if (value['metered_usage'] !== undefined && meteredUsage === undefined) return undefined;
+      const peak = value['peak_penalty'];
+      if (peak !== undefined && (!isRecord(peak) || !isNonNegativeNumber(peak['points']) ||
+        !isTimestamp(peak['until']))) return undefined;
+      const peakPenalty = peak === undefined ? undefined : {
+        points: (peak as Record<string, unknown>)['points'] as number,
+        until: (peak as Record<string, unknown>)['until'] as number,
+      };
+      return {
+        kind: 'metered', currency: 'CNY', blockedUntil, peakPenalty,
+        balanceCny: value['balance_cny'] as string | undefined,
+        isAvailable: value['is_available'] as boolean | undefined,
+        balanceStatus: value['balance_status'] as 'known' | 'query_failed' | 'invalid' | 'missing',
+        resourceScore: value['resource_score'] as 0 | 100 | undefined,
+        resourceScoreBasis: 'funded_account', meteredUsage,
+      };
+    }
+    case 'unknown':
+      if (!['missing', 'query_failed', 'unsupported'].includes(value['reason'] as string)) return undefined;
+      return { kind: 'unknown', reason: value['reason'] as 'missing' | 'query_failed' | 'unsupported', blockedUntil };
+    default: return undefined;
+  }
+}
+
+function toAppPresetRoute(value: unknown): AutoSubagentPresetRouteScore | undefined {
+  if (!isRecord(value) || !['model', 'thinking', 'provider'].every((key) => isOptionalNonEmptyString(value[key])) ||
+    !['source', 'model_source', 'thinking_source'].every((key) => value[key] === undefined ||
+      (typeof value[key] === 'string' && AUTO_PRESET_BINDING_SOURCES.has(value[key]))) ||
+    typeof value['availability'] !== 'string' || !AUTO_PRESET_ROUTE_AVAILABILITY.has(value['availability']) ||
+    !isOptionalFiniteNumber(value['score']) || !isOptionalTimestamp(value['circuit_breaker_open_until'])) return undefined;
+  const details = toAppPresetScoreDetails(value);
+  const resource = toAppPresetResource(value['resource']);
+  if (details === undefined || resource === undefined) return undefined;
+  const wire = value as unknown as NonNullable<WireAutoSubagentPresetCandidateScore['role_scores']>[number]['original'];
+  return {
+    model: wire.model, thinking: wire.thinking, provider: wire.provider,
+    source: wire.source, modelSource: wire.model_source, thinkingSource: wire.thinking_source,
+    availability: wire.availability, score: wire.score,
+    contributions: details.contributions, localEvidence: details.localEvidence, resource,
+    circuitBreakerOpenUntil: wire.circuit_breaker_open_until,
+  };
+}
+
+function toAppPresetRole(value: unknown): AutoSubagentPresetRoleScore | undefined {
+  if (!isRecord(value) || typeof value['key'] !== 'string' || value['key'].length === 0 ||
+    typeof value['route'] !== 'string' || !AUTO_PRESET_ROUTES.has(value['route']) ||
+    !isOptionalNonEmptyString(value['profile_name']) || !isNonNegativeNumber(value['weight']) ||
+    !isNonNegativeNumber(value['effective_score']) || !isNonNegativeNumber(value['fallback_penalty'])) return undefined;
+  const original = toAppPresetRoute(value['original']);
+  const effective = toAppPresetRoute(value['effective']);
+  if (original === undefined || effective === undefined) return undefined;
+  const fallback = value['fallback'];
+  if (fallback !== undefined && (!isRecord(fallback) || !isOptionalNonEmptyString(fallback['source_preset']) ||
+    typeof fallback['source_role'] !== 'string' || fallback['source_role'].length === 0 ||
+    typeof fallback['reason'] !== 'string' || fallback['reason'] === 'healthy' ||
+    !AUTO_PRESET_ROUTE_AVAILABILITY.has(fallback['reason']))) return undefined;
+  const wire = value as unknown as NonNullable<WireAutoSubagentPresetCandidateScore['role_scores']>[number];
+  return {
+    key: wire.key, route: wire.route, profileName: wire.profile_name, weight: wire.weight,
+    original, effective, effectiveScore: wire.effective_score, fallbackPenalty: wire.fallback_penalty,
+    fallback: wire.fallback === undefined ? undefined : {
+      sourcePreset: wire.fallback.source_preset, sourceRole: wire.fallback.source_role, reason: wire.fallback.reason,
+    },
+  };
+}
+
+function toAppAutoSubagentPresetCandidate(value: unknown): AutoSubagentPresetCandidateScore | undefined {
+  if (!isRecord(value) || typeof value['preset'] !== 'string' || value['preset'].length === 0 ||
+    !isOptionalNonEmptyString(value['provider']) || typeof value['availability'] !== 'string' ||
+    !AUTO_PRESET_AVAILABILITY.has(value['availability']) || typeof value['selectable'] !== 'boolean' ||
+    !isOptionalFiniteNumber(value['score']) || !isOptionalPercent(value['quota_remaining_percent']) ||
+    !isOptionalTimestamp(value['quota_reset_at']) || !isOptionalTimestamp(value['circuit_breaker_open_until']) ||
+    !(value['participating'] === undefined || typeof value['participating'] === 'boolean') ||
+    !isOptionalFiniteNumber(value['native_score']) || !isOptionalNonNegativeNumber(value['total_role_weight']) ||
+    !(value['deepseek_role_share'] === undefined || isRate(value['deepseek_role_share'])) ||
+    !['role_count', 'native_available_role_count', 'fallback_role_count', 'unavailable_role_count']
+      .every((key) => value[key] === undefined || isNonNegativeInteger(value[key]))) return undefined;
+  const details = toAppPresetScoreDetails(value);
+  if (details === undefined) return undefined;
+  const coverage = value['coverage'];
+  if (coverage !== undefined && (!isRecord(coverage) ||
+    !['resource_provider_count', 'total_provider_count', 'local_evidence_role_count', 'total_role_count']
+      .every((key) => isNonNegativeInteger(coverage[key])))) return undefined;
+  if (value['role_scores'] !== undefined && !Array.isArray(value['role_scores'])) return undefined;
+  const roleScores = (value['role_scores'] as unknown[] | undefined)?.map(toAppPresetRole);
+  if (roleScores?.some((role) => role === undefined)) return undefined;
+  const wire = value as unknown as WireAutoSubagentPresetCandidateScore;
+  return {
+    preset: wire.preset, provider: wire.provider, availability: wire.availability, selectable: wire.selectable,
+    score: wire.score, quotaRemainingPercent: wire.quota_remaining_percent, quotaResetAt: wire.quota_reset_at,
+    circuitBreakerOpenUntil: wire.circuit_breaker_open_until,
+    contributions: details.contributions, localEvidence: details.localEvidence,
+    participating: wire.participating, nativeScore: wire.native_score,
+    roleScores: roleScores as AutoSubagentPresetRoleScore[] | undefined,
+    roleCount: wire.role_count, nativeAvailableRoleCount: wire.native_available_role_count,
+    fallbackRoleCount: wire.fallback_role_count, unavailableRoleCount: wire.unavailable_role_count,
+    totalRoleWeight: wire.total_role_weight,
+    deepseekRoleShare: wire.deepseek_role_share,
+    coverage: wire.coverage === undefined ? undefined : {
+      resourceProviderCount: wire.coverage.resource_provider_count, totalProviderCount: wire.coverage.total_provider_count,
+      localEvidenceRoleCount: wire.coverage.local_evidence_role_count, totalRoleCount: wire.coverage.total_role_count,
     },
   };
 }
@@ -728,7 +912,19 @@ export function toAppAutoSubagentPresetStatus(
   const candidates = value['candidates'];
   if (!isRecord(policy) || !Array.isArray(candidates)) return undefined;
   if (
-    !isNonNegativeNumber(value['evaluated_at']) ||
+    !(value['evaluation_scope'] === undefined || value['evaluation_scope'] === 'preset') ||
+    !(policy['role_weights'] === undefined || (isRecord(policy['role_weights']) &&
+      Object.values(policy['role_weights']).every(isNonNegativeNumber))) ||
+    !(policy['deepseek_avoid_peak_hours'] === undefined || typeof policy['deepseek_avoid_peak_hours'] === 'boolean') ||
+    !(policy['deepseek_peak_policy'] === undefined || ['block', 'penalize', 'off'].includes(policy['deepseek_peak_policy'] as string)) ||
+    !isOptionalNonNegativeNumber(policy['deepseek_peak_penalty']) ||
+    !isOptionalNonNegativeNumber(policy['fallback_penalty']) ||
+    !isOptionalPercent(policy['metered_funded_resource_score']) ||
+    !isOptionalNonNegativeNumber(policy['reset_priority_window_ms']) ||
+    !isOptionalNonNegativeNumber(policy['reset_priority_exponent']) ||
+    !isOptionalNonNegativeNumber(policy['reset_priority_max_bonus']) ||
+    !isOptionalTimestamp(value['switch_cooldown_until']) ||
+    !isTimestamp(value['evaluated_at']) ||
     typeof value['route'] !== 'string' ||
     !AUTO_PRESET_ROUTES.has(value['route']) ||
     !isOptionalNonEmptyString(value['profile_name']) ||
@@ -739,7 +935,6 @@ export function toAppAutoSubagentPresetStatus(
     !isOptionalNonEmptyString(value['activated_preset']) ||
     !isOptionalFiniteNumber(value['current_score']) ||
     !isOptionalFiniteNumber(value['selected_score']) ||
-    !isOptionalNonNegativeNumber(value['switch_cooldown_until']) ||
     !isPercent(policy['quota_floor_percent']) ||
     !isPercent(policy['switch_margin_percent']) ||
     !isNonNegativeNumber(policy['local_usage_window_ms']) ||
@@ -757,6 +952,7 @@ export function toAppAutoSubagentPresetStatus(
   if (mappedCandidates.some((candidate) => candidate === undefined)) return undefined;
   const wire = value as unknown as WireAutoSubagentPresetStatus;
   return {
+    evaluationScope: wire.evaluation_scope,
     evaluatedAt: wire.evaluated_at,
     route: wire.route,
     profileName: wire.profile_name,
@@ -769,6 +965,15 @@ export function toAppAutoSubagentPresetStatus(
     switchCooldownUntil: wire.switch_cooldown_until,
     candidates: mappedCandidates as AutoSubagentPresetCandidateScore[],
     policy: {
+      roleWeights: wire.policy.role_weights === undefined ? undefined : { ...wire.policy.role_weights },
+      deepseekAvoidPeakHours: wire.policy.deepseek_avoid_peak_hours,
+      deepseekPeakPolicy: wire.policy.deepseek_peak_policy,
+      deepseekPeakPenalty: wire.policy.deepseek_peak_penalty,
+      fallbackPenalty: wire.policy.fallback_penalty,
+      meteredFundedResourceScore: wire.policy.metered_funded_resource_score,
+      resetPriorityWindowMs: wire.policy.reset_priority_window_ms,
+      resetPriorityExponent: wire.policy.reset_priority_exponent,
+      resetPriorityMaxBonus: wire.policy.reset_priority_max_bonus,
       quotaFloorPercent: wire.policy.quota_floor_percent,
       switchMarginPercent: wire.policy.switch_margin_percent,
       localUsageWindowMs: wire.policy.local_usage_window_ms,

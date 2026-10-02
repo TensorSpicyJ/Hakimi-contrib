@@ -14,6 +14,13 @@
  * lifecycle events through `event`. The mutable load-tracking state
  * (`pendingLoaded`) is registered into `agentState` (`IAgentStateService`)
  * and read/written through it. Bound at Agent scope.
+ * The optional tool catalog keeps common workspace tools eager and loads
+ * other schemas into the ordinary top-level tool table on all protocols.
+ * Native progressive disclosure retains its immutable table and history
+ * declarations when the catalog is off. Both modes use the same durable
+ * loaded-tool ledger and active permission policy.
+ * Catalog purposes are bounded excerpts from live tool descriptions, diffed
+ * against the same history ledger; inspection records only mode and counts.
  */
 
 import { Service } from '#/_base/di/service';
@@ -35,21 +42,36 @@ import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import {
   collectLoadedDynamicToolNames,
   foldAnnouncedToolNames,
+  foldAnnouncedToolPurposes,
   renderLoadableToolsAnnouncement,
+  summarizeToolPurpose,
   stripDynamicToolContext,
+  stripToolSchemaContext,
+  stripToolSchemasFromMessage,
 } from './dynamicTools';
-import { TOOL_SELECT_FLAG_ID } from './flag';
+import { TOOL_CATALOG_FLAG_ID, TOOL_SELECT_FLAG_ID } from './flag';
 import {
   IAgentToolSelectService,
   SELECT_TOOLS_TOOL_NAME,
   type LoadToolsResult,
   type ShapedToolEntry,
+  type ToolSelectionDiagnostics,
 } from './toolSelect';
 
 export const toolSelectPendingLoadedKey = defineState<Set<string>>(
   'toolSelect.pendingLoaded',
   () => new Set(),
 );
+
+export const toolSelectDiagnosticsKey = defineState<ToolSelectionDiagnostics | undefined>(
+  'toolSelect.diagnostics',
+  () => undefined,
+);
+
+const CATALOG_EAGER_TOOLS = new Set([
+  SELECT_TOOLS_TOOL_NAME, 'Read', 'Write', 'Edit', 'apply_patch', 'Grep', 'Glob',
+  'Bash', 'AskUserQuestion', 'Skill',
+]);
 
 export class AgentToolSelectService extends Service implements IAgentToolSelectService {
   declare readonly _serviceBrand: undefined;
@@ -66,6 +88,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   ) {
     super();
     this.states.register(toolSelectPendingLoadedKey);
+    this.states.register(toolSelectDiagnosticsKey);
     this._register(
       toolExecutor.registerUnavailableToolDescriber((name) => this.describeUnavailableTool(name)),
     );
@@ -99,17 +122,28 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
 
   enabled(): boolean {
     const capabilities = this.profile.getModelCapabilities();
+    if (this.catalogEnabled()) return true;
     return (
       capabilities.dynamically_loaded_tools === true &&
       capabilities.tool_use &&
-      this.flags.enabled(TOOL_SELECT_FLAG_ID)
+      this.flags.enabled(TOOL_SELECT_FLAG_ID) &&
+      this.toolPolicy.isToolActiveForDisclosure(SELECT_TOOLS_TOOL_NAME, 'builtin')
     );
+  }
+
+  private catalogEnabled(): boolean {
+    return this.flags.enabled(TOOL_CATALOG_FLAG_ID) &&
+      this.profile.getModelCapabilities().tool_use &&
+      this.toolPolicy.isToolActiveForDisclosure(SELECT_TOOLS_TOOL_NAME, 'builtin');
   }
 
   shapeTools(entries: readonly ToolInfo[]): readonly ShapedToolEntry[] {
     const disclosure = this.enabled();
     const activeEntries = this.activeEntries(entries, disclosure);
-    if (!disclosure) return activeEntries;
+    if (!disclosure) {
+      this.recordDiagnostics(activeEntries, activeEntries);
+      return activeEntries;
+    }
     const loaded = this.loadedToolNames();
     const shaped: ShapedToolEntry[] = [];
     for (const entry of activeEntries) {
@@ -122,12 +156,14 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
         continue;
       }
       if (!loaded.has(entry.name)) continue;
-      shaped.push({ ...entry, deferred: true });
+      shaped.push(this.catalogEnabled() ? entry : { ...entry, deferred: true });
     }
+    this.recordDiagnostics(activeEntries, shaped);
     return shaped;
   }
 
   shapeHistory(messages: readonly ContextMessage[]): readonly ContextMessage[] {
+    if (this.catalogEnabled()) return stripToolSchemaContext(messages);
     if (this.enabled()) return this.shapeActiveHistory(messages);
     return stripDynamicToolContext(messages);
   }
@@ -135,6 +171,11 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   load(names: readonly string[]): LoadToolsResult {
     const loadable = new Set(this.loadableToolNames());
     const loaded = this.activeLoadedToolNames();
+    if (this.catalogEnabled()) {
+      for (const entry of this.activeEntries(this.toolRegistry.list(), true)) {
+        if (!this.isDynamicallyLoadable(entry)) loaded.add(entry.name);
+      }
+    }
     const toLoad: string[] = [];
     const alreadyAvailable: string[] = [];
     const unknown: string[] = [];
@@ -156,8 +197,10 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   drainPendingToolSchemas(): readonly Tool[] | undefined {
     if (!this.enabled() || this.pendingLoaded.size === 0) return undefined;
     const names = [...this.pendingLoaded].toSorted((a, b) => a.localeCompare(b));
+    const loadable = new Set(this.loadableToolNames());
     const tools: Tool[] = [];
     for (const name of names) {
+      if (!loadable.has(name)) continue;
       const tool = this.schemaOf(name);
       if (tool === undefined) continue;
       this.pendingLoaded.delete(name);
@@ -166,17 +209,44 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     return tools.length === 0 ? undefined : tools;
   }
 
-  loadableToolsAnnouncement(): string | undefined {
+  loadableToolsAnnouncement(isNewTurn = true, forceCatalogRefresh = false): string | undefined {
     if (!this.enabled()) return undefined;
-    const loadable = this.loadableToolNames();
+    if (!isNewTurn && !this.catalogEnabled()) return undefined;
+    const entries = this.loadableToolEntries();
+    const loadable = entries.map((entry) => entry.name);
     const loadableSet = new Set(loadable);
     const announced = foldAnnouncedToolNames(this.context.get());
-    const added = loadable.filter((name) => !announced.has(name));
+    const refresh = this.catalogEnabled() && forceCatalogRefresh;
+    const added = loadable.filter((name) => refresh || !announced.has(name));
     const removed = [...announced]
       .filter((name) => !loadableSet.has(name))
       .toSorted((a, b) => a.localeCompare(b));
-    if (added.length === 0 && removed.length === 0) return undefined;
-    return renderLoadableToolsAnnouncement(added, removed);
+    const previousPurposes = foldAnnouncedToolPurposes(this.context.get());
+    const purposes = this.catalogEnabled()
+      ? entries.map(({ name, description }) => ({ name, purpose: summarizeToolPurpose(description) }))
+        .filter(({ name, purpose }) => refresh || previousPurposes.get(name) !== purpose)
+      : [];
+    if (added.length === 0 && removed.length === 0 && purposes.length === 0) {
+      return refresh ? 'No tools are currently loadable under the active profile and tool policy.' : undefined;
+    }
+    return renderLoadableToolsAnnouncement(added, removed, purposes);
+  }
+
+  diagnostics(): ToolSelectionDiagnostics {
+    this.shapeTools(this.toolRegistry.list());
+    return this.states.get(toolSelectDiagnosticsKey)!;
+  }
+
+  private recordDiagnostics(active: readonly ToolInfo[], visible: readonly ToolInfo[]): void {
+    const mode = this.catalogEnabled() ? 'catalog' : this.enabled() ? 'native' : 'off';
+    this.states.set(toolSelectDiagnosticsKey, {
+      mode,
+      activeToolCount: active.length,
+      visibleToolCount: visible.length,
+      loadableToolCount: mode === 'off' ? 0 : this.loadableToolNames().length,
+      loadedToolCount: mode === 'off' ? 0 : this.activeLoadedToolNames().size,
+      pendingToolCount: this.pendingLoaded.size,
+    });
   }
 
   private shouldIntercept(name: string): boolean {
@@ -210,6 +280,10 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   }
 
   private loadableToolNames(): string[] {
+    return this.loadableToolEntries().map((info) => info.name);
+  }
+
+  private loadableToolEntries(): ToolInfo[] {
     return this.toolRegistry
       .list()
       .filter(
@@ -217,8 +291,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
           this.isDynamicallyLoadable(info) &&
           this.toolPolicy.isToolActive(info.name, info.source),
       )
-      .map((info) => info.name)
-      .toSorted((a, b) => a.localeCompare(b));
+      .toSorted((a, b) => a.name.localeCompare(b.name));
   }
 
   private loadedToolNames(): Set<string> {
@@ -230,7 +303,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   private activeLoadedToolNames(): Set<string> {
     const names = this.loadedToolNames();
     for (const name of names) {
-      if (!this.isLoadedToolActive(name)) names.delete(name);
+      if (this.toolRegistry.resolve(name) === undefined || !this.isLoadedToolActive(name)) names.delete(name);
     }
     return names;
   }
@@ -253,7 +326,8 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   }
 
   private isDynamicallyLoadable(info: ToolInfo): boolean {
-    return info.source === 'mcp' || info.disclosure === 'deferred';
+    return info.source === 'mcp' || info.disclosure === 'deferred' ||
+      (this.catalogEnabled() && info.source === 'builtin' && !CATALOG_EAGER_TOOLS.has(info.name));
   }
 
   private shapeActiveHistory(messages: readonly ContextMessage[]): readonly ContextMessage[] {
@@ -287,10 +361,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
     if (kept === undefined) return message;
     if (kept.length > 0) return { ...message, tools: kept };
 
-    const { tools: _tools, ...rest } = message;
-    void _tools;
-    if (rest.content.length === 0 && rest.toolCalls.length === 0) return undefined;
-    return rest;
+    return stripToolSchemasFromMessage(message);
   }
 
   private schemaOf(name: string): Tool | undefined {
@@ -300,6 +371,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
       name: tool.name,
       description: tool.description,
       parameters: tool.parameters,
+      inputFormat: tool.inputFormat,
     };
   }
 

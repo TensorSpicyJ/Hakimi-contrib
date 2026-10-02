@@ -1201,7 +1201,7 @@ function selectModel(modelId: string): void {
                     <span class="mode-row-name">{{ t('status.researchLabel') }}</span>
                     <span class="mode-row-desc">{{ t('status.researchDesc') }}</span>
                   </span>
-                  <span class="mode-switch"><span class="mode-knob" /></span>
+                  <span class="mode-switch" :class="{ on: researchActive }"><span class="mode-knob" /></span>
                 </button>
               </div>
             </div>

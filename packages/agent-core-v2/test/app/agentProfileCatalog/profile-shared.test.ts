@@ -24,6 +24,7 @@ import {
 } from '#/app/agentProfileCatalog/contribution';
 import {
   renderPromptTemplateResult,
+  renderCompactSystemPromptResult,
   renderSystemPromptResult,
   systemPromptVars,
 } from '#/app/agentProfileCatalog/profile-shared';
@@ -120,6 +121,77 @@ describe('systemPromptVars', () => {
 
     expect(vars['product_name']).toBe('Kimi Desktop');
     expect(vars['reply_style_guide']).toBe('GUI_STYLE');
+  });
+});
+
+describe('renderCompactSystemPromptResult', () => {
+  const context: AgentProfileContext = {
+    cwd: '/work',
+    now: '2026-07-29T04:00:00.000Z',
+    timeZone: 'Asia/Shanghai',
+    agentsMd: 'Do not modify generated fixtures.\nPreserve the calibrated baseline.',
+    skills: 'Project: research-memory — read /work/.agents/skills/memory/SKILL.md',
+    pluginSections: 'Use the project knowledge index.',
+    additionalDirsInfo: '/extra',
+    replyStyleGuide: 'Use short paragraphs.',
+  };
+
+  it('keeps complete project, skill, plugin, and host guidance with a smaller common core', () => {
+    const compact = renderCompactSystemPromptResult('ROLE', context, { skillActive: true });
+    const standard = renderSystemPromptResult('ROLE', context, { skillActive: true });
+    const vars = systemPromptVars(context, { skillActive: true });
+
+    for (const value of [context.agentsMd, context.replyStyleGuide, 'ROLE']) {
+      expect(compact.text).toContain(value);
+    }
+    for (const key of ['skills_section', 'plugin_sections', 'additional_dirs_section']) {
+      expect(compact.text).toContain(vars[key]);
+    }
+    expect(compact.text).toContain('do not repeat it unchanged or route around it');
+    expect(compact.text).toContain('Never claim an unrun check passed');
+    expect(compact.text).toContain('permission rules, and host controls take precedence');
+    expect(compact.text.length).toBeLessThan(standard.text.length);
+    expect(compact.environment).toEqual(standard.environment);
+  });
+
+  it('keeps unchanged inputs byte-stable within a local day', () => {
+    const initial = renderCompactSystemPromptResult('', context, { skillActive: true });
+    const refreshed = renderCompactSystemPromptResult('', {
+      ...context,
+      now: '2026-07-29T08:00:00.000Z',
+    }, { skillActive: true });
+
+    expect(refreshed).toEqual(initial);
+    expect(initial.text).toContain('2026-07-29 (Asia/Shanghai)');
+    expect(initial.text).not.toContain('2026-07-29T04:00:00.000Z');
+  });
+
+  it('honors Skill policy without rewriting other instructions', () => {
+    const result = renderCompactSystemPromptResult('', {
+      ...context,
+      skillActive: false,
+      osKind: 'Windows',
+    }, { skillActive: true });
+
+    expect(result.text).not.toContain('research-memory');
+    expect(result.text).toContain(context.agentsMd);
+    expect(result.text).toContain('IMPORTANT: You are on Windows');
+  });
+
+  it('binds an explicitly contributed compact renderer while keeping the standard one intact', () => {
+    const profile = normalizeAgentProfile({
+      name: 'contributed',
+      systemPrompt() { return `standard:${this.name}`; },
+      renderCompactSystemPrompt(context) {
+        return {
+          text: `compact:${this.name}`,
+          environment: { cwd: context.cwd ?? '', date: { disclosed: false } },
+        };
+      },
+    });
+
+    expect(profile.systemPrompt({})).toBe('standard:contributed');
+    expect(profile.renderCompactSystemPrompt?.({}).text).toBe('compact:contributed');
   });
 });
 

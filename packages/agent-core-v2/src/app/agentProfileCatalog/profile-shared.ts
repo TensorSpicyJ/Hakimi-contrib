@@ -26,6 +26,9 @@
  * (`subagentAllowlistFor`, `subagentTypeNotAllowedMessage`). Structured
  * renderers also carry disclosure metadata so runtime reminders never need to
  * parse the rendered text.
+ * The explicitly selected compact renderer shares all project, skill, and
+ * plugin sections with the standard renderer and discloses a local date
+ * instead of a wall-clock timestamp to keep same-day refreshes stable.
  */
 
 import { renderPrompt } from '#/_base/utils/render-prompt';
@@ -38,6 +41,7 @@ import {
 } from './agentProfileCatalog';
 
 import SYSTEM_PROMPT_TEMPLATE from './system.md?raw';
+import COMPACT_SYSTEM_PROMPT_TEMPLATE from './system-compact.md?raw';
 
 export const TASK_AGENT_ROLE_PREFIX =
   'You are now running as a subagent. All the `user` messages are sent by the main agent. ' +
@@ -157,6 +161,24 @@ export function renderSystemPromptResult(
       role_additional: roleAdditional,
     }),
     environment: environmentForTemplate(SYSTEM_PROMPT_TEMPLATE, context),
+  };
+}
+
+export function renderCompactSystemPromptResult(
+  roleAdditional: string,
+  context: AgentProfileContext,
+  options: { readonly skillActive: boolean },
+): SystemPromptRenderResult {
+  const environment = environmentForTemplate(COMPACT_SYSTEM_PROMPT_TEMPLATE, context);
+  return {
+    text: renderPrompt(COMPACT_SYSTEM_PROMPT_TEMPLATE, {
+      ...systemPromptVars(context, options),
+      now: environment.date.disclosed
+        ? `${environment.date.value.localDate} (${environment.date.value.timeZone})`
+        : '',
+      role_additional: roleAdditional,
+    }),
+    environment,
   };
 }
 

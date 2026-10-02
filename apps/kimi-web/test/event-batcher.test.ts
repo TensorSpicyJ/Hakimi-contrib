@@ -799,7 +799,7 @@ describe('useKimiWebClient (resync integration)', () => {
 
       expect(assistantText()).toBe('snapshot live');
 
-      getMeta.mockResolvedValue({
+      const confirmedMeta = {
         serverVersion: '0.0.0',
         serverId: 'server-1',
         startedAt: '2026-01-01T00:00:00.000Z',
@@ -807,16 +807,23 @@ describe('useKimiWebClient (resync integration)', () => {
         openInApps: [],
         dangerousBypassAuth: false,
         experimentalFlags: { aitp_research_mode: false },
-        backend: 'v2',
-      });
+        backend: 'v2' as const,
+      };
+      let resolveReconnectMeta!: (meta: typeof confirmedMeta) => void;
+      getMeta.mockResolvedValue(confirmedMeta).mockImplementationOnce(() => new Promise((resolve) => {
+        resolveReconnectMeta = resolve;
+      }));
       expect(client.researchEnabled.value).toBe(true);
       getMeta.mockClear();
+      getSessionResearch.mockClear();
       handlers!.onConnectionChange(false);
       handlers!.onConnectionChange(true);
       expect(client.researchEnabled.value).toBe(false);
       await vi.waitFor(() => expect(getMeta).toHaveBeenCalledTimes(1));
-      await vi.waitFor(() => expect(client.researchEnabled.value).toBe(true));
+      expect(client.research.value).toBeNull();
 
+      // Supersede the pending reconnect meta via the actual configChanged
+      // handler. Sidecars must recover before any resync event is delivered.
       handlers!.onEvent(
         {
           type: 'configChanged',
@@ -829,7 +836,15 @@ describe('useKimiWebClient (resync integration)', () => {
         },
         { sessionId: '__global__', seq: 1 },
       );
-      await vi.waitFor(() => expect(client.researchEnabled.value).toBe(true));
+      await vi.waitFor(() => {
+        expect(getMeta).toHaveBeenCalledTimes(2);
+        expect(client.researchEnabled.value).toBe(true);
+        expect(client.research.value).toEqual(recoveredResearch);
+        expect(getSessionResearch).toHaveBeenCalledExactlyOnceWith(sessionId);
+      });
+      resolveReconnectMeta(confirmedMeta);
+      await Promise.resolve();
+      expect(getSessionResearch).toHaveBeenCalledTimes(1);
       getSessionResearch.mockClear();
 
       handlers!.onResync(sessionId, 22, 'epoch-3');
@@ -869,7 +884,8 @@ describe('useKimiWebClient (resync integration)', () => {
       expect(client.research.value).toBeNull();
 
       resolveResearchCommand(recoveredResearch);
-      await expect(command).resolves.toBe(recoveredResearch);
+      // The response belongs to the previous backend and cannot repopulate its sidecars.
+      await expect(command).resolves.toBeNull();
       await expect(queuedRefresh).resolves.toBeNull();
       expect(getSessionResearch).not.toHaveBeenCalled();
 

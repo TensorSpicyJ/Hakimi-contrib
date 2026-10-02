@@ -23,7 +23,7 @@
 // references become '(circular)', and class instances collapse to a '(ClassName)'
 // marker — the wire shape of an entry is the JSON projection of the type here.
 //
-// Index (App: 0 keys · Workspace: 6 keys · Session: 18 keys · Agent: 71 keys)
+// Index (App: 0 keys · Workspace: 6 keys · Session: 18 keys · Agent: 74 keys)
 //   App
 //   Workspace
 //     workspaceDirs.ephemeralDirs          src/workspace/workspaceDirs/workspaceDirsService.ts
@@ -67,6 +67,7 @@
 //     fullCompaction.activeTurnId                     src/agent/fullCompaction/fullCompactionService.ts
 //     fullCompaction.compactionCountInTurn            src/agent/fullCompaction/fullCompactionService.ts
 //     fullCompaction.consecutiveOverflowCompactions   src/agent/fullCompaction/fullCompactionService.ts
+//     fullCompaction.continuityLastRun                src/agent/fullCompaction/fullCompactionService.ts
 //     fullCompaction.lastCompactedTokenCount          src/agent/fullCompaction/fullCompactionService.ts
 //     fullCompaction.observedMaxContextTokensByModel  src/agent/fullCompaction/fullCompactionService.ts
 //     goal.budgetGraceTurns                           src/agent/goal/goalService.ts
@@ -101,6 +102,7 @@
 //     profile.emittedPluginBudgetWarnings             src/agent/profile/profileService.ts
 //     profile.emittedThinkingEffortWarnings           src/agent/profile/profileService.ts
 //     profile.emittedToolPatternWarnings              src/agent/profile/profileService.ts
+//     profile.promptDiagnostics                       src/agent/profile/profileService.ts
 //     prompt.launching                                src/agent/prompt/promptService.ts
 //     runtime.binding                                 src/agent/runtimeBinding/runtimeBindingService.ts
 //     shellCommand.tasks                              src/agent/shellCommand/shellCommandService.ts
@@ -120,6 +122,7 @@
 //     toolDedupe.syntheticCallIds                     src/agent/toolDedupe/toolDedupeService.ts
 //     toolExecutor.dupTypeTurnId                      src/agent/toolExecutor/toolExecutorService.ts
 //     toolExecutor.toolCallDupTypes                   src/agent/toolExecutor/toolExecutorService.ts
+//     toolSelect.diagnostics                          src/agent/toolSelect/toolSelectService.ts
 //     toolSelect.pendingLoaded                        src/agent/toolSelect/toolSelectService.ts
 //     usage.currentTurn                               src/agent/usage/usageService.ts
 //     usage.currentTurnId                             src/agent/usage/usageService.ts
@@ -1084,6 +1087,16 @@ export interface AgentStateSnapshot {
   'fullCompaction.activeTurnId': number | undefined;
   'fullCompaction.compactionCountInTurn': number;
   'fullCompaction.consecutiveOverflowCompactions': number;
+  'fullCompaction.continuityLastRun': /* CompactionContinuityRun — packages/agent-core-v2/src/agent/fullCompaction/fullCompaction.ts */ {
+    readonly policy: 'baseline' | 'continuity';
+    readonly outcome: 'completed' | 'cancelled' | 'failed' | 'running';
+    readonly inputMessageCount: number;
+    readonly preparedMessageCount: number;
+    readonly duplicateReminderCount: number;
+    readonly repeatedToolLineCount: number;
+    readonly retryDroppedMessageCount: number;
+    readonly requestCount: number;
+  } | null;
   'fullCompaction.lastCompactedTokenCount': number | null;
   'fullCompaction.observedMaxContextTokensByModel': Map<string, number>;
   // src/agent/goal/goalService.ts
@@ -1157,10 +1170,20 @@ export interface AgentStateSnapshot {
   'media.resolved': Map<string, /* ContentPart — packages/agent-core-v2/src/kosong/contract/message.ts */ /* TextPart — packages/agent-core-v2/src/kosong/contract/message.ts */ {
     type: 'text';
     text: string;
+    openaiResponses?: /* OpenAIResponsesPartMetadata — packages/agent-core-v2/src/kosong/contract/message.ts */ {
+      itemId?: string;
+      phase?: string;
+      contentType?: 'refusal';
+    };
   } | /* ThinkPart — packages/agent-core-v2/src/kosong/contract/message.ts */ {
     type: 'think';
     think: string;
     encrypted?: string;
+    openaiResponses?: /* OpenAIResponsesPartMetadata — packages/agent-core-v2/src/kosong/contract/message.ts */ {
+      itemId?: string;
+      phase?: string;
+      contentType?: 'refusal';
+    };
   } | /* ImageURLPart — packages/agent-core-v2/src/kosong/contract/message.ts */ {
     type: 'image_url';
     imageUrl: {
@@ -1190,6 +1213,11 @@ export interface AgentStateSnapshot {
   'profile.emittedPluginBudgetWarnings': Set<string>;
   'profile.emittedThinkingEffortWarnings': Set<string>;
   'profile.emittedToolPatternWarnings': Set<string>;
+  'profile.promptDiagnostics': /* ProfilePromptDiagnostics — packages/agent-core-v2/src/agent/profile/profile.ts */ {
+    readonly compactPromptEnabled: boolean;
+    readonly policy: 'standard' | 'compact' | 'restored' | 'override';
+    readonly systemPromptBytes: number;
+  } | undefined;
   // src/agent/prompt/promptService.ts
   'prompt.launching': boolean;
   // src/agent/runtimeBinding/runtimeBindingService.ts
@@ -1263,6 +1291,14 @@ export interface AgentStateSnapshot {
   'toolExecutor.dupTypeTurnId': number | undefined;
   'toolExecutor.toolCallDupTypes': Map<string, /* ToolCallDupType — packages/agent-core-v2/src/agent/toolExecutor/toolExecutor.ts */ 'same_step' | 'cross_step'>;
   // src/agent/toolSelect/toolSelectService.ts
+  'toolSelect.diagnostics': /* ToolSelectionDiagnostics — packages/agent-core-v2/src/agent/toolSelect/toolSelect.ts */ {
+    readonly mode: 'off' | 'native' | 'catalog';
+    readonly activeToolCount: number;
+    readonly visibleToolCount: number;
+    readonly loadableToolCount: number;
+    readonly loadedToolCount: number;
+    readonly pendingToolCount: number;
+  } | undefined;
   'toolSelect.pendingLoaded': Set<string>;
   // src/agent/usage/usageService.ts
   'usage.currentTurn': /* TokenUsage — packages/agent-core-v2/src/kosong/contract/usage.ts */ {

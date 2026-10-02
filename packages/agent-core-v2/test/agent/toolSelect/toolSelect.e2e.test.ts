@@ -21,19 +21,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import { IAgentFullCompactionService } from '#/agent/fullCompaction/fullCompaction';
+import { contextContinuityFlag } from '#/agent/fullCompaction/flag';
 import { IAgentConversationUndoService } from '#/agent/undo/undo';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import type { ExecutableTool, ToolExecution } from '#/tool/toolContract';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
-import { TOOL_SELECT_FLAG_ENV } from '#/agent/toolSelect/flag';
+import { TOOL_CATALOG_FLAG_ENV, TOOL_SELECT_FLAG_ENV } from '#/agent/toolSelect/flag';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentToolSelectAnnouncementsService } from '#/agent/toolSelect/toolSelectAnnouncements';
 import { IAgentToolSelectSchemasService } from '#/agent/toolSelect/toolSelectSchemas';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
+import { ISessionToolPolicy } from '#/session/sessionToolPolicy/sessionToolPolicy';
 import '#/agent/tools/select-tools/selectToolsTool';
 
-import { createTestAgent, type TestAgentContext } from '../../harness';
+import { createTestAgent, InMemoryWireRecordPersistence, type TestAgentContext } from '../../harness';
 
 const MCP_ALPHA = 'mcp__srv__alpha';
 const DASHBOARD_TOOL = 'dashboard_create';
@@ -62,8 +65,8 @@ class StubMcpTool implements ExecutableTool<Record<string, unknown>> {
   };
   calls = 0;
 
-  constructor(readonly name: string) {
-    this.description = `${name} desc`;
+  constructor(readonly name: string, description = `${name} desc`) {
+    this.description = description;
   }
 
   resolveExecution(): ToolExecution {
@@ -103,6 +106,181 @@ function historyText(history: readonly ContextMessage[]): string {
     .map((part) => (part.type === 'text' ? part.text : ''))
     .join('\n');
 }
+
+describe('ordinary tool catalog end-to-end', () => {
+  it('runs a common workspace tool directly while keeping specialized schemas out of the request', async () => {
+    vi.stubEnv(TOOL_CATALOG_FLAG_ENV, '1');
+    const ctx = createTestAgent();
+    const registrations: Array<{ dispose(): void }> = [];
+    try {
+      ctx.get(IAgentToolSelectService);
+      ctx.get(IAgentToolSelectAnnouncementsService);
+      ctx.get(IAgentToolSelectSchemasService);
+      ctx.configure({ modelCapabilities: { ...DISCLOSURE_CAPABILITIES, dynamically_loaded_tools: false } });
+      await ctx.rpc.setPermission({ mode: 'yolo' });
+      const read = new StubMcpTool('Read', 'Read workspace text.');
+      const specialized = new StubMcpTool(MCP_ALPHA, 'Search research articles by topic.');
+      const registry = ctx.get(IAgentToolRegistryService);
+      registrations.push(registry.register(read, { source: 'builtin' }), registry.register(specialized, { source: 'mcp' }));
+      ctx.mockNextResponse({ type: 'function', id: 'read_file', name: 'Read', arguments: '{"query":"example.txt"}' });
+      ctx.mockNextResponse({ type: 'text', text: 'done' });
+
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Read the workspace text.' }] });
+      await ctx.untilTurnEnd();
+
+      expect(ctx.llmCalls).toHaveLength(2);
+      expect(read.calls).toBe(1);
+      expect(specialized.calls).toBe(0);
+      for (const call of ctx.llmCalls) {
+        expect(toolNames(call.tools)).toContain('Read');
+        expect(toolNames(call.tools)).not.toContain(MCP_ALPHA);
+      }
+      expect(historyText(ctx.get(IAgentContextMemoryService).get())).not.toContain('Loaded:');
+    } finally {
+      for (const registration of registrations) registration.dispose();
+      await ctx.dispose();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([false, true])('discovers, loads and rediscovers after full compaction with continuity=%s', async (continuity) => {
+    vi.stubEnv(TOOL_CATALOG_FLAG_ENV, '1');
+    vi.stubEnv(contextContinuityFlag.env, continuity ? '1' : '0');
+    const ctx = createTestAgent();
+    let registration: { dispose(): void } | undefined;
+    try {
+      ctx.get(IAgentToolSelectService);
+      ctx.get(IAgentToolSelectAnnouncementsService);
+      ctx.get(IAgentToolSelectSchemasService);
+      ctx.configure({ modelCapabilities: { ...DISCLOSURE_CAPABILITIES, dynamically_loaded_tools: false } });
+      await ctx.rpc.setPermission({ mode: 'yolo' });
+      const earlyConstraint = 'Do not modify raw measurements; use read-only searches.';
+      ctx.get(IAgentContextMemoryService).append({
+        role: 'user', content: [{ type: 'text', text: earlyConstraint }], toolCalls: [], origin: { kind: 'user' },
+      });
+      const alpha = new StubMcpTool(MCP_ALPHA, 'Search research articles by topic.\n\nFull usage details that belong only in a loaded definition.');
+      registration = ctx.get(IAgentToolRegistryService).register(alpha, { source: 'mcp' });
+      ctx.mockNextResponse(selectToolsCall('catalog_select', [MCP_ALPHA]));
+      ctx.mockNextResponse({ type: 'function', id: 'catalog_call', name: MCP_ALPHA, arguments: '{"query":"example"}' });
+      ctx.mockNextResponse({ type: 'text', text: 'done' });
+
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Find research articles about superconductivity.' }] });
+      await ctx.untilTurnEnd();
+
+      expect(ctx.llmCalls).toHaveLength(3);
+      expect(toolNames(ctx.llmCalls[0]!.tools)).toContain('select_tools');
+      expect(toolNames(ctx.llmCalls[0]!.tools)).not.toContain(MCP_ALPHA);
+      expect(historyText(ctx.llmCalls[0]!.history)).toContain(MCP_ALPHA);
+      expect(historyText(ctx.llmCalls[0]!.history)).toContain('Search research articles by topic.');
+      expect(historyText(ctx.llmCalls[0]!.history)).not.toContain('Full usage details');
+      expect(ctx.llmCalls[1]!.tools.find((tool) => tool.name === MCP_ALPHA)?.parameters).toEqual(alpha.parameters);
+      expect(ctx.llmCalls[1]!.history.some((message) => message.tools !== undefined)).toBe(false);
+      expect(alpha.calls).toBe(1);
+      expect(ctx.get(IAgentContextMemoryService).get().some((message) => message.tools?.some((tool) => tool.name === MCP_ALPHA))).toBe(true);
+
+      const memory = ctx.get(IAgentContextMemoryService);
+      ctx.mockNextResponse({ type: 'text', text: 'Continue finding articles about superconductivity.' });
+      const compaction = ctx.get(IAgentFullCompactionService);
+      expect(compaction.begin({ source: 'manual' })).toBe(true);
+      const pending = compaction.compacting;
+      expect(pending).not.toBeNull();
+      await pending!.promise;
+      expect(compaction.diagnostics()).toMatchObject({ enabled: continuity, lastRun: { outcome: 'completed' } });
+      expect(historyText(memory.get())).toContain(earlyConstraint);
+      expect(memory.get().some((message) => message.tools !== undefined)).toBe(false);
+      expect(ctx.get(IAgentToolSelectService).shapeTools(ctx.get(IAgentToolRegistryService).list()).some((tool) => tool.name === MCP_ALPHA)).toBe(false);
+      const postCompactionCallIndex = ctx.llmCalls.length;
+      ctx.mockNextResponse(selectToolsCall('catalog_select_again', [MCP_ALPHA]));
+      ctx.mockNextResponse({ type: 'function', id: 'catalog_call_again', name: MCP_ALPHA, arguments: '{"query":"example"}' });
+      ctx.mockNextResponse({ type: 'text', text: 'done again' });
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Continue the article search.' }] });
+      await ctx.untilTurnEnd();
+      expect(historyText(ctx.llmCalls[postCompactionCallIndex]!.history)).toContain(earlyConstraint);
+      expect(historyText(ctx.llmCalls[postCompactionCallIndex]!.history)).toContain('Search research articles by topic.');
+      expect(toolNames(ctx.llmCalls[postCompactionCallIndex]!.tools)).not.toContain(MCP_ALPHA);
+      expect(toolNames(ctx.llmCalls[postCompactionCallIndex + 1]!.tools)).toContain(MCP_ALPHA);
+      expect(alpha.calls).toBe(2);
+    } finally {
+      registration?.dispose();
+      await ctx.dispose();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps denied capabilities out of discovery and rejects a direct call under the same policy', async () => {
+    vi.stubEnv(TOOL_CATALOG_FLAG_ENV, '1');
+    const ctx = createTestAgent();
+    let registration: { dispose(): void } | undefined;
+    try {
+      ctx.get(IAgentToolSelectService);
+      ctx.get(IAgentToolSelectAnnouncementsService);
+      ctx.get(IAgentToolSelectSchemasService);
+      ctx.configure({ modelCapabilities: { ...DISCLOSURE_CAPABILITIES, dynamically_loaded_tools: false } });
+      await ctx.rpc.setPermission({ mode: 'yolo' });
+      const alpha = new StubMcpTool(MCP_ALPHA, 'Search research articles by topic.');
+      registration = ctx.get(IAgentToolRegistryService).register(alpha, { source: 'mcp' });
+      await ctx.get(ISessionToolPolicy).setDisabledTools([MCP_ALPHA]);
+      ctx.mockNextResponse({ type: 'function', id: 'denied_call', name: MCP_ALPHA, arguments: '{"query":"example"}' });
+      ctx.mockNextResponse({ type: 'text', text: 'unavailable' });
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Find research articles.' }] });
+      await ctx.untilTurnEnd();
+      expect(toolNames(ctx.llmCalls[0]!.tools)).not.toContain(MCP_ALPHA);
+      expect(historyText(ctx.llmCalls[0]!.history)).not.toContain(MCP_ALPHA);
+      expect(historyText(ctx.llmCalls[0]!.history)).not.toContain('Search research articles by topic.');
+      expect(historyText(ctx.llmCalls[1]!.history)).toContain('disabled by the active tool policy');
+      expect(alpha.calls).toBe(0);
+    } finally {
+      registration?.dispose();
+      await ctx.dispose();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('restores selected tools from persisted conversation records and applies current session restrictions', async () => {
+    vi.stubEnv(TOOL_CATALOG_FLAG_ENV, '1');
+    const persistence = new InMemoryWireRecordPersistence();
+    const ctx = createTestAgent({ persistence });
+    let resumed: TestAgentContext | undefined;
+    const registrations: Array<{ dispose(): void }> = [];
+    try {
+      ctx.get(IAgentToolSelectService);
+      ctx.get(IAgentToolSelectAnnouncementsService);
+      ctx.get(IAgentToolSelectSchemasService);
+      ctx.configure({ modelCapabilities: { ...DISCLOSURE_CAPABILITIES, dynamically_loaded_tools: false } });
+      await ctx.rpc.setPermission({ mode: 'yolo' });
+      registrations.push(ctx.get(IAgentToolRegistryService).register(new StubMcpTool(MCP_ALPHA), { source: 'mcp' }));
+      ctx.mockNextResponse(selectToolsCall('persisted_select', [MCP_ALPHA]));
+      ctx.mockNextResponse({ type: 'text', text: 'loaded' });
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Load the research search tool.' }] });
+      await ctx.untilTurnEnd();
+
+      await ctx.wire.flush();
+      resumed = createTestAgent({ autoConfigure: false, persistence: new InMemoryWireRecordPersistence(persistence.records) });
+      await resumed.restorePersisted();
+      resumed.configure({ modelCapabilities: { ...DISCLOSURE_CAPABILITIES, dynamically_loaded_tools: false } });
+      resumed.get(IAgentToolSelectAnnouncementsService);
+      resumed.get(IAgentToolSelectSchemasService);
+      const alpha = new StubMcpTool(MCP_ALPHA);
+      registrations.push(resumed.get(IAgentToolRegistryService).register(alpha, { source: 'mcp' }));
+      resumed.mockNextResponse({ type: 'function', id: 'resumed_call', name: MCP_ALPHA, arguments: '{"query":"example"}' });
+      resumed.mockNextResponse({ type: 'text', text: 'continued' });
+      await resumed.rpc.prompt({ input: [{ type: 'text', text: 'Continue searching.' }] });
+      await resumed.untilTurnEnd();
+      expect(toolNames(resumed.llmCalls[0]!.tools)).toContain(MCP_ALPHA);
+      expect(alpha.calls).toBe(1);
+      expect(resumed.get(IAgentToolSelectService).load([MCP_ALPHA]).alreadyAvailable).toEqual([MCP_ALPHA]);
+
+      await resumed.get(ISessionToolPolicy).setDisabledTools([MCP_ALPHA]);
+      expect(resumed.get(IAgentToolSelectService).shapeTools(resumed.get(IAgentToolRegistryService).list()).map((entry) => entry.name)).not.toContain(MCP_ALPHA);
+      expect(resumed.get(IAgentToolSelectService).load([MCP_ALPHA]).unknown).toEqual([MCP_ALPHA]);
+    } finally {
+      for (const registration of registrations) registration.dispose();
+      await resumed?.dispose();
+      await ctx.dispose();
+      vi.unstubAllEnvs();
+    }
+  });
+});
 
 describe('progressive tool disclosure end-to-end', () => {
   let ctx: TestAgentContext;

@@ -46,6 +46,7 @@ import {
 } from '../src/transport/ws/v1/sessionEventBroadcaster';
 import type { EventEnvelope } from '../src/transport/ws/v1/sessionEventJournal';
 import { TranscriptService } from '../src/services/transcript/transcriptService';
+import { aggregatePresetStatus } from './helpers/autoSubagentPreset';
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -1125,6 +1126,39 @@ describe('SessionEventBroadcaster', () => {
     )!;
     expect(journaled.envelope.session_id).toBe('s1');
     expect(journaled.seq).toBe(frame.seq);
+  });
+
+  it('journals aggregate role/fallback evidence safely and drops invalid nested facts', async () => {
+    sessions.set('s1', new FakeLifecycle());
+    const view = collectingTarget();
+    await bc.subscribe('s1', view.target);
+    const status = aggregatePresetStatus();
+    const candidate = status.candidates[0]!;
+    const role = candidate.roleScores![0]!;
+    eventBus.emit({ type: 'event.subagent.preset_evaluated', payload: {
+      ...status, sessionId: 's1', candidates: [{ ...candidate, roleScores: [{ ...role,
+        original: { ...role.original, source: 'raw-secret' },
+      }] }],
+    } });
+    eventBus.emit({ type: 'event.subagent.preset_evaluated', payload: {
+      ...status, sessionId: 's1', apiKey: 'SECRET_SENTINEL',
+      candidates: [{ ...candidate, roleScores: [{ ...role,
+        original: { ...role.original, resource: { ...role.original.resource, endpoint: 'SECRET_SENTINEL' } },
+        fallback: { ...role.fallback, rawError: 'SECRET_SENTINEL' },
+      }, candidate.roleScores![1]!] }],
+    } });
+    await vi.waitFor(() => expect(view.envelopes).toHaveLength(1));
+    expect(view.envelopes[0]).toMatchObject({ session_id: 's1', payload: {
+      evaluation_scope: 'preset', candidates: [{ role_scores: [
+        { original: { resource: { kind: 'metered', balance_cny: '12.34567890123456789' } },
+          effective: { source: 'auto-fallback' }, fallback: { source_role: 'tower_worker' } },
+        { key: 'tower_worker' },
+      ] }],
+    } });
+    expect(JSON.stringify(view.envelopes)).not.toContain('SECRET_SENTINEL');
+    const replay = await bc.getBufferedSince('s1', { seq: 0 });
+    expect(replay.events).toHaveLength(1);
+    expect(JSON.stringify(replay)).not.toContain('SECRET_SENTINEL');
   });
 
   it('strictly projects event.subagent.preset_evaluated through the real session journal and global fan-out', async () => {
@@ -2264,6 +2298,62 @@ describe('SessionEventBroadcaster', () => {
       },
     });
     expect((envelopes[3]!.payload as { resolved_at?: string }).resolved_at).toBeTypeOf('string');
+  });
+
+  it('activate() attaches work and interaction listeners with no subscription, so a handoff target is observable before any client subscribes', async () => {
+    // The handoff host activates the target session before its first prompt is
+    // enqueued. No connection has subscribed yet, so the attachment itself must
+    // make the target's activity global-fan-out visible and journal its pending
+    // interaction for the subscriber that arrives later.
+    const lc = new FakeLifecycle();
+    lc.addAgent('main');
+    sessions.set('s1', lc);
+    const globalView = collectingTarget();
+    bc.addGlobalTarget(globalView.target);
+
+    await bc.activate('s1');
+    await bc.activate('s1'); // idempotent
+
+    lc.interactions.enqueue({
+      id: 'a1',
+      kind: 'approval',
+      payload: {
+        toolCallId: 'call_9',
+        toolName: 'Bash',
+        action: 'run',
+        display: { kind: 'command', command: 'ls' },
+      },
+      origin: { turnId: 3 },
+    });
+    await bc.getCursor('s1');
+
+    // No `subscribe('s1', …)` ever ran: the global set is the only target, and
+    // `event.session.work_changed` is the global-class frame that reaches it.
+    expect(globalView.envelopes.map((e) => e.type)).toEqual(['event.session.work_changed']);
+    expect(globalView.envelopes[0]).toMatchObject({
+      session_id: 's1',
+      payload: { busy: false, pending_interaction: 'approval' },
+    });
+    // The approval itself is session-grained (delivered to subscribers only),
+    // so its arrival is read from the durable watermark: two durable frames —
+    // the work change and the approval request — prove the interaction listener
+    // was attached without a subscription.
+    expect((await bc.getCursor('s1')).seq).toBe(2);
+
+    // A connection that subscribes afterwards gets the live path as usual.
+    const late = collectingTarget();
+    await bc.subscribe('s1', late.target);
+    lc.interactions.respond('a1', { decision: 'approved', scope: 'session' });
+    await bc.getCursor('s1');
+    expect(late.envelopes.map((e) => e.type)).toEqual([
+      'event.session.work_changed',
+      'event.approval.resolved',
+    ]);
+    expect(late.envelopes[0]!.payload).toMatchObject({ pending_interaction: 'none' });
+  });
+
+  it('activate() is a no-op for a session that is not live in this process', async () => {
+    await expect(bc.activate('missing')).resolves.toBeUndefined();
   });
 
   it('fans event.session.work_changed out to every connection, bypassing agent filters', async () => {

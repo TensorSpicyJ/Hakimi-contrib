@@ -38,8 +38,14 @@
  * through `ISessionLegacyService` (the status rollup and the current-goal read
  * hold real cross-domain adaptation);
  * the route forwards each adapter result verbatim, mirroring v1's thin handler.
- * `create`, `fork`, and child creation publish `event.session.created` on the
- * core event bus, matching v1.
+ * `create`, `fork`, and child creation no longer publish
+ * `event.session.created` themselves: the server has one producer for that
+ * event (`src/sessionHandoff/sessionHandoffBridge.ts`, driven by
+ * `ISessionManager.onDidCreateSession`), which covers REST, fork/child, and
+ * internal creation alike and never mistakes a resume for a creation. A
+ * `create` that carries a caller title still publishes the same
+ * `session.meta.updated` patch a later rename uses, so the title reaches every
+ * client (the creation event precedes the title).
  *
  * `GET /sessions/{id}/warnings` surfaces session-level notices in the v1
  * `{ code, message, severity }` wire shape: the `agents-md-oversized` warning
@@ -363,10 +369,21 @@ export function registerSessionsRoutes(
           touched.root,
           { busy: false, mainTurnActive: false, pendingInteraction: 'none' },
         );
-        core.accessor.get(IEventService).publish({
-          type: 'event.session.created',
-          payload: { agentId: 'main', sessionId: session.id, session },
-        });
+        // A caller-supplied title lands after the session exists, i.e. after
+        // the server's single `event.session.created` producer (the
+        // `ISessionManager` bridge) already published the bare session — so
+        // the title travels as the same meta patch a later rename uses.
+        if (typeof body.title === 'string' && body.title.trim().length > 0) {
+          core.accessor.get(IEventService).publish({
+            type: 'session.meta.updated',
+            payload: {
+              agentId: 'main',
+              sessionId: session.id,
+              title: session.title,
+              patch: { title: session.title, isCustomTitle: true },
+            },
+          });
+        }
         reply.send(okEnvelope(session, req.id));
       } catch (error) {
         sendMappedError(reply, req, error);
@@ -813,10 +830,6 @@ export function registerSessionsRoutes(
             ctx.cwd,
             resolveSessionFacts(core, meta.id),
           );
-          core.accessor.get(IEventService).publish({
-            type: 'event.session.created',
-            payload: { agentId: 'main', sessionId: session.id, session },
-          });
           requestLog(req)?.info(
             { session_id: parsed.id, action: 'fork', new_session_id: session.id },
             'session action completed',
@@ -1051,10 +1064,6 @@ export function registerSessionsRoutes(
           ctx.cwd,
           resolveSessionFacts(core, meta.id),
         );
-        core.accessor.get(IEventService).publish({
-          type: 'event.session.created',
-          payload: { agentId: 'main', sessionId: session.id, session },
-        });
         reply.send(okEnvelope(session, req.id));
       } catch (error) {
         sendMappedError(reply, req, error);

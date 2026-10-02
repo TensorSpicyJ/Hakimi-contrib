@@ -9,7 +9,8 @@
 import { computed, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { ConversationStatus, PermissionMode } from '../../types';
-import type { AppModel, AppSession, ThinkingLevel } from '../../api/types';
+import type { AppModel, AppSession, ThinkingLevel, AutoSubagentPresetStatus } from '../../api/types';
+import { subagentPresetMenuRows, subagentPresetParticipationLabel, subagentPresetCandidateSummary, subagentPresetTotals, subagentPresetEvaluationScopeLabel } from '../../lib/subagentPreset';
 import type { ColorScheme } from '../../composables/useKimiWebClient';
 import { useKimiWebClient } from '../../composables/useKimiWebClient';
 import {
@@ -24,6 +25,8 @@ import LanguageSwitcher from '../settings/LanguageSwitcher.vue';
 import { formatTokens } from '../../lib/formatTokens';
 import { copyTextToClipboard } from '../../lib/clipboard';
 import Button from '../ui/Button.vue';
+import Badge from '../ui/Badge.vue';
+import Banner from '../ui/Banner.vue';
 import Icon from '../ui/Icon.vue';
 import Input from '../ui/Input.vue';
 import SegmentedControl from '../ui/SegmentedControl.vue';
@@ -57,11 +60,14 @@ const props = withDefaults(
     subagentPreset?: string;
     /** Sorted configured preset names offered by the preset sub-view. */
     subagentPresetNames?: string[];
+    subagentPresetCandidates?: string[];
+    autoSubagentPresetStatus?: AutoSubagentPresetStatus;
     /** True while a preset/config write is in flight. */
     subagentPresetSaving?: boolean;
     /** `autoPreset.manualLock`: a manually activated preset paused automatic
      *  switching (lock note + resume-auto action in the preset sub-view). */
     subagentPresetLocked?: boolean;
+    autoPresetControl?: { automatic: boolean; label: string; disabledReason?: string; feedback: string; pending: boolean };
   }>(),
   {
     colorScheme: 'system',
@@ -223,9 +229,12 @@ function onOpenChanges(): void {
 // ---------------------------------------------------------------------------
 // Subagent preset sub-view — mirrors the desktop ChatHeader routing menu in a
 // small list: Base routing + every configured preset (radio rows), plus the
-// resume-automatic action while a manual choice holds the lock.
+// always-visible automatic selection action, with fresh evaluation feedback.
 // ---------------------------------------------------------------------------
 const normalizedPreset = computed(() => props.subagentPreset?.trim() ?? '');
+const presetRows = computed(() => subagentPresetMenuRows(
+  props.subagentPresetNames, props.autoSubagentPresetStatus, props.subagentPresetCandidates,
+));
 const gitSub = computed<string>(() => {
   const info = props.gitInfo;
   if (!info) return '';
@@ -254,15 +263,15 @@ function openPreset(): void {
 
 function choosePreset(preset: string): void {
   if (props.subagentPresetSaving) return;
+  if (preset !== '' && !props.subagentPresetNames.includes(preset)) return;
   if (preset === normalizedPreset.value && props.subagentPresetLocked) return;
   emit('activatePreset', preset);
   backToMain();
 }
 
 function onResumeAutoPreset(): void {
-  if (props.subagentPresetSaving) return;
+  if (props.subagentPresetSaving || props.autoPresetControl?.disabledReason) return;
   emit('resumeAutoPreset');
-  backToMain();
 }
 
 function onOpenPr(): void {
@@ -642,15 +651,17 @@ watch(
     </template>
 
     <template v-else-if="view === 'preset'">
-      <!-- Subagent preset sub-view: Base routing + configured presets (radio
-           rows), plus resume-automatic while a manual choice holds the lock. -->
+      <!-- Manual preset choices and an always-visible fresh automatic evaluation. -->
       <div class="arch-subhead">
         <button type="button" class="arch-back" @click="backToMain">
           <span class="chev back">‹</span> {{ t('mobile.presetBack') }}
         </button>
-        <span v-if="subagentPresetLocked" class="preset-lock-note">
+        <Badge v-if="subagentPresetLocked" variant="warning" size="sm">
           {{ t('header.subagentPresetLocked') }}
-        </span>
+        </Badge>
+        <Badge v-else-if="autoPresetControl?.automatic" variant="info" size="sm">
+          {{ t('header.subagentPresetAutomatic') }}
+        </Badge>
       </div>
 
       <div class="group-title">{{ t('mobile.subagentPreset') }}</div>
@@ -658,41 +669,50 @@ watch(
       <button
         type="button"
         class="srow preset-row"
-        :class="{ on: normalizedPreset === '' }"
+        :class="{ on: normalizedPreset === '' && !autoPresetControl?.automatic }"
         :disabled="subagentPresetSaving"
         @click="choosePreset('')"
       >
         <span class="srow-main">
           <span class="srow-label">{{ t('header.subagentPresetBaseOption') }}</span>
         </span>
-        <span v-if="normalizedPreset === ''" class="preset-check"><Icon name="check" size="sm" /></span>
+        <span v-if="normalizedPreset === '' && !autoPresetControl?.automatic" class="preset-check"><Icon name="check" size="sm" /></span>
       </button>
-      <button
-        v-for="preset in subagentPresetNames"
-        :key="preset"
-        type="button"
-        class="srow preset-row"
-        :class="{ on: normalizedPreset === preset }"
+      <p v-if="autoSubagentPresetStatus" class="preset-score-meta">{{ subagentPresetEvaluationScopeLabel(autoSubagentPresetStatus, t) }}</p>
+      <Button
+        v-for="row in presetRows"
+        :key="row.preset"
+        variant="ghost"
+        class="preset-choice"
+        :class="{ on: normalizedPreset === row.preset && !autoPresetControl?.automatic }"
         :disabled="subagentPresetSaving"
-        @click="choosePreset(preset)"
+        @click="choosePreset(row.preset)"
       >
         <span class="srow-main">
-          <span class="srow-label">{{ preset }}</span>
+          <span class="srow-label">{{ row.preset }}</span>
+          <span class="preset-score-meta">{{ subagentPresetTotals(row.candidate, t) }}</span>
+          <span class="preset-score-meta">{{ subagentPresetParticipationLabel(row.participating, t) }}</span>
+          <span class="preset-score-meta">{{ row.candidate ? subagentPresetCandidateSummary(row.candidate, Date.now(), t) : t('header.subagentPresetNoData') }}</span>
+          <span v-if="row.candidate && !row.candidate.roleScores" class="preset-score-meta">{{ t('header.subagentPresetLegacy') }}</span>
         </span>
-        <span v-if="normalizedPreset === preset" class="preset-check"><Icon name="check" size="sm" /></span>
-      </button>
+        <span v-if="normalizedPreset === row.preset && !autoPresetControl?.automatic" class="preset-check"><Icon name="check" size="sm" /></span>
+      </Button>
 
-      <button
-        v-if="subagentPresetLocked"
-        type="button"
-        class="srow preset-row"
-        :disabled="subagentPresetSaving"
-        @click="onResumeAutoPreset"
-      >
-        <span class="srow-main">
-          <span class="srow-label">{{ t('header.subagentPresetResumeAuto') }}</span>
-        </span>
-      </button>
+      <div class="preset-auto-action">
+        <Button
+          variant="secondary"
+          size="lg"
+          :loading="autoPresetControl?.pending"
+          :disabled="subagentPresetSaving || !!autoPresetControl?.disabledReason"
+          @click="onResumeAutoPreset"
+        >
+          {{ autoPresetControl?.pending ? t('header.subagentPresetAutoEvaluating') : autoPresetControl?.label ?? t('header.subagentPresetAutoSelect') }}
+        </Button>
+        <Banner variant="info" role="status" aria-live="polite">
+          {{ autoPresetControl?.disabledReason || t('header.subagentPresetAutoHint') }}
+          <p v-if="autoPresetControl?.feedback">{{ autoPresetControl.feedback }}</p>
+        </Banner>
+      </div>
     </template>
   </BottomSheet>
 </template>
@@ -954,8 +974,15 @@ watch(
   color: var(--color-text-faint);
 }
 
-/* Preset sub-view rows: radio rows (check mark on the active preset), disabled
-   while a preset/config write is in flight. */
+.preset-auto-action {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: var(--space-3);
+}
+
+/* Preset sub-view rows: check marks identify manual choices, never automatic
+   selections; rows are disabled while a preset/config write is in flight. */
 .preset-row.on {
   background: var(--color-accent-soft);
 }
@@ -967,20 +994,15 @@ watch(
   opacity: 0.55;
   cursor: default;
 }
+.preset-choice { width: 100%; height: auto; text-align: left; justify-content: flex-start; padding: var(--space-3); white-space: normal; line-height: var(--leading-normal); }
+.preset-choice .srow-main { gap: var(--space-1); }
+.preset-choice.on { background: var(--color-selected); }
+.preset-score-meta { font-size: var(--text-xs); color: var(--color-text-muted); white-space: normal; overflow-wrap: anywhere; }
 .preset-check {
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--color-accent-hover);
-}
-.preset-lock-note {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  font-family: var(--font-ui);
-  font-size: var(--text-sm);
-  color: var(--color-text-faint);
 }
 </style>

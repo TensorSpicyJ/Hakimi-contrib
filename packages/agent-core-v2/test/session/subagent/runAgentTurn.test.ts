@@ -1,12 +1,17 @@
 /**
- * Scenario: `runAgentTurn` usage accounting — the baseline snapped before the
- * run, the cumulative total on the completion's `usage` (the legacy wire
+ * Scenario: `runAgentTurn` usage accounting and run liveness — the baseline
+ * snapped before the run, the cumulative total on the completion's `usage`
+ * (the legacy wire
  * semantics) alongside the non-negative per-run delta on `runUsage`, the same
  * delta covering summary-continuation turns, incremental attribution for
  * resumed/retried agents, and `runUsageSince` deriving the partial delta for
- * failed/cancelled runs.
+ * failed/cancelled runs. Also the teardown case: a turn that settles while the
+ * target's scope is disposed mid-run reports its own outcome instead of reading
+ * the disposed scope.
  * Wiring: a fake agent handle whose accessor serves scripted prompt / loop /
- * context-memory / usage fakes; the SUT is the exported pure function.
+ * context-memory / usage fakes and throws the container's disposed error once
+ * torn down, so post-teardown reads are observable; the SUT is the exported
+ * pure function.
  * Run with `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
  * test/session/subagent/runAgentTurn.test.ts`.
  */
@@ -24,6 +29,7 @@ import type { TokenUsage } from '#/kosong/contract/usage';
 import type { AgentProfileSummaryPolicy } from '#/app/agentProfileCatalog/agentProfileCatalog';
 
 import { runAgentTurn, runUsageSince } from '#/session/subagent/runAgentTurn';
+import { abortError } from '#/_base/utils/abort';
 
 const ZERO = { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 };
 
@@ -39,9 +45,24 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 
 class FakeAgentHandle {
   readonly accessor;
+  /**
+   * Models the agent scope after `handle.dispose()`: the container throws the
+   * same `InstantiationService has been disposed` error a real scope does, and
+   * `reads` counts every post-teardown read the run still attempts.
+   */
+  tornDown = false;
+  readsAfterTeardown = 0;
 
   constructor(readonly id: string, services: Map<unknown, unknown>) {
-    this.accessor = { get: (token: unknown) => services.get(token) };
+    this.accessor = {
+      get: (token: unknown) => {
+        if (this.tornDown) {
+          this.readsAfterTeardown += 1;
+          throw new Error('InstantiationService has been disposed');
+        }
+        return services.get(token);
+      },
+    };
   }
 }
 
@@ -82,7 +103,11 @@ class FakePromptService {
   }> = [];
   private index = 0;
 
+  /** Models the agent's loop refusing new work once the scope is torn down. */
+  constructor(private readonly isTornDown: () => boolean = () => false) {}
+
   async enqueue(): Promise<PromptHandle> {
+    if (this.isTornDown()) throw abortError('Agent loop disposed');
     const step = this.steps[this.index++]!;
     if (step.method !== 'enqueue') throw new Error('expected enqueue');
     step.beforeLaunch?.();
@@ -93,6 +118,7 @@ class FakePromptService {
   }
 
   async retry(): Promise<Turn | undefined> {
+    if (this.isTornDown()) throw abortError('Agent loop disposed');
     const step = this.steps[this.index++]!;
     if (step.method !== 'retry') throw new Error('expected retry');
     step.beforeLaunch?.();
@@ -102,6 +128,7 @@ class FakePromptService {
 
 describe('runAgentTurn usage accounting', () => {
   let total: TokenUsage;
+  let target: FakeAgentHandle;
   let handle: IAgentScopeHandle;
   let prompt: FakePromptService;
   let eventBus: FakeBus;
@@ -111,7 +138,7 @@ describe('runAgentTurn usage accounting', () => {
     total = { ...ZERO };
     latestSummary = 'child summary';
     const loop = { cancel: () => true };
-    prompt = new FakePromptService();
+    prompt = new FakePromptService(() => target.tornDown);
     eventBus = new FakeBus();
     const memory = {
       get: () => [{ role: 'assistant', content: latestSummary } as never],
@@ -130,6 +157,7 @@ describe('runAgentTurn usage accounting', () => {
       [IEventBus, eventBus],
     ]);
     handle = new FakeAgentHandle('agent-child', services) as unknown as IAgentScopeHandle;
+    target = handle as unknown as FakeAgentHandle;
   });
 
   it('reports the full first-run total as cumulative usage and as the runUsage delta', async () => {
@@ -287,5 +315,29 @@ describe('runAgentTurn usage accounting', () => {
       inputCacheRead: 0,
       inputCacheCreation: 2,
     });
+  });
+
+  it('collects the outcome without touching the target scope once it is torn down mid-turn', async () => {
+    const done = deferred<TurnResult>();
+    prompt.steps.push({ method: 'enqueue', turn: fakeTurn(1, done.promise) });
+    latestSummary = 'short';
+    const policy: AgentProfileSummaryPolicy = {
+      minChars: 100,
+      continuationPrompt: 'please continue',
+      retries: 1,
+    };
+    const run = await runAgentTurn(handle, { kind: 'prompt', prompt: 'hello' }, {
+      signal: new AbortController().signal,
+      summaryPolicy: policy,
+    });
+
+    // The agent's scope is disposed (session close / agent removal) while the
+    // turn's result is still in flight: the container now rejects every
+    // accessor read, and the loop refuses new work.
+    target.tornDown = true;
+    done.resolve({ type: 'completed', steps: 1, truncated: false });
+
+    await expect(run.completion).rejects.toThrow('Agent loop disposed');
+    expect(target.readsAfterTeardown).toBe(0);
   });
 });

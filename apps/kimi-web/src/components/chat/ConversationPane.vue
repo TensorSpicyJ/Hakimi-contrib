@@ -3,7 +3,7 @@
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch, type ComponentPublicInstance } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { ActivationBadges, ApprovalBlock, ChatTurn, ConnectionState, ConversationStatus, FilePreviewRequest, PermissionMode, QueuedPromptView, TaskItem, TodoView, ToolMedia, TurnAttachment, UIQuestion, WebPreviewTarget, WorkspaceView } from '../../types';
-import type { AppGoal, AppModel, AppSkill, AppTurnProgress, AutoSubagentPresetStatus, QuestionResponse, ResearchModeSnapshot, ThinkingLevel } from '../../api/types';
+import type { AppGoal, AppModel, AppPlugin, AppSkill, AppTurnProgress, AutoSubagentPresetStatus, QuestionResponse, ResearchModeSnapshot, ThinkingLevel } from '../../api/types';
 import type { FileItem } from './MentionMenu.vue';
 import type { PromptAttachment } from '../../composables/useKimiWebClient';
 import type { ComposerCommandEvent } from '../../composables/useComposerDraft';
@@ -40,6 +40,8 @@ const props = defineProps<{
   todos?: TodoView[];
   goal?: AppGoal | null;
   research?: ResearchModeSnapshot | null;
+  aitpPlugin?: AppPlugin | null;
+  pluginMetadataStatus?: 'unknown' | 'loading' | 'ready' | 'error';
   researchEnabled?: boolean;
   researchExpandSignal?: number;
   activationBadges?: ActivationBadges;
@@ -112,11 +114,13 @@ const props = defineProps<{
   subagentPreset?: string;
   /** Sorted configured preset names offered by the chat-header routing menu. */
   subagentPresetNames?: string[];
+  subagentPresetCandidates?: string[];
   /** True while the selected preset is being persisted and applied. */
   subagentPresetSaving?: boolean;
   /** `autoPreset.manualLock`: a manually activated preset paused automatic
    *  switching (chat-header lock badge + resume-auto action). */
   subagentPresetLocked?: boolean;
+  autoPresetControl?: { automatic: boolean; label: string; disabledReason?: string; feedback: string; pending: boolean };
   /** Latest process-global automatic routing evaluation, when supported. */
   autoSubagentPresetStatus?: AutoSubagentPresetStatus;
   /** GitHub PR for the current branch, when known (shown in the chat header). */
@@ -1310,9 +1314,11 @@ defineExpose({ loadComposerForEdit, focusComposer, copyConversation, copyFinalSu
       :session-title="sessionTitle"
       :subagent-preset="subagentPreset"
       :subagent-preset-names="subagentPresetNames"
+      :subagent-preset-candidates="subagentPresetCandidates"
       :subagent-preset-saving="subagentPresetSaving"
       :subagent-preset-locked="subagentPresetLocked"
       :auto-subagent-preset-status="autoSubagentPresetStatus"
+      :auto-preset-control="autoPresetControl"
       :branch="gitInfo?.branch"
       :ahead="gitInfo?.ahead"
       :behind="gitInfo?.behind"
@@ -1354,6 +1360,9 @@ defineExpose({ loadComposerForEdit, focusComposer, copyConversation, copyFinalSu
         v-if="research && research.enabled && !sessionLoading"
         :key="sessionId"
         :snapshot="research"
+        :skills="skills"
+        :aitp-plugin="aitpPlugin"
+        :plugin-metadata-status="pluginMetadataStatus"
         :force-expanded="researchExpandSignal"
         :style="{ '--research-dock-height': `${dockHeight}px` }"
       />

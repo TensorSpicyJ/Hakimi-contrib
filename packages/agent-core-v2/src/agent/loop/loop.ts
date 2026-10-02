@@ -163,6 +163,12 @@ export interface IAgentLoopService {
   readonly hooks: Hooks<{
     onWillBeginStep: BeforeStepContext;
     onDidFinishStep: AfterStepContext;
+    onWillCompleteTurn: {
+      readonly turnId: number;
+      readonly step: number;
+      readonly signal: AbortSignal;
+      readonly seed: import('./stepRequest').TurnSeed | undefined;
+    };
   }>;
 }
 

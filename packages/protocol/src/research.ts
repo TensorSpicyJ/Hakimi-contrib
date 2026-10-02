@@ -2,7 +2,7 @@
  * AITP Research Mode — JSON-safe public protocol types and zod schemas.
  *
  * Live REST reads and research_mode.updated expose ResearchModeSnapshot:
- * enabled plus catalog Skill availability, not CLI health. Only enter_mode
+ * enabled plus catalog Skill availability; no runtime probe runs. Only enter_mode
  * and exit_mode execute. Historical snapshots, events, and command schemas
  * remain decodable; old execution commands are rejected as research.retired.
  */

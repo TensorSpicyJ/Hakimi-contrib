@@ -16,7 +16,23 @@ const PLAN_REJECT_CHOICES: ApprovalPanelChoice[] = [
   { label: 'Revise', response: 'rejected', selected_label: 'Revise', requires_feedback: true },
 ];
 
-export function adaptApprovalRequest(event: ApprovalRequest): ApprovalPanelData {
+/**
+ * The session identity a request is adapted for. Supplied by the host that
+ * registered the per-session handler (the adapter itself cannot read it off the
+ * v1 request shape, which carries no session id), so every panel knows which
+ * session it answers for — the fact the approval controller scopes
+ * "approve for this session" and per-session cancellation by.
+ */
+export interface ApprovalRequestContext {
+  readonly sessionId: string;
+  /** Set for a request raised by a non-focused session, e.g. a handed-off one. */
+  readonly sessionLabel?: string;
+}
+
+export function adaptApprovalRequest(
+  event: ApprovalRequest,
+  context?: ApprovalRequestContext,
+): ApprovalPanelData {
   const resolved = resolveDisplay(event.toolName, event.display, event.action);
   return {
     id: event.toolCallId,
@@ -26,6 +42,8 @@ export function adaptApprovalRequest(event: ApprovalRequest): ApprovalPanelData 
     description: resolved.description,
     display: resolved.blocks,
     choices: adaptChoices(event.toolName, event.display),
+    session_id: context?.sessionId,
+    session_label: context?.sessionLabel,
   };
 }
 

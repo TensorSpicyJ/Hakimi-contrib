@@ -16,6 +16,8 @@
  * at the next step head. Bound at Agent scope and constructed with
  * the scope so the overflow recovery handler registers before the first turn
  * runs.
+ * The `flag` domain selects the optional continuity policy; its content-free
+ * run counters are registered in `agentState` for diagnostics.
  */
 
 import type { IDisposable } from '#/_base/di/lifecycle';
@@ -46,21 +48,28 @@ import {
   APIContextOverflowError,
   APIEmptyResponseError,
   APIStatusError,
+  PROVIDER_FILTERED_ERROR_CODE,
   isRetryableGenerateError,
 } from '#/kosong/contract/errors';
 import { createUserMessage, type Message } from '#/kosong/contract/message';
 import type { Tool } from '#/kosong/contract/tool';
 import { inputTotal, type TokenUsage } from '#/kosong/contract/usage';
 import { IEventBus } from '#/app/event/eventBus';
+import { IFlagService } from '#/app/flag/flag';
 import type { CompactionFailedEvent, CompactionFinishedEvent } from '#/app/telemetry/events';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { ErrorCodes, Error2, isCodedError, isError2, toKimiErrorPayload, unwrapErrorCause } from "#/errors";
 import { IWireService } from '#/wire/wire';
 import compactionInstructionTemplate from './compaction-instruction.md?raw';
+import continuityInstructionTemplate from './continuity-instruction.md?raw';
+import { contextContinuityFlag } from './flag';
+import { prepareContinuityHistory, shrinkContinuityHistory } from './continuity';
 import {
   IAgentFullCompactionService,
   type FullCompactionInput,
   type FullCompactionTask,
+  type CompactionContinuityDiagnostics,
+  type CompactionContinuityRun,
 } from './fullCompaction';
 import {
   RuntimeCompactionStrategy,
@@ -135,6 +144,10 @@ export const fullCompactionActiveTurnIdKey = defineState<number | undefined>(
   'fullCompaction.activeTurnId',
   () => undefined as number | undefined,
 );
+export const fullCompactionContinuityLastRunKey = defineState<CompactionContinuityRun | null>(
+  'fullCompaction.continuityLastRun',
+  () => null,
+);
 
 export class AgentFullCompactionService extends Service implements IAgentFullCompactionService {
   declare readonly _serviceBrand: undefined;
@@ -161,6 +174,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     @ILogService private readonly log: ILogService,
     @IAgentLoopService private readonly loopService: IAgentLoopService,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IFlagService private readonly flags: IFlagService,
   ) {
     super();
     this.states.register(fullCompactionCompactionCountInTurnKey);
@@ -168,6 +182,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     this.states.register(fullCompactionLastCompactedTokenCountKey);
     this.states.register(fullCompactionConsecutiveOverflowCompactionsKey);
     this.states.register(fullCompactionActiveTurnIdKey);
+    this.states.register(fullCompactionContinuityLastRunKey);
     this.strategy = new RuntimeCompactionStrategy(
       () => this.resolveModelContextWithEffectiveMax(),
       (message) => this.tokenCounting.estimateMessage(message),
@@ -247,6 +262,19 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     return this._compacting;
   }
 
+  diagnostics(): CompactionContinuityDiagnostics {
+    return {
+      enabled: this.flags.enabled(contextContinuityFlag.id),
+      lastRun: this.states.get(fullCompactionContinuityLastRunKey),
+    };
+  }
+
+  private updateContinuityRun(active: ActiveCompaction, update: Partial<CompactionContinuityRun>): void {
+    if (this._compacting !== active) return;
+    const current = this.states.get(fullCompactionContinuityLastRunKey);
+    if (current !== null) this.states.set(fullCompactionContinuityLastRunKey, { ...current, ...update });
+  }
+
   cancel(): void {
     const active = this._compacting;
     if (active !== null) {
@@ -290,7 +318,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     return this.tokenCounting.requestSize({
       systemPrompt: this.profile.getSystemPrompt(),
       tools: this.defaultTools().filter((tool) => tool.deferred !== true),
-      messages,
+      messages: this.toolSelect.shapeHistory(messages),
     });
   }
 
@@ -301,6 +329,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters ?? EMPTY_TOOL_PARAMETERS,
+        inputFormat: tool.inputFormat,
         deferred: tool.deferred,
       }));
   }
@@ -439,6 +468,9 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
 
   private cancelActive(active: ActiveCompaction): boolean {
     if (this._compacting !== active) return false;
+    if (this.states.get(fullCompactionContinuityLastRunKey)?.outcome === 'running') {
+      this.updateContinuityRun(active, { outcome: 'cancelled' });
+    }
     this.wire.dispatch(fullCompactionCancel({}));
     this._compacting = null;
     if (!active.abortController.signal.aborted) {
@@ -625,6 +657,21 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     const startedAt = Date.now();
     const originalHistory = [...this.context.get()];
     const tokensBefore = this.requestTokens(originalHistory);
+    const continuity = this.flags.enabled(contextContinuityFlag.id);
+    const strippedHistory = stripDynamicToolContext(originalHistory);
+    const prepared = continuity
+      ? prepareContinuityHistory(strippedHistory)
+      : { messages: strippedHistory, duplicateReminderCount: 0, repeatedToolLineCount: 0 };
+    this.states.set(fullCompactionContinuityLastRunKey, {
+      policy: continuity ? 'continuity' : 'baseline',
+      outcome: 'running',
+      inputMessageCount: originalHistory.length,
+      preparedMessageCount: prepared.messages.length,
+      duplicateReminderCount: prepared.duplicateReminderCount,
+      repeatedToolLineCount: prepared.repeatedToolLineCount,
+      retryDroppedMessageCount: 0,
+      requestCount: 0,
+    });
     let retryCount = 0;
     let thinkingEffort = this.profile.data().thinkingLevel;
 
@@ -644,14 +691,14 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
       const compactionMaxOutputSize = resolvedModel.maxOutputSize ?? defaultCompactionCap;
 
       const customInstruction = data.instruction?.trim() ?? '';
-      const instruction = renderPrompt(compactionInstructionTemplate, {
+      const instruction = renderPrompt(continuity ? continuityInstructionTemplate : compactionInstructionTemplate, {
         custom_instruction_block:
           customInstruction.length > 0 ? `\nOptional user instruction:\n${customInstruction}\n` : '',
       }).trimEnd();
 
       const delays = retryBackoffDelays(MAX_COMPACTION_RETRY_ATTEMPTS);
       let attempt: CompactionAttemptResult | undefined;
-      let historyForModel: readonly ContextMessage[] = stripDynamicToolContext(originalHistory);
+      let historyForModel: readonly ContextMessage[] = prepared.messages;
       let droppedCount = 0;
       let overflowShrinkCount = 0;
       let emptyOrTruncatedShrinkCount = 0;
@@ -661,6 +708,9 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
         const estimatedCompactionRequestTokens = this.requestTokens(messages);
 
         try {
+          this.updateContinuityRun(active, {
+            requestCount: (this.states.get(fullCompactionContinuityLastRunKey)?.requestCount ?? 0) + 1,
+          });
           const request = this.llmRequester.start(
             {
               messages,
@@ -679,6 +729,8 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
           attempt = collectSummary(await request.result);
           break;
         } catch (error) {
+          const cause = unwrapErrorCause(error);
+          if (isCodedError(cause) && cause.code === PROVIDER_FILTERED_ERROR_CODE) throw error;
           const isContextOverflow = this.shouldRecoverFromContextOverflow(
             error,
             estimatedCompactionRequestTokens,
@@ -693,12 +745,21 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
               throw error;
             }
             const before = messagesToCompact.length;
-            historyForModel = shrinkCompactionHistoryAfterOverflow(
-              messagesToCompact,
-              overflowShrinkCount,
-              (message) => this.tokenCounting.estimateMessage(message),
-            );
+            historyForModel = continuity
+              ? shrinkContinuityHistory(
+                messagesToCompact,
+                Math.floor(messagesToCompact.reduce((sum, message) => sum + this.tokenCounting.estimateMessage(message), 0) *
+                  COMPACTION_OVERFLOW_SHRINK_RATIOS[overflowShrinkCount - 1]!),
+                (message) => this.tokenCounting.estimateMessage(message),
+              )
+              : shrinkCompactionHistoryAfterOverflow(
+                messagesToCompact,
+                overflowShrinkCount,
+                (message) => this.tokenCounting.estimateMessage(message),
+              );
+            if (continuity && historyForModel.length === before) throw error;
             droppedCount += before - historyForModel.length;
+            this.updateContinuityRun(active, { retryDroppedMessageCount: droppedCount });
             retryCount = 0;
             continue;
           }
@@ -710,8 +771,13 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
             if (emptyOrTruncatedShrinkCount > MAX_COMPACTION_RETRY_ATTEMPTS) {
               throw error;
             }
-            const reduced = dropOldestMessageAndLeadingToolResults(messagesToCompact);
+            const reduced = continuity
+              ? shrinkContinuityHistory(messagesToCompact, Number.POSITIVE_INFINITY,
+                (message) => this.tokenCounting.estimateMessage(message))
+              : dropOldestMessageAndLeadingToolResults(messagesToCompact);
+            if (continuity && reduced.length === messagesToCompact.length) throw error;
             droppedCount += messagesToCompact.length - reduced.length;
+            this.updateContinuityRun(active, { retryDroppedMessageCount: droppedCount });
             historyForModel = reduced;
             retryCount = 0;
             continue;
@@ -767,8 +833,10 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
         ...usageTelemetry(attempt.usage),
       };
       this.telemetry.track2('compaction_finished', properties);
+      this.updateContinuityRun(active, { outcome: 'completed' });
       return result;
     } catch (error) {
+      this.updateContinuityRun(active, { outcome: isAbortError(error) || active.abortController.signal.aborted ? 'cancelled' : 'failed' });
       if (isAbortError(error)) throw error;
       const properties: CompactionFailedEvent = {
         turn_id: active.originTurnId,
@@ -822,6 +890,12 @@ function findAPIStatusError(error: unknown): APIStatusError | undefined {
 }
 
 function collectSummary(finish: AgentLLMRequestFinish): CompactionAttemptResult {
+  if (finish.providerFinishReason === 'filtered') {
+    throw new Error2(
+      ErrorCodes.COMPACTION_FAILED,
+      'The provider refused or filtered the compaction response. The original context has been retained.',
+    );
+  }
   if (finish.providerFinishReason === 'truncated') {
     throw new CompactionTruncatedError();
   }

@@ -21,7 +21,10 @@ import type {
   BearerRequestAuth,
   BearerTokenProvider,
 } from './toolkit';
-import type { ManagedKimiConfigShape } from './managed-kimi-code';
+import type {
+  ManagedKimiConfigShape,
+  ManagedKimiModelAlias,
+} from './managed-kimi-code';
 
 export const OPENAI_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 export const OPENAI_CODEX_ISSUER = 'https://auth.openai.com';
@@ -70,11 +73,15 @@ interface OpenAICodexModel {
   readonly id: string;
   readonly displayName: string;
   readonly maxContextSize: number;
-  readonly maxInputSize: number;
+  // Left unset when the official catalog declares no separate input limit.
+  readonly maxInputSize?: number;
   readonly supportEfforts: readonly string[];
   readonly defaultEffort: string;
 }
 
+// Sol/Luna metadata follows codex-rs/models-manager/models.json at
+// openai/codex commit 0a2eb4696c26ac33204bcd255721ab30220a4774:
+// context_window 272000, default_reasoning_level medium, no separate input limit.
 const OPENAI_CODEX_MODELS: readonly OpenAICodexModel[] = [
   {
     id: 'gpt-5.6-sol',
@@ -108,7 +115,38 @@ const OPENAI_CODEX_MODELS: readonly OpenAICodexModel[] = [
     supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     defaultEffort: 'low',
   },
+  {
+    id: 'gpt-6-sol',
+    displayName: 'GPT-6 Sol (ChatGPT)',
+    maxContextSize: 272_000,
+    supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'gpt-6-luna',
+    displayName: 'GPT-6 Luna (ChatGPT)',
+    maxContextSize: 272_000,
+    supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
 ] as const;
+
+function openAICodexModelAliasKey(modelId: string): string {
+  return `${OPENAI_CODEX_PLATFORM_ID}/${modelId}`;
+}
+
+function openAICodexModelAlias(model: OpenAICodexModel): ManagedKimiModelAlias {
+  return {
+    provider: OPENAI_CODEX_PROVIDER_NAME,
+    model: model.id,
+    maxContextSize: model.maxContextSize,
+    maxInputSize: model.maxInputSize,
+    capabilities: ['thinking', 'always_thinking', 'tool_use', 'image_in'],
+    supportEfforts: [...model.supportEfforts],
+    defaultEffort: model.defaultEffort,
+    displayName: model.displayName,
+  };
+}
 
 export interface OpenAICodexApplyResult {
   readonly providerName: typeof OPENAI_CODEX_PROVIDER_NAME;
@@ -127,7 +165,7 @@ export function applyOpenAICodexConfig(
 ): OpenAICodexApplyResult {
   const oauthHost = normalizeIssuer(options.oauthHost ?? OPENAI_CODEX_ISSUER);
   const oauthKey = options.oauthKey ?? OPENAI_CODEX_OAUTH_KEY;
-  const defaultModel = `${OPENAI_CODEX_PLATFORM_ID}/gpt-5.6-sol`;
+  const defaultModel = `${OPENAI_CODEX_PLATFORM_ID}/gpt-6-sol`;
 
   config.providers[OPENAI_CODEX_PROVIDER_NAME] = {
     type: 'openai_responses',
@@ -151,16 +189,7 @@ export function applyOpenAICodexConfig(
     }
   }
   for (const model of OPENAI_CODEX_MODELS) {
-    models[`${OPENAI_CODEX_PLATFORM_ID}/${model.id}`] = {
-      provider: OPENAI_CODEX_PROVIDER_NAME,
-      model: model.id,
-      maxContextSize: model.maxContextSize,
-      maxInputSize: model.maxInputSize,
-      capabilities: ['thinking', 'always_thinking', 'tool_use', 'image_in'],
-      supportEfforts: [...model.supportEfforts],
-      defaultEffort: model.defaultEffort,
-      displayName: model.displayName,
-    };
+    models[openAICodexModelAliasKey(model.id)] = openAICodexModelAlias(model);
   }
   config.models = models;
 
@@ -184,6 +213,43 @@ export function applyOpenAICodexConfig(
     defaultThinking: true,
     models: OPENAI_CODEX_MODELS.map((model) => model.id),
   };
+}
+
+/**
+ * The additive catalog backfill applies only to a configured
+ * `managed:openai-codex` provider that is catalog-backed: an
+ * `openai_responses` provider carrying an oauth ref, unless the user pinned
+ * it to a static model list (`modelSource: 'static'`).
+ */
+export function isOpenAICodexCatalogSynced(provider: unknown): boolean {
+  if (!isRecord(provider)) return false;
+  if (provider['type'] !== 'openai_responses') return false;
+  if (!isRecord(provider['oauth'])) return false;
+  return provider['modelSource'] !== 'static';
+}
+
+/**
+ * Returns the canonical aliases for catalog models absent from
+ * `config.models`, so an install provisioned before a catalog update picks up
+ * the new entries on refresh without re-login. Pure: no network, no token
+ * reads, no mutation. Existing keys are never returned — even when the same
+ * alias key belongs to another provider — and provider/defaultModel/thinking
+ * are untouched.
+ */
+export function getMissingOpenAICodexModels(
+  config: ManagedKimiConfigShape,
+): Record<string, ManagedKimiModelAlias> {
+  const missing: Record<string, ManagedKimiModelAlias> = {};
+  if (!isOpenAICodexCatalogSynced(config.providers[OPENAI_CODEX_PROVIDER_NAME])) {
+    return missing;
+  }
+  const models = config.models ?? {};
+  for (const model of OPENAI_CODEX_MODELS) {
+    const key = openAICodexModelAliasKey(model.id);
+    if (Object.hasOwn(models, key)) continue;
+    missing[key] = openAICodexModelAlias(model);
+  }
+  return missing;
 }
 
 export function removeOpenAICodexConfig(config: ManagedKimiConfigShape): void {

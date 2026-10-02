@@ -5,8 +5,12 @@
  * automatic `[subagent].preset` activation, including a manual clear to base
  * routing. The public `activate` is the manual boundary: it stamps
  * `auto_preset.manual_lock = true` atomically with the preset so the automatic
- * decider defers to the human choice. The serialized `SubagentPresetActivationTransaction.activate`
- * used by the automatic decider patches only `preset` and never the lock. A
+ * decider defers to the human choice. Transaction `activate` retains strict
+ * native-alias validation for the preset tool. `activateEvaluated` is reserved
+ * for the automatic decider after aggregate/role/resource validation inside
+ * this same writer boundary: it validates structure and main routes, but allows
+ * unresolved native subagent aliases covered by fallback/partial decisions.
+ * Both transaction methods patch only `preset`, never the lock or revision. A
  * transaction validates against the live config and may be cancelled before
  * its User-layer commit starts; once that commit starts, its result is never
  * reported as cancelled. Both paths best-effort align a matching Memory-layer
@@ -30,6 +34,7 @@ export type SubagentPresetActivationResult =
 
 export interface SubagentPresetActivationTransaction {
   activate(preset: string, signal?: AbortSignal): Promise<SubagentPresetActivationResult>;
+  activateEvaluated(preset: string, signal?: AbortSignal): Promise<SubagentPresetActivationResult>;
 }
 
 export interface ISubagentPresetActivationService {

@@ -118,6 +118,14 @@ export interface ApprovalPanelData {
   description: string;
   display: DisplayBlock[];
   choices: ApprovalPanelChoice[];
+  /**
+   * Session the request belongs to. Scopes both "approve for this session"
+   * (only a queued request from the *same* session may inherit it) and
+   * per-session cancellation; requests without an identity never inherit.
+   */
+  session_id?: string;
+  /** Owning session's display label, set for a non-focused session's request. */
+  session_label?: string;
 }
 
 export interface QuestionPanelItem {
@@ -134,6 +142,10 @@ export interface QuestionPanelData {
   id: string;
   tool_call_id: string;
   questions: QuestionPanelItem[];
+  /** Session the question belongs to; scopes per-session cancellation. */
+  session_id?: string;
+  /** Owning session's display label, set for a non-focused session's question. */
+  session_label?: string;
 }
 
 export type QuestionSubmissionMethod = QuestionAnswerMethod;

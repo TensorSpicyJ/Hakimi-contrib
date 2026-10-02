@@ -52,6 +52,7 @@ export class AgentToolRegistryService implements IAgentToolRegistryService {
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters,
+        inputFormat: tool.inputFormat,
         source,
         disclosure,
       }))

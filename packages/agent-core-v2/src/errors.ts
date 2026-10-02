@@ -5,6 +5,7 @@
  */
 
 import { CoreErrors } from '#/_base/errors/codes';
+import { AutoSubagentPresetErrors } from '#/app/autoSubagentPreset/errors';
 import { AgentLifecycleErrors } from '#/session/agentLifecycle/errors';
 import { AuthErrors } from '#/app/auth/errors';
 import { TaskErrors } from '#/agent/task/errors';
@@ -36,12 +37,14 @@ import { WebErrors } from '#/app/web/errors';
 import { WireErrors } from '#/wire/errors';
 import { WorkspaceErrors } from '#/app/workspace/errors';
 import { AitpResearchErrors } from '#/features/aitpResearch/errors';
+import { SessionHandoffErrors } from '#/features/sessionHandoff/errors';
 
 export * from '#/_base/errors/codes';
 export * from '#/_base/errors/errorMessage';
 export * from '#/_base/errors/errors';
 export * from '#/_base/errors/serialize';
 export * from '#/_base/errors/unexpectedError';
+export { AutoSubagentPresetErrors } from '#/app/autoSubagentPreset/errors';
 export { AgentLifecycleErrors } from '#/session/agentLifecycle/errors';
 export { AuthErrors } from '#/app/auth/errors';
 export { TaskErrors } from '#/agent/task/errors';
@@ -73,8 +76,10 @@ export { WebErrors } from '#/app/web/errors';
 export { WireErrors } from '#/wire/errors';
 export { WorkspaceErrors } from '#/app/workspace/errors';
 export { AitpResearchErrors } from '#/features/aitpResearch/errors';
+export { SessionHandoffErrors } from '#/features/sessionHandoff/errors';
 
 export const ErrorCodes = {
+  ...AutoSubagentPresetErrors.codes,
   ...CoreErrors.codes,
   ...AgentLifecycleErrors.codes,
   ...AuthErrors.codes,
@@ -107,6 +112,7 @@ export const ErrorCodes = {
   ...WireErrors.codes,
   ...WorkspaceErrors.codes,
   ...AitpResearchErrors.codes,
+  ...SessionHandoffErrors.codes,
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];

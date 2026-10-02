@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, ref, useId, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
-import type { ResearchModeSnapshot } from '../../api/types';
+import type { AppPlugin, AppSkill, ResearchModeSnapshot } from '../../api/types';
 import ResearchBoard from './ResearchBoard.vue';
 import Button from '../ui/Button.vue';
 import Icon from '../ui/Icon.vue';
@@ -9,6 +9,9 @@ import IconButton from '../ui/IconButton.vue';
 
 const props = defineProps<{
   snapshot: ResearchModeSnapshot;
+  skills?: AppSkill[];
+  aitpPlugin?: AppPlugin | null;
+  pluginMetadataStatus?: 'unknown' | 'loading' | 'ready' | 'error';
   forceExpanded?: number;
 }>();
 const { t } = useI18n();
@@ -52,6 +55,9 @@ watch(() => props.forceExpanded, () => { void expand(); });
       :id="panelId"
       class="research-floating-board"
       :snapshot="snapshot"
+      :skills="skills"
+      :aitp-plugin="aitpPlugin"
+      :plugin-metadata-status="pluginMetadataStatus"
     >
       <template #panel-actions>
         <IconButton ref="closeButton" size="lg" :label="t('research.hidePanel')" @click="collapse">

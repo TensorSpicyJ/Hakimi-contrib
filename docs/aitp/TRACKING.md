@@ -1,5 +1,53 @@
 # AITP 状态跟踪与交接清单
 
+## 2026-09-22 AITP Skills 在模式切换前后保持可用 {#aitp-skill-availability-20260922}
+
+本次保留现有实现的契约：启用的官方插件所提供的 AITP Skills 在 Research Mode 开启和关闭时都可用，开关只控制轻量研究指导。官方 Skills 继续由动态清单提供，不加入冻结的初始系统提示词；模式切换不产生虚假的可见性变化，也不清空仍然有效的清单。补全可见性贡献的 `describeHidden` 契约，返回 `undefined`；修正仍期待旧隐藏行为的四个测试，并覆盖动态清单去重和无隐藏原因。
+
+修改前重新获取并核对 [AITP 官方源码](https://github.com/bhjia-phys/AITP-Research-Protocol/tree/91f4fc6c0bb16fd6ad3b3182c7d5f9683210844a)：`git rev-parse HEAD` 为 `91f4fc6c0bb16fd6ad3b3182c7d5f9683210844a`，`git status --short` 为空；manifest 为 `aitp` / `1.1.0+codex.20260919190843`，四个核心 Skill 仍为 `aitp-memory`、`aitp-research`、`aitp-writing`、`aitp-distill`。上游仍无 `docs/hakimi/` 交接目录，也没有 CLI、账本 runtime 或 session hook；未修改上游、用户安装或研究文件。
+
+定向验证：`agentPlugin.test.ts`、`plugin-session-start.test.ts`、`aitpResearchService.test.ts` 共 3 files / 45 tests 通过；`lint:imports` 检查 1329 files 通过，VitePress 文档构建通过。该结果验证宿主可见性与注入契约，不代表模型科研能力验收或正式发布。根 README 双语说明与本页同步；下方旧的模式门控验证记录保留为历史。
+
+## 2026-09-16 Web Research Skills 刷新与版本 {#web-research-skills-20260916}
+
+本轮仅改 Web 刷新、展示和相关测试／文档，不改 core 门控或后端协议。重新核对同一下载归档的 manifest（`aitp` / `1.1.0+codex.20260914182315`）与四个核心 Skill；没有读写用户凭据、改动用户 home 插件或重启用户服务。
+
+- HTTP、WS、初次加载及 reconnect/resync 的权威 Research 快照统一触发 session Skills 刷新；旧请求不能覆盖较新的列表，切后端会清理缓存并取消旧 Research 请求的提交。已打开的 `/` 菜单也会响应异步列表变化，无需多敲一个字符。
+- 面板复用 `GET /plugins` 的安装版本与 enabled/error 状态，并独立显示会话实际返回的四个核心 Skill 名称及 `/skill:<name>` 用法。Skill DTO 不公开 plugin id，真实插件 Skill 的 source 是 `extra`，因此不以假设的 `source: plugin` 过滤。元数据失败不使开关失败，也不捏造版本或技能。
+- 独立 review 复现两处 P2：重连 metadata 请求被 flags-only 请求替代后丢失 sidecar 补读，以及 `/skill:aitp` 前缀暂时无匹配后无法随异步列表恢复。修复采用跨 metadata 请求的 pending recovery 标记，并区分菜单显式 dismiss 与零匹配；五个新增回归先复现失败，再修至通过。metadata 回归覆盖最新请求失败后恢复、确认 v1/v2，以及实际 facade 的 `onConnectionChange` → `configChanged`、无 resync 路径。独立复审已确认两处问题修复，重跑 workspace-state、slash-menu 和 event-batcher 共 220 tests 通过，限定范围内未发现新的可操作回归；复审未重跑全量测试或浏览器，不将其描述为额外端到端验收。
+- 最新 Web 全套 43 files / 1130 tests、typecheck 通过；定向回归覆盖 HTTP/WS/reconnect、慢响应、session/backend 隔离、metadata 错误，以及重连后 draft/legacy 技能菜单恢复；check:style 为既有 baseline warnings，无本轮新增规则违规。双语文档构建通过。
+- 实际 Playwright 使用隔离 home、真实 kap-server、从该上游归档安装的插件及生产 App 源码：off 菜单不含四个 Skill → 输入 `/research on` 后四个出现 → 面板显示真实版本；其他客户端通过 REST 切换后由 WS 更新菜单；`/research off` 隐藏。额外验证前缀「有匹配 → 空 → 返回」和「初始为空 → 返回」无需补敲字符，Escape 显式关闭后刷新不重开。light/dark、390px 窄屏、hover/focus、Escape 焦点恢复与无水平溢出通过。零模型请求，工作目录无知识文件新增；这不是科研／模型能力验收。metadata 请求替代的确定性复现来自真实 composable/facade 加网络边界 mock，不声称该时序已在真实网络浏览器中受控复现。
+- 最新证据保存在本地 `.tmp/research-web-7Ub3qW/`（`report.json`、`prefix-restored.png`、菜单和桌面／手机截图），此前 `.tmp/research-web-vLxC9O/` 保留；脚本 `.tmp/research-web-verification.ts` 可复跑。另有独立组件 fixture `.tmp/hakimi-research-panel-C0J2L9/` 验证模拟长版本字符串换行、中英文布局和面板焦点／收展／预览边界，不冒充后端验证。临时夹具不纳入发布源码，也未访问真实用户会话。此前“完整 server+browser 未实测”的历史记录不改写，本轮只补齐上述有限交互链路。
+- P2 修复后的 canonical `build:web-assets`、`-- --check` 与最终 provenance 检查全部通过：521 files，source `727c65404712ec1ba2158a970deddf28d68378042e506e9466caf8928b7c8edd`，recipe `54b188ec0ba616ecb33cc91743bfbe44ca6af65365e1406444679ea56d49d255`。此前并发修改导致的 source drift 已通过统一重建收口；既有 `.dist-web-staging-HV4OTh` 保留不动。构建包含当前并发 Web 修改，不应拆分或手改资产。`@changesets/read` 已解析并确认本条 changeset 为 CLI patch；普通 `changeset status` 无法确定与 `main` 的分叉点，`--since=HEAD` 又不计入未跟踪的 changeset，故完整 release 状态需在真实提交基线上复验，未为此 stage 文件。未执行 Git 写操作或发布。
+
+## 2026-09-15 官方 AITP 插件 1.1.0（`aitp`）：无 CLI、无账本 {#aitp-plugin-1-1-0-20260915}
+
+**宿主适配层更新；未声称正式发布。** 官方 AITP 发布 **1.1.0**，manifest `name`（即 plugin id）为 **`aitp`**，并移除了 CLI、ledger、session hook 与 native adapter。本地已作为 managed plugin 安装并启用，旧 `aitp-research-protocol` 条目保留但 `enabled=false`；本轮未再改动用户级安装。上游为下载的源码归档（固定 commit `0f6dc4cdea09106a46d53cf6355b09a924d8e21b`，manifest build `1.1.0+codex.20260914182315`），不是 Git checkout 或 release tag。
+
+### 本次改动
+
+- `packages/agent-core-v2/src/features/aitpResearch/`：新增 `aitpPlugin.ts` 作为官方插件 id 的唯一来源；`aitpResearchFeature.ts`、`mode/agentAitpModeService.ts`、`injection/aitpSkillVisibilityInjection.ts` 改为按 `aitp` 门控可见性、`skillsAvailable` 与动态清单；`injection/aitpResearchInjection.ts`、`tools/aitpModeToolsImpl.ts`、`mode/retiredResearch.ts` 去除 CLI fallback / CLI health / ledger 指令，改述 `aitp-memory` → `aitp-research` / `aitp-writing` / `aitp-distill`。未挂载的历史 adapter 与 `aitpResearchOps` 未改动。
+- 文案：`apps/kimi-code/src/tui/commands/research.ts`、`components/chrome/research-board.ts`；`apps/kimi-web/src/i18n/locales/{en,zh}/research.ts`；`packages/kap-server/src/routes/research.ts` 与 `packages/protocol/src/research.ts` 的 "not CLI health" 描述。
+- 文档：根 `README.md` / `README.zh-CN.md`、`docs/{en,zh}/guides/research-mode.md` 按 1.1.0 现状重写；`docs/{en,zh}/reference/{slash-commands,server-api}.md`、`docs/{en,zh}/release-notes/breaking-changes.md`、`docs/{en,zh}/guides/interaction.md` 的当前行为描述同步；`AGENTS.md` 与 `packages/agent-core-v2/AGENTS.md` 的过时 AITP CLI 规则更新。`.changeset/research-official-aitp-plugin.md` 记录 CLI patch。
+
+### 验证记录（2026-09-15 本地，不替代待提交版本 CI）
+
+- 定向测试：`agent-core-v2` 的 `test/features/aitpResearch`、`test/app/skillCatalog`、`test/agent/skillVisibility` 共 17 files / 333 tests 通过；`kap-server` 的 `test/skills.test.ts` 19 tests 通过（真实安装 manifest `name: aitp` 的插件并断言 mode off 时 Skill 隐藏）；CLI 的 `test/tui/commands/research.test.ts`、`test/tui/components/chrome/research-board.test.ts`、`test/tui/commands/registry.test.ts` 40 tests 通过；Web `test/slash-menu.test.ts`、`test/workspace-state.test.ts` 160 tests 通过。
+- 覆盖点：四个官方 Skill 的可见性/`skillsAvailable`、on/off/status 幂等、冷恢复、插件缺失、旧 id 视为普通插件、无额外 I/O，以及普通插件不受影响。
+- typecheck：`agent-core-v2`、`kap-server`、`@bhjia-phys/hakimi`（CLI）、`@bhjia-phys/hakimi-web` 均通过；`agent-core-v2` import-boundary 检查 OK（1314 files）。
+- 构建：`pnpm run build:packages`（含 node-sdk DTS/api-extractor）与 `pnpm -C apps/kimi-code build`（`dist/main.mjs` 19.61 MB、`dist/search-worker.mjs`）成功；CLI 构建内嵌的 Web 资产 provenance 校验通过。
+- Web 资产：`pnpm run build:web-assets` 生成 521 files（source `b08532471189488547155ea4895cda6b5e710c2f0493e2579c51d11aa3f6e2aa`，recipe `54b188ec0ba616ecb33cc91743bfbe44ca6af65365e1406444679ea56d49d255`），`-- --check` 复现通过。
+- 无模型 smoke（`.tmp/aitp-new-plugin-smoke/`，独立隔离 `HAKIMI_HOME`，真实 kap-server REST + 从本地 managed 副本安装真实插件，零 model request）：10/10 通过——mode off 时官方四个 Skill 隐藏、旧 `aitp-research-protocol` 插件的 `using-aitp`/`distilling-methods` 照常可见；`enter_mode` 后正好四个官方 Skill 可见且快照 `{enabled:true, skillsAvailable:true}`；工作区无知识/记忆文件新增，隔离 home 无 `.aitp` store；`exit_mode` 后重新隐藏。
+- 未执行：version/tag/publish、Git 写操作；本机没有 AITP Git checkout，插件来自源码归档，且 1.1.0 无 CLI，因此没有可执行的 `aitp --help` 核验。
+
+### 剩余边界
+
+- [ ] 已在运行的进程需自行重启才会加载新构建；未强行重启任何会话。
+- [ ] 完整 server+browser 端到端仍无实测。
+- [ ] 上游交接目录 `docs/hakimi/` 在 1.1.0 tree 中已不存在，故本轮无上游侧交接文档可同步；旧协议文档不重建。
+
+以下 2026-09-13 各节及其后的历史记录原文保留，仅供追溯；0.10.0 / CLI / ledger / `.aitp/` store 与仓库边界派生补丁的描述不再代表当前集成。
+
 ## 2026-09-13 仓库边界 followup：一研究线一 Git 仓库 {#research-repo-boundary-20260913}
 
 **本地派生补丁，非上游 release；本节为后续补记。下面 memory-lite 0.10 的交付数据仍是此前时点的记录，历史原文不改。**

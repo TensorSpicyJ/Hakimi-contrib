@@ -27,7 +27,11 @@
  * fallback for an unverifiable OpenAI encrypted-reasoning rejection: they
  * drop only the `encrypted` field of wire `think` parts — keeping the
  * visible thinking summary and every other part — so the provider receives
- * `summary_text` without the stale `encrypted_content`. All fallbacks are
+ * `summary_text` without the stale `encrypted_content`. Dropping the
+ * encryption also drops the part's Responses reasoning-item identity: a
+ * degraded summary is replayed as an unsigned reasoning block, never as a
+ * server-minted `rs_…` id whose encrypted payload is gone. Message-item
+ * identity and phase on text parts are untouched. All fallbacks are
  * read-side only — the history keeps its original content.
  */
 

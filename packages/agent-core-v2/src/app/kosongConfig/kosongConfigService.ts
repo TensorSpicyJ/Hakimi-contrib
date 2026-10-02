@@ -2,7 +2,9 @@
  * `kosongConfig` domain — `IKosongConfigService` implementation.
  *
  * The two-way persistence bridge between `IConfigService` and kosong's
- * in-memory provider/model registries.
+ * in-memory provider/model registries. Before initial hydration, adds missing
+ * built-in managed model aliases through the serialized user-config writer,
+ * without authentication, network access, or replacing existing preferences.
  *
  * Both sync directions are idempotent by deep comparison, which is what
  * makes the loop terminate without any reentrancy flags:
@@ -26,6 +28,11 @@
  * retried with backoff before the failure is logged; the mutation's caller is
  * never rejected (the in-memory change stands either way).
  */
+
+import {
+  getMissingOpenAICodexModels,
+  type ManagedKimiConfigShape,
+} from '@moonshot-ai/kimi-code-oauth';
 
 import { Disposable } from '#/_base/di/lifecycle';
 import { LifecycleScope } from '#/app/scopes';
@@ -74,6 +81,19 @@ export class KosongConfigService extends Disposable implements IKosongConfigServ
 
   private async initialize(): Promise<void> {
     await this.config.ready;
+    try {
+      await this.config.replaceSections((current) => {
+        const providers = (current[PROVIDERS_SECTION] ?? {}) as ManagedKimiConfigShape['providers'];
+        const models = (current[MODELS_SECTION] ?? {}) as ModelsSection;
+        const missing = getMissingOpenAICodexModels({ providers, models });
+        if (Object.keys(missing).length === 0) return {};
+        return { [MODELS_SECTION]: { ...models, ...missing } };
+      });
+    } catch (error) {
+      this.log.warn('built-in model catalog sync failed', {
+        error: describeUnknownError(error),
+      });
+    }
     this.providers.loadAll(
       this.config.get<ProvidersSection>(PROVIDERS_SECTION) ?? {},
       this.config.get<string>(DEFAULT_PROVIDER_SECTION),

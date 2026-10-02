@@ -8,6 +8,7 @@
  *   GET  /config/subagent-preset/status     — latest process-local automatic evaluation
  *   POST /config                            — update configuration (merge semantics)
  *   POST /config/subagent-preset/activate   — validate and serialize manual routing changes
+ *   POST /config/subagent-preset/auto       — unlock automatic mode and evaluate fresh evidence
  *
  * **Wire fidelity**: reuses the local `protocol/rest-config` schemas and explicit
  * projectors. v2's `IConfigService` is a per-domain registry (`get(domain)` /
@@ -31,10 +32,22 @@
 
 import {
   IAutoSubagentPresetService,
+  IAgentProfileService,
   IConfigService,
+  IModelCatalog,
   ISubagentPresetActivationService,
+  ensureMainAgent,
+  resumeSessionById,
   type Scope,
 } from '@moonshot-ai/agent-core-v2';
+import { IProtocolAdapterRegistry } from '@moonshot-ai/agent-core-v2/kosong/protocol/protocol';
+import {
+  drivesThinkingThroughTraits,
+  requiresStrictThinkingValidation,
+  resolveForcedThinkingEffort,
+  resolveThinkingEffortForModel,
+  type ThinkingConfig,
+} from '@moonshot-ai/agent-core-v2/kosong/model/thinking';
 
 import { errEnvelope, okEnvelope } from '../envelope';
 import { requestLog } from '../lib/requestLog';
@@ -46,6 +59,8 @@ import {
   projectSubagentPresetStatus,
   subagentPresetActivationRequestSchema,
   subagentPresetActivationResponseSchema,
+  subagentPresetAutoRequestSchema,
+  subagentPresetAutoResponseSchema,
   subagentPresetStatusResponseSchema,
 } from '../protocol/rest-config';
 import type { ConfigResponse } from '../protocol/rest-config';
@@ -151,6 +166,76 @@ export function registerConfigRoutes(app: ConfigRouteHost, core: Scope): void {
     activatePresetRoute.path,
     activatePresetRoute.options,
     activatePresetRoute.handler as Parameters<ConfigRouteHost['post']>[2],
+  );
+
+  const autoPresetRoute = defineRoute(
+    {
+      method: 'POST',
+      path: '/config/subagent-preset/auto',
+      body: subagentPresetAutoRequestSchema,
+      success: { data: subagentPresetAutoResponseSchema },
+      errors: {
+        [ErrorCode.VALIDATION_FAILED]: {},
+        [ErrorCode.SESSION_NOT_FOUND]: {},
+      },
+      description: 'Enable automatic preset selection and immediately re-evaluate all roles with fresh resource evidence',
+      tags: ['config'],
+    },
+    async (req, reply) => {
+      const manualRevision = core.accessor.get(ISubagentPresetActivationService).manualRevision;
+      const { session_id } = subagentPresetAutoRequestSchema.parse(req.body);
+      const config = core.accessor.get(IConfigService);
+      await config.ready;
+      let modelAlias = '';
+      let thinkingLevel = 'off';
+      if (session_id !== undefined) {
+        const session = await resumeSessionById(core.accessor, session_id);
+        if (session === undefined) {
+          reply.send(errEnvelope(ErrorCode.SESSION_NOT_FOUND, 'Session not found', req.id));
+          return;
+        }
+        const main = await ensureMainAgent(session);
+        const profile = main.accessor.get(IAgentProfileService);
+        modelAlias = profile.getModel();
+        if (profile.hasModel()) thinkingLevel = profile.getEffectiveThinkingLevel();
+      } else {
+        modelAlias = config.get<string | undefined>('defaultModel') ?? '';
+        if (modelAlias !== '') {
+          try {
+            const model = core.accessor.get(IModelCatalog).get(modelAlias);
+            const thinking = config.get<ThinkingConfig | undefined>('thinking');
+            const baseThinking = resolveThinkingEffortForModel(
+              undefined,
+              thinking,
+              model,
+              requiresStrictThinkingValidation(
+                core.accessor.get(IProtocolAdapterRegistry), model.protocol, model.providerType,
+              ),
+            );
+            thinkingLevel = resolveForcedThinkingEffort(
+              thinking?.forcedEffort, baseThinking, drivesThinkingThroughTraits(model.providerType),
+            ) ?? baseThinking;
+          } catch {
+            modelAlias = '';
+          }
+        }
+      }
+      const evaluation = await core.accessor.get(IAutoSubagentPresetService).selectAutomatically(
+        { route: 'agent', caller: { modelAlias, thinkingLevel } },
+        { sessionId: session_id, manualRevision },
+      );
+      const status = projectSubagentPresetStatus(evaluation.status);
+      if (status === undefined) {
+        reply.send(errEnvelope(ErrorCode.VALIDATION_FAILED, 'Automatic preset evaluation returned no status', req.id));
+        return;
+      }
+      reply.send(okEnvelope({ config: toConfigResponse(config.getAll()), status }, req.id));
+    },
+  );
+  app.post(
+    autoPresetRoute.path,
+    autoPresetRoute.options,
+    autoPresetRoute.handler as Parameters<ConfigRouteHost['post']>[2],
   );
 
   const setRoute = defineRoute(
@@ -439,7 +524,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * the list (a provider literally named `models`) must not keep its own
  * children preserved.
  */
-const MAP_VALUED_CONFIG_KEYS = new Set(['providers', 'models', 'experimental', 'raw']);
+const MAP_VALUED_CONFIG_KEYS = new Set([
+  'providers', 'models', 'experimental', 'raw', 'role_weights', 'roleWeights',
+]);
 
 function convertKeysSnakeToCamel(obj: unknown, preserveKeys = false): unknown {
   if (Array.isArray(obj)) {

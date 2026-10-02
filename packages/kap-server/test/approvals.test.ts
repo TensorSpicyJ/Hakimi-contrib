@@ -1,9 +1,12 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  IEventService,
   ISessionApprovalService,
+  ISessionContext,
+  ISessionManager,
   getLiveSessionById,
   resumeSessionById,
 } from '@moonshot-ai/agent-core-v2';
@@ -120,6 +123,41 @@ describe('server-v2 /api/v1/sessions/{sid}/approvals', () => {
     });
     return parked.id;
   }
+
+  it('serves the pending approval of a session created outside the REST routes', async () => {
+    // The cross-project handoff creates its target through `ISessionManager`
+    // directly, so no REST create route runs. The server must still project the
+    // creation and answer the target's first-turn approval like any other
+    // session's — that is what makes "open B and approve" work.
+    const targetDir = join(home as string, 'other-project');
+    await mkdir(targetDir, { recursive: true });
+    const created: string[] = [];
+    const subscription = server!.core.accessor.get(IEventService).subscribe((event) => {
+      if (event.type === 'event.session.created') {
+        created.push((event.payload as { sessionId: string }).sessionId);
+      }
+    });
+    const handle = await server!.core.accessor.get(ISessionManager).create({
+      workDir: targetDir,
+    });
+    subscription.dispose();
+    const targetId = handle.accessor.get(ISessionContext).sessionId;
+    expect(created).toEqual([targetId]);
+
+    const approvalId = enqueueApproval(targetId, 'tc-handoff');
+    const listed = await getJson<ListWire>(
+      `/api/v1/sessions/${targetId}/approvals?status=pending`,
+    );
+    expect(listed.body.code).toBe(0);
+    expect(listed.body.data.items.map((item) => item.approval_id)).toEqual([approvalId]);
+
+    const resolved = await postJson<ResolveWire>(
+      `/api/v1/sessions/${targetId}/approvals/${approvalId}`,
+      { decision: 'approved', scope: 'session' },
+    );
+    expect(resolved.body.code).toBe(0);
+    expect(resolved.body.data.resolved).toBe(true);
+  });
 
   it('lists a pending approval projected onto the wire shape', async () => {
     const sid = await createSession();

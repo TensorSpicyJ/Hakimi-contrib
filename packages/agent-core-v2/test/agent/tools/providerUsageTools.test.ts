@@ -156,9 +156,14 @@ class LayeredStubConfigService implements IConfigService {
     return Promise.resolve();
   }
 
-  replaceSections(sections: Readonly<Record<string, unknown>>): Promise<void> {
+  replaceSections(
+    update: Parameters<IConfigService['replaceSections']>[0],
+    target: ConfigTarget = ConfigTarget.User,
+  ): Promise<void> {
+    const layer = target === ConfigTarget.User ? this.user : this.memory;
+    const sections = typeof update === 'function' ? update(Object.fromEntries(layer)) : update;
     for (const [domain, value] of Object.entries(sections)) {
-      void this.replace(domain, value);
+      void this.replace(domain, value, target);
     }
     return Promise.resolve();
   }
@@ -394,6 +399,42 @@ describe('SetSubagentPresetTool', () => {
     });
   });
 
+  it.each([
+    ['balanced', undefined],
+    ['kimi-heavy', undefined],
+    ['balanced', false],
+    ['kimi-heavy', false],
+    ['balanced', true],
+    ['kimi-heavy', true],
+  ] as const)('selects %s while preserving manualLock=%s in both config layers', async (preset, manualLock) => {
+    const config = new LayeredStubConfigService();
+    const autoPreset = { enabled: true, manualLock, quotaFloorPercent: 20 };
+    const memoryAutoPreset = { ...autoPreset, quotaFloorPercent: 30 };
+    await config.set(
+      SUBAGENT_SECTION,
+      { ...SUBAGENT_SECTION_WITH_PRESETS, autoPreset },
+      ConfigTarget.User,
+    );
+    await config.set(
+      SUBAGENT_SECTION,
+      { ...SUBAGENT_SECTION_WITH_PRESETS, autoPreset: memoryAutoPreset },
+      ConfigTarget.Memory,
+    );
+    const tool = createTool(config);
+    const execution = tool.resolveExecution({ preset });
+    if (execution.isError === true) throw new Error('execution should not be an error');
+
+    const result = await execution.execute({ turnId: 0, toolCallId: 'call_preset', signal });
+
+    expect(result.isError).toBeFalsy();
+    const { userValue, memoryValue } = config.inspect<SubagentConfig>(SUBAGENT_SECTION);
+    expect(userValue?.preset).toBe(preset);
+    expect(memoryValue?.preset).toBe(preset);
+    expect(userValue?.autoPreset).toEqual(autoPreset);
+    expect(memoryValue?.autoPreset).toEqual(memoryAutoPreset);
+    expect(config.get<SubagentConfig>(SUBAGENT_SECTION).autoPreset?.manualLock).toBe(manualLock);
+  });
+
   it('patches only the preset key into an existing print-mode memory overlay', async () => {
     const config = new LayeredStubConfigService();
     await config.set(SUBAGENT_SECTION, SUBAGENT_SECTION_WITH_PRESETS, ConfigTarget.User);
@@ -465,6 +506,116 @@ describe('SetSubagentPresetTool', () => {
     expect(result.isError).toBe(true);
     expect(result.output).toContain('ghost-model');
     expect(config.get<SubagentConfig>(SUBAGENT_SECTION).preset).toBe('balanced');
+  });
+});
+
+describe('evaluated preset activation boundary', () => {
+  function activation(config: IConfigService): ISubagentPresetActivationService {
+    const ix = new TestInstantiationService();
+    toolContainers.push(ix);
+    ix.stub(IConfigService, config);
+    ix.stub(IModelCatalog, stubModelCatalog(['known']));
+    ix.set(ISubagentPresetActivationService, new SyncDescriptor(SubagentPresetActivationService));
+    return ix.get(ISubagentPresetActivationService);
+  }
+
+  const section = {
+    preset: 'current',
+    agents: { coder: { model: 'known' }, explore: { model: 'missing-base' } },
+    presets: {
+      current: { coder: { model: 'known' } },
+      better: { coder: { model: 'known', thinkingEffort: 'high' }, unrelated: { model: 'missing' } },
+    },
+    autoPreset: { enabled: true, manualLock: false },
+  };
+
+  it('activates an evaluated partial preset in both layers without changing routes, main or lock', async () => {
+    const config = new LayeredStubConfigService();
+    await config.replace(SUBAGENT_SECTION, section);
+    await config.replace(SUBAGENT_SECTION, { ...section, timeoutMs: 1234 }, ConfigTarget.Memory);
+    await config.replace('defaultModel', 'main-model');
+    await config.replace('thinking', { effort: 'low' });
+    const writer = activation(config);
+    const result = await writer.runExclusive((transaction) => transaction.activateEvaluated('better'));
+    expect(result).toEqual({ kind: 'activated' });
+    expect(config.inspect<SubagentConfig>(SUBAGENT_SECTION).userValue).toEqual({ ...section, preset: 'better' });
+    expect(config.inspect<SubagentConfig>(SUBAGENT_SECTION).memoryValue).toEqual({ ...section, preset: 'better', timeoutMs: 1234 });
+    expect(config.get('defaultModel')).toBe('main-model');
+    expect(config.get('thinking')).toEqual({ effort: 'low' });
+    expect(writer.manualRevision).toBe(0);
+  });
+
+  it('keeps manual and ordinary transaction activation strict for missing native aliases', async () => {
+    const config = new StubConfigService({ subagent: section });
+    const writer = activation(config);
+    expect(await writer.activate('better')).toMatchObject({ kind: 'failed', commitStarted: false });
+    expect(await writer.runExclusive((transaction) => transaction.activate('better')))
+      .toMatchObject({ kind: 'failed', commitStarted: false });
+    expect(config.get<SubagentConfig>(SUBAGENT_SECTION)).toEqual(section);
+    expect(writer.manualRevision).toBe(0);
+  });
+
+  it.each(['missing', ''])('refuses an evaluated unknown preset %j without writing', async (preset) => {
+    const config = new StubConfigService({ subagent: section });
+    const writer = activation(config);
+    expect(await writer.runExclusive((transaction) => transaction.activateEvaluated(preset)))
+      .toMatchObject({ kind: 'failed', commitStarted: false });
+    expect(config.get<SubagentConfig>(SUBAGENT_SECTION)).toEqual(section);
+  });
+
+  it.each([
+    { coder: { model: '   ' } },
+    { coder: { thinkingEffort: '   ' } },
+    { coder: { model: 123 } },
+    { coder: { thinkingEffort: false } },
+    { main: { model: 'missing' } },
+  ])('refuses structurally invalid evaluated routes or unavailable main routes: %j', async (routes) => {
+    const config = new StubConfigService({ subagent: { ...section, presets: { better: routes } } });
+    const writer = activation(config);
+    expect(await writer.runExclusive((transaction) => transaction.activateEvaluated('better')))
+      .toMatchObject({ kind: 'failed', commitStarted: false });
+    expect(config.get<SubagentConfig>(SUBAGENT_SECTION).preset).toBe('current');
+  });
+
+  it('does not write an evaluated preset cancelled before commit starts', async () => {
+    const config = new StubConfigService({ subagent: section });
+    const writer = activation(config);
+    const controller = new AbortController();
+    controller.abort();
+    expect(await writer.runExclusive((transaction) => transaction.activateEvaluated('better', controller.signal)))
+      .toMatchObject({ kind: 'cancelled' });
+    expect(config.get<SubagentConfig>(SUBAGENT_SECTION).preset).toBe('current');
+  });
+
+  it('keeps the User commit when an evaluated Memory alignment fails', async () => {
+    const config = new LayeredStubConfigService();
+    await config.replace(SUBAGENT_SECTION, section);
+    await config.replace(SUBAGENT_SECTION, section, ConfigTarget.Memory);
+    const writer = activation(config);
+    const originalSet = config.set.bind(config);
+    vi.spyOn(config, 'set').mockImplementation(async (...args) => {
+      if (args[2] === ConfigTarget.Memory) throw new Error('overlay unavailable');
+      await originalSet(...args);
+    });
+    expect(await writer.runExclusive((transaction) => transaction.activateEvaluated('better')))
+      .toMatchObject({ kind: 'activated', warning: expect.stringContaining('Memory overlay') });
+    expect(config.inspect<SubagentConfig>(SUBAGENT_SECTION).userValue?.preset).toBe('better');
+    expect(writer.manualRevision).toBe(0);
+  });
+
+  it('reports activation rather than cancellation once the evaluated commit starts', async () => {
+    const config = new LayeredStubConfigService();
+    await config.replace(SUBAGENT_SECTION, section);
+    const writer = activation(config);
+    const controller = new AbortController();
+    const originalSet = config.set.bind(config);
+    vi.spyOn(config, 'set').mockImplementation(async (...args) => {
+      controller.abort();
+      await originalSet(...args);
+    });
+    expect(await writer.runExclusive((transaction) => transaction.activateEvaluated('better', controller.signal)))
+      .toEqual({ kind: 'activated' });
+    expect(config.get<SubagentConfig>(SUBAGENT_SECTION).preset).toBe('better');
   });
 });
 

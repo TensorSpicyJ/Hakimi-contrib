@@ -4,6 +4,21 @@
 
 与 MCP 工具相比，内置工具由运行时直接管理，生命周期与会话绑定，无需外部进程。两者都遵循统一的审批机制：**只读类工具**（如 `Read`、`Grep`、`Glob`）默认自动放行，**写入与执行类工具**（如 `Write`、`Edit`、`Bash`）默认需要用户审批。YOLO 模式下普通工具调用的审批会被跳过，但 Plan 模式下的退出审批不受影响。
 
+## 按需工具目录
+
+实验性的工具目录让较少使用的能力保持按需可用。在 `config.toml` 中启用：
+
+```toml
+[experimental]
+tool_catalog = true
+```
+
+也可以在启动 Hakimi 时设置 `KIMI_CODE_EXPERIMENTAL_TOOL_CATALOG=true`，默认关闭。常用的文件、搜索、Shell、提问和 Skill 工具仍可直接调用；`apply_patch` 在自身开关启用时也保持直接可用。其他内置工具和 MCP 工具先列出名称及简短用途，Agent 通过只读的 `select_tools` 加载完整定义后再调用。显式声明为延迟加载的用户工具也遵循这条路径，其他用户工具保持直接可用。
+
+可用工具或用途说明变化时，目录会随之更新；压缩移除目录公告后会重新发现。选择失败时，结果附带当前目录，帮助 Agent 从未知工具名或服务器断连中恢复。已断连的工具不会被视为加载成功；重连和权限变化都会按当前注册状态检查。目录只提供简短摘要，不重复完整参数定义。
+
+加载定义不等于授予执行权限：profile 限制、禁用工具、审批规则和 Plan 模式仍然生效。只要对应历史仍在，恢复会话后会保留已加载定义；撤销或压缩移除这段历史后，可重新选择工具。加载会改变工具表，可能降低提示词缓存的复用率。需要频繁切换多种工具的任务可能增加查询次数，建议先用代表性任务验证，再考虑默认开启。与原生 `tool-select` 同时启用且目录加载工具被允许时，本模式优先。
+
 ## 文件类
 
 文件类工具负责读取、写入、搜索本地文件系统，是代码分析和修改任务的基础工具。
@@ -13,6 +28,7 @@
 | `Read` | 自动放行 | 读取文本文件内容 |
 | `Write` | 需审批 | 创建或覆盖文件 |
 | `Edit` | 需审批 | 精确字符串替换 |
+| `apply_patch` | 需审批 | 批量添加、修改或删除文件；实验性工具，默认关闭 |
 | `Grep` | 自动放行 | 基于 ripgrep 的全文搜索 |
 | `Glob` | 自动放行 | 按 glob 模式查找文件 |
 | `ReadMediaFile` | 自动放行 | 读取图片或视频文件 |
@@ -22,6 +38,23 @@
 **`Write`** 接受 `path`、`content` 和可选的 `mode`（`overwrite` 或 `append`，默认覆盖）。缺失的父目录会自动创建；`append` 模式将内容追加到文件末尾，不自动添加换行。
 
 **`Edit`** 接受 `path`、`old_string`（要替换的精确文本）和 `new_string`（替换后的文本）。默认只替换唯一一处匹配，若文件中存在多处相同内容会报错并提示使用 `replace_all: true`。`old_string` 与 `new_string` 不能相同。
+
+**`apply_patch`** 接受补丁文本 `input`，支持 `Add File`、`Update File` 和 `Delete File` 段落。一次调用可以修改多个文件，也可以对同一文件应用多处修改。该工具为实验性功能，默认关闭。启动 Hakimi 时可以这样启用：
+
+```sh
+KIMI_CODE_EXPERIMENTAL_APPLY_PATCH=true hakimi
+```
+
+也可以在 [`config.toml`](../configuration/config-files.md#experimental) 中添加：
+
+```toml
+[experimental]
+apply_patch = true
+```
+
+写入前，工具会检查所有目标文件和补丁上下文；这一阶段发现的语法、路径或匹配错误不会修改任何文件。跨文件写入不是原子操作（不会保证全部成功或全部回滚）：文件系统错误可能留下部分已应用的修改，结果会列出已完成、失败和未尝试的文件。重试前应先检查这些结果。
+
+`Add File` 不会覆盖已有路径。不支持移动文件、符号链接路径或修改混合换行符文件；已有文件若统一使用 LF 或 CRLF，会保留原换行风格。在 [Plan 模式](#plan-模式) 下，补丁中的所有文件都必须是当前计划文件；只要包含其他文件，整个调用就会在执行前被拒绝。
 
 **`Grep`** 调用 ripgrep 搜索文件内容，支持正则表达式（`pattern`）、搜索路径（`path`）、文件类型过滤（`type`，如 `ts`、`py`）、glob 过滤（`glob`）和输出模式（`output_mode`：`files_with_matches` / `content` / `count_matches`，默认 `files_with_matches`）。`content` 模式支持上下文行（`-A`、`-B`、`-C`）、忽略大小写（`-i`）、行号（`-n`，默认 true）、跨行匹配（`multiline`）。所有模式支持 `offset` + `head_limit` 分页，`head_limit` 默认 250、传 0 表示不限。`.env`、私钥等敏感文件会被自动过滤；`include_ignored=true` 可搜索被 `.gitignore` 忽略的文件，但敏感文件仍保持过滤。
 
@@ -64,7 +97,7 @@
 | `EnterPlanMode` | 自动放行 | 进入 Plan 模式 |
 | `ExitPlanMode` | 自动放行（需用户确认计划） | 退出 Plan 模式并提交计划 |
 
-Plan 模式是一种受约束的工作状态：进入后 `Write` 与 `Edit` 只允许写入当前的计划文件，`TaskStop` 被完全拦截。其余工具（包括 `Bash`）仍按当前权限规则处理。
+Plan 模式是一种受约束的工作状态：进入后 `Write`、`Edit` 和已启用的 `apply_patch` 只允许写入当前的计划文件。补丁只要同时包含其他文件，就会被拒绝。`TaskStop`、`CronCreate`、`CronDelete` 和 `StartSession` 被完全拦截，不能借计划阶段在另一个会话启动任务。其他工具（包括 `Bash`）仍按当前权限规则处理。
 
 **`EnterPlanMode`** 不接受任何参数，进入成功后返回工作流指引及计划文件路径。
 
@@ -96,6 +129,18 @@ Plan 模式是一种受约束的工作状态：进入后 `Write` 与 `Edit` 只�
 **`AskUserQuestion`** 以结构化多选题的形式向用户提问，适用于需要消歧或选择方案的场景。`questions` 参数接受 1–4 道题，每道题需提供 `question`（以 `?` 结尾）、`options`（2–4 个选项，每项含 `label` 和 `description`）以及可选的 `header`（最多 12 字符）和 `multi_select`（默认 false）。系统自动附加"其他"选项。`background` 为 true 时启动后台问题任务并立即返回任务 ID。宿主未实现交互式提问能力时返回失败提示，Agent 应改为在文本回复中直接提问。
 
 **`Skill`** 允许 Agent 主动调用已注册的 inline 类型 Skill。接受 `skill`（Skill 名称）和可选的 `args`（附加参数文本）。只有 `type = "inline"` 的 Skill 能通过此工具调用；`disableModelInvocation: true` 的 Skill 会被拒绝。嵌套调用深度上限 3 层。Skill 体系细节见 [Agent Skills](../customization/skills.md)。
+
+## 跨项目会话
+
+| 工具 | 默认审批 | 说明 |
+| --- | --- | --- |
+| `StartSession` | 需审批 | 在另一个项目创建独立会话并提交首条任务 |
+
+**`StartSession`** 接受 `work_dir`（宿主机器上已有项目目录的绝对路径）、`prompt`（自包含的任务说明）和可选的 `title`。仅 main agent 可用，在能够呈现目标会话交互请求的宿主中默认开启。Agent 可以主动提出交接建议，但创建前必须先征求你的确认；你已明确要求创建该会话时，不重复询问。正常工具审批规则仍然适用。如需关闭，在 `[experimental]` 下设置 `cross_project_sessions = false`。Plan 模式会拦截该工具，不受权限模式影响。目标项目必须已受信任；工具不会自行授予信任。
+
+新会话使用自身项目的指令和正常新会话的默认设置，不复制来源会话的历史、临时目录访问权限、权限覆盖或 subagent preset。结果包含会话 ID、提交后产生的 prompt ID 和真实状态：`pending`、`running`、`completed`、`blocked`、`failed` 或 `aborted`。创建会话不代表任务已经完成。启动失败会保留会话供检查，不会自动删除或重新创建。
+
+与 `Agent` 不同，它创建的是可以单独访问的会话，不是 subagent，也不是 `TaskList` 中的条目。使用方式与查看目标会话的方法见[跨项目交接任务](../guides/sessions.md#跨项目交接任务)。
 
 ## 后台任务
 
@@ -144,7 +189,7 @@ Plan 模式是一种受约束的工作状态：进入后 `Write` 与 `Edit` 只�
 
 启用实验性的 `deepseek_usage` 标志后，`GetProviderUsage` 还会包含官方 DeepSeek 供应商。其 `meteredUsage` 返回本地记录的当日、当月 token 和人民币估算费用，并单独查询官方账户余额。这些数字不是剩余额度百分比，也不是完整账户账单；启用后才开始记录，缺失用量或价格时会标记不完整。余额查询失败不会丢弃本地统计。详见 [DeepSeek 配置](../configuration/providers.md#deepseek)。
 
-**`SetSubagentPreset`** 激活一个已配置的路由预设，使下一次 [subagent 模型/精力解析](../configuration/config-files.md#subagent) 立即使用该预设的路由。参数 `preset` 传入 `[subagent.presets]` 中的名称；工具会先校验 preset 存在、每条路由引用的模型别名可解析，再持久化 `[subagent].preset`。它不会修改 main model、default model 或 thinking 配置，不会重新加载会话，成功时返回 `main_model_changed: false`。变更会影响后续新的 `Agent`、`AgentSwarm` 和 Tower 派生，以及允许重绑定的 `Agent` 与 `AgentSwarm` resume；保留 binding 的 profile 不受影响。默认需要审批，如需让本工具自动执行，请在[审批规则](../configuration/config-files.md#permission)中显式放行。引擎的实验性自动切换 preset 功能（见[自动切换 preset](../configuration/config-files.md#自动切换-preset)）是另一套机制：它评估同一组 Agent、AgentSwarm 与 Tower 路由，不经过本工具激活 preset，也从不产生审批请求。
+**`SetSubagentPreset`** 激活一个已配置的路由预设，使下一次 [subagent 模型/精力解析](../configuration/config-files.md#subagent) 立即使用该预设的路由。参数 `preset` 传入 `[subagent.presets]` 中的名称；工具会先校验 preset 存在、每条路由引用的模型别名可解析，再持久化 `[subagent].preset`，但不改变手动锁。已启用且未锁定的自动切换会继续生效，已有手动锁则保持不变。如需明确锁定某个 preset，请在 Hakimi Web 或 TUI `/preset` 菜单中选择它。它不会修改 main model、default model 或 thinking 配置，不会重新加载会话，成功时返回 `main_model_changed: false`。变更会影响后续新的 `Agent`、`AgentSwarm` 和 Tower 派生，以及允许重绑定的 `Agent` 与 `AgentSwarm` resume；保留 binding 的 profile 不受影响。默认需要审批，如需让本工具自动执行，请在[审批规则](../configuration/config-files.md#permission)中显式放行。引擎的实验性自动切换 preset 功能（见[自动切换 preset](../configuration/config-files.md#自动切换-preset)）是另一套机制：它评估同一组 Agent、AgentSwarm 与 Tower 路由，不经过本工具激活 preset，也从不产生审批请求。
 
 ## 下一步
 

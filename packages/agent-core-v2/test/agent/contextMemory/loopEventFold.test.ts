@@ -352,4 +352,45 @@ describe('loop-event fold parity', () => {
 
     expect(folded).toEqual(baseline);
   });
+
+  it('keeps Responses item identity on a folded content part', () => {
+    context.appendLoopEvent({ type: 'step.begin', uuid: 's4' });
+    context.appendLoopEvent({
+      type: 'content.part',
+      stepUuid: 's4',
+      part: {
+        type: 'think',
+        think: 'why',
+        encrypted: 'enc-1',
+        openaiResponses: { itemId: 'rs_1' },
+      },
+    });
+    context.appendLoopEvent({
+      type: 'content.part',
+      stepUuid: 's4',
+      part: { type: 'text', text: 'answer', openaiResponses: { itemId: 'msg_1', phase: 'final_answer' } },
+    });
+    context.appendLoopEvent({ type: 'step.end', uuid: 's4' });
+
+    expect(context.get()).toEqual([
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'think',
+            think: 'why',
+            encrypted: 'enc-1',
+            openaiResponses: { itemId: 'rs_1' },
+          },
+          {
+            type: 'text',
+            text: 'answer',
+            openaiResponses: { itemId: 'msg_1', phase: 'final_answer' },
+          },
+        ],
+        toolCalls: [],
+        partial: undefined,
+      },
+    ]);
+  });
 });

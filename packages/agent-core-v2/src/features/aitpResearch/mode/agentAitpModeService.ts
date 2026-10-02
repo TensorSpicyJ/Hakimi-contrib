@@ -18,6 +18,7 @@ import { IWireService } from '#/wire/wire';
 import { MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { AitpModeModel } from '../aitpResearchOps';
+import { AITP_PLUGIN_ID } from '../aitpPlugin';
 import { AitpResearchError, AitpResearchErrors } from '../errors';
 import { retiredResearchOperation } from './retiredResearch';
 import { ResearchModeModel, researchModeSetEnabled } from './researchModeOps';
@@ -72,7 +73,7 @@ export class AgentAitpModeService extends Service implements IAgentAitpModeServi
     return {
       enabled: this.isActive,
       skillsAvailable: this.skills.catalog.getModelSkillListing(
-        (skill) => skill.plugin?.id === 'aitp-research-protocol',
+        (skill) => skill.plugin?.id === AITP_PLUGIN_ID,
       ).length > 0,
     };
   }

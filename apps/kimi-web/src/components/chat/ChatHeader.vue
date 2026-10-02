@@ -1,6 +1,6 @@
 <!-- apps/kimi-web/src/components/chat/ChatHeader.vue -->
 <!-- Thin context bar above the chat: workspace/session identity, direct remote
-     control, manual Preset routing, Git summary, connection status, and a ⋮
+     control, manual/automatic Preset routing, Git summary, connection status, and a ⋮
      session-actions menu. -->
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
@@ -16,10 +16,15 @@ import Menu from '../ui/Menu.vue';
 import MenuItem from '../ui/MenuItem.vue';
 import Tooltip from '../ui/Tooltip.vue';
 import Badge from '../ui/Badge.vue';
+import Spinner from '../ui/Spinner.vue';
 import GitSummaryCard from './GitSummaryCard.vue';
 import {
   formatSubagentPresetScore,
   subagentPresetCandidateSummary,
+  subagentPresetMenuRows,
+  subagentPresetParticipationLabel,
+  subagentPresetEvaluationScopeLabel,
+  subagentPresetTotals,
   subagentPresetCurrentEvaluation,
   subagentPresetLabel,
   subagentPresetReasonLabel,
@@ -39,11 +44,13 @@ const props = defineProps<{
   subagentPreset?: string;
   /** Sorted configured preset names offered by the routing menu. */
   subagentPresetNames?: string[];
+  subagentPresetCandidates?: string[];
   /** True while a preset/config write is in flight. */
   subagentPresetSaving?: boolean;
   /** `autoPreset.manualLock`: a manually activated preset paused automatic
    *  switching. Shown as a lock badge and a resume-auto menu action. */
   subagentPresetLocked?: boolean;
+  autoPresetControl?: { automatic: boolean; label: string; disabledReason?: string; feedback: string; pending: boolean };
   /** Latest process-global automatic routing evaluation, when supported. */
   autoSubagentPresetStatus?: AutoSubagentPresetStatus;
   branch?: string;
@@ -85,7 +92,7 @@ const presetEvaluationReason = computed(() => {
 const presetEvaluationMeta = computed(() => {
   const status = props.autoSubagentPresetStatus;
   if (status === undefined) return '';
-  const profile = status.profileName ?? status.route;
+  const profile = subagentPresetEvaluationScopeLabel(status, t);
   return t('header.subagentPresetEvaluatedFor', {
     profile,
     time: new Date(status.evaluatedAt).toLocaleString(locale.value),
@@ -112,26 +119,21 @@ function candidateForPreset(preset: string): AutoSubagentPresetCandidateScore | 
   return props.autoSubagentPresetStatus?.candidates.find((candidate) => candidate.preset === preset);
 }
 
-function hasPresetCandidate(preset: string): boolean {
-  return candidateForPreset(preset) !== undefined;
-}
+const presetRows = computed(() => subagentPresetMenuRows(
+  props.subagentPresetNames ?? [], props.autoSubagentPresetStatus, props.subagentPresetCandidates,
+));
 
 function presetCandidateSummaryFor(preset: string): string {
-  const candidate = candidateForPreset(preset);
-  return candidate === undefined
-    ? t('header.subagentPresetNoData')
-    : subagentPresetCandidateSummary(
-        candidate,
-        presetNow.value,
-        t as unknown as SubagentPresetT,
-      );
+  const row = presetRows.value.find((r) => r.preset === preset);
+  const candidate = row?.candidate;
+  return [subagentPresetParticipationLabel(row?.participating ?? true, t),
+    candidate === undefined ? t('header.subagentPresetNoData') : subagentPresetCandidateSummary(candidate, presetNow.value, t),
+    candidate && !candidate.roleScores ? t('header.subagentPresetLegacy') : '',
+  ].filter(Boolean).join(' · ');
 }
 
 function presetCandidateScoreFor(preset: string): string {
-  return formatSubagentPresetScore(
-    candidateForPreset(preset)?.score,
-    t as unknown as SubagentPresetT,
-  );
+  return subagentPresetTotals(candidateForPreset(preset), t);
 }
 
 function startPresetClock(): void {
@@ -154,7 +156,9 @@ const presetButtonAria = computed<string>(() => {
   const base = t('header.switchSubagentPreset', { preset: presetButtonLabel.value });
   return props.subagentPresetLocked
     ? `${base} · ${t('header.subagentPresetLocked')}`
-    : base;
+    : props.autoPresetControl?.automatic
+      ? `${base} · ${t('header.subagentPresetAutomatic')}`
+      : base;
 });
 const connectionText = computed<string>(() => {
   if (props.connection === 'connected') return t('status.connectionConnected');
@@ -355,19 +359,16 @@ function choosePreset(preset: string): void {
   trigger?.focus();
   if (
     props.subagentPresetSaving ||
+    (preset !== '' && !props.subagentPresetNames?.includes(preset)) ||
     (preset === normalizedPreset.value && props.subagentPresetLocked)
   ) return;
   presetFocusAfterSaveEl = trigger;
   emit('activatePreset', preset);
 }
 
-/** Resume-automatic action guarded like a preset switch: only a minimal
- *  `manualLock: false` patch; the active preset and the auto gates stay. */
+/** Keep the menu open so loading and every evaluation outcome stay visible. */
 function resumeAutoPreset(): void {
-  const trigger = presetButtonEl;
-  closeMenus();
-  trigger?.focus();
-  if (props.subagentPresetSaving) return;
+  if (props.subagentPresetSaving || props.autoPresetControl?.disabledReason) return;
   emit('resumeAutoPreset');
 }
 
@@ -610,6 +611,9 @@ function openRemoteShare(): void {
         >
           {{ t('header.subagentPresetLocked') }}
         </Badge>
+        <Badge v-else-if="autoPresetControl?.automatic" variant="info" size="sm">
+          {{ t('header.subagentPresetAutomatic') }}
+        </Badge>
         <Icon
           class="ch-preset-chevron"
           :class="{ open: presetMenuOpen }"
@@ -646,13 +650,13 @@ function openRemoteShare(): void {
         <MenuItem v-if="subagentPresetLocked || presetDiagnosticsVisible" separator />
         <MenuItem
           role="menuitemradio"
-          :aria-checked="normalizedPreset === ''"
-          :active="normalizedPreset === ''"
+          :aria-checked="normalizedPreset === '' && !autoPresetControl?.automatic"
+          :active="normalizedPreset === '' && !autoPresetControl?.automatic"
           :disabled="subagentPresetSaving"
           @click="choosePreset('')"
         >
           <span class="ch-preset-check">
-            <Icon v-if="normalizedPreset === ''" name="check" size="sm" />
+            <Icon v-if="normalizedPreset === '' && !autoPresetControl?.automatic" name="check" size="sm" />
           </span>
           <span class="ch-preset-name">{{ t('header.subagentPresetBaseOption') }}</span>
         </MenuItem>
@@ -660,36 +664,34 @@ function openRemoteShare(): void {
           v-for="preset in subagentPresetNames"
           :key="preset"
           role="menuitemradio"
-          :aria-checked="normalizedPreset === preset"
-          :active="normalizedPreset === preset"
+          :aria-checked="normalizedPreset === preset && !autoPresetControl?.automatic"
+          :active="normalizedPreset === preset && !autoPresetControl?.automatic"
           :disabled="subagentPresetSaving"
           @click="choosePreset(preset)"
         >
           <span class="ch-preset-check">
-            <Icon v-if="normalizedPreset === preset" name="check" size="sm" />
+            <Icon v-if="normalizedPreset === preset && !autoPresetControl?.automatic" name="check" size="sm" />
           </span>
           <span class="ch-preset-option">
             <span class="ch-preset-name">{{ preset }}</span>
-            <small v-if="presetDiagnosticsVisible && hasPresetCandidate(preset)">
-              {{ presetCandidateSummaryFor(preset) }}
-            </small>
-          </span>
-          <span
-            v-if="presetDiagnosticsVisible && hasPresetCandidate(preset)"
-            class="ch-preset-score"
-          >
-            {{ presetCandidateScoreFor(preset) }}
+            <small>{{ presetCandidateScoreFor(preset) }}</small>
+            <small>{{ presetCandidateSummaryFor(preset) }}</small>
           </span>
         </MenuItem>
-        <MenuItem v-if="subagentPresetLocked" separator />
+        <MenuItem separator />
         <MenuItem
-          v-if="subagentPresetLocked"
-          :disabled="subagentPresetSaving"
+          :disabled="subagentPresetSaving || !!autoPresetControl?.disabledReason"
+          :aria-busy="autoPresetControl?.pending"
           @click="resumeAutoPreset"
         >
-          <Icon name="refresh" size="sm" />
-          {{ t('header.subagentPresetResumeAuto') }}
+          <Spinner v-if="autoPresetControl?.pending" size="sm" />
+          <Icon v-else name="refresh" size="sm" />
+          {{ autoPresetControl?.pending ? t('header.subagentPresetAutoEvaluating') : autoPresetControl?.label ?? t('header.subagentPresetAutoSelect') }}
         </MenuItem>
+        <div class="ch-preset-diagnostics" role="status" aria-live="polite">
+          <span>{{ autoPresetControl?.disabledReason || t('header.subagentPresetAutoHint') }}</span>
+          <span v-if="autoPresetControl?.feedback">{{ autoPresetControl.feedback }}</span>
+        </div>
       </Menu>
       <!-- Compact Git summary. Detached HEAD remains visible; non-repositories do not. -->
       <GitSummaryCard
@@ -874,18 +876,11 @@ function openRemoteShare(): void {
   gap: var(--space-1);
 }
 .ch-preset-option small {
-  overflow: hidden;
   color: var(--color-text-muted);
   font-size: var(--text-xs);
-  line-height: var(--leading-tight);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ch-preset-score {
-  flex: none;
-  color: var(--color-text-muted);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* The conversation column can be much narrower than the viewport when side

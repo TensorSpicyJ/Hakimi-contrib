@@ -3,7 +3,8 @@
  *
  * Exercises the public profile/config surfaces and resolves the real
  * `ConfigService` with TOML document storage while stubbing host and model
- * boundaries. Run with `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
+ * boundaries, including multi-section factory updates and failed-save isolation.
+ * Run with `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
  * test/app/config/config.test.ts`.
  */
 
@@ -97,7 +98,9 @@ import {
   type SecondaryModelConfig,
   type SubagentConfig,
 } from '#/session/subagent/configSection';
-import { SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
+import { AUTO_SUBAGENT_PRESET_FLAG_ID, SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
+import { ISubagentPresetActivationService } from '#/session/subagent/presetActivation';
+import { SubagentPresetActivationService } from '#/session/subagent/presetActivationService';
 import {
   SERVICES_SECTION,
   WEB_FETCH_API_KEY_ENV,
@@ -1866,6 +1869,11 @@ describe('subagent config section', () => {
       refreshIntervalMs: 300_000,
       queryTimeoutMs: 5_000,
       allowExtraUsage: false,
+      deepseekAvoidPeakHours: true,
+      deepseekPeakPenalty: 60,
+      resetPriorityWindowMs: 259_200_000,
+      resetPriorityExponent: 3,
+      resetPriorityMaxBonus: 200,
     });
     expect(
       resolveSubagentAutoPresetConfig(config.get<SubagentConfig>(SUBAGENT_SECTION)),
@@ -1886,6 +1894,13 @@ describe('subagent config section', () => {
       refreshIntervalMs: 300_000,
       queryTimeoutMs: 5_000,
       allowExtraUsage: false,
+      roleWeights: undefined,
+      deepseekAvoidPeakHours: true,
+      deepseekPeakPolicy: 'block',
+      deepseekPeakPenalty: 60,
+      resetPriorityWindowMs: 259_200_000,
+      resetPriorityExponent: 3,
+      resetPriorityMaxBonus: 200,
     });
 
     disposables.dispose();
@@ -1948,8 +1963,44 @@ describe('subagent config section', () => {
     disposables.dispose();
   });
 
-  it('rejects invalid auto_preset weights, cooldowns, thresholds, and candidates', async () => {
+  it.each([
+    ['', 'block'],
+    ['deepseek_avoid_peak_hours = true', 'block'],
+    ['deepseek_avoid_peak_hours = false', 'off'],
+    ['deepseek_avoid_peak_hours = true\ndeepseek_peak_policy = "penalize"', 'penalize'],
+    ['deepseek_avoid_peak_hours = false\ndeepseek_peak_policy = "block"', 'block'],
+    ['deepseek_avoid_peak_hours = true\ndeepseek_peak_policy = "off"', 'off'],
+  ])('resolves the peak policy from legacy and explicit config: %s', async (fields, policy) => {
+    const { config, disposables } = await createConfig({}, `[subagent.auto_preset]\nenabled = true\n${fields}\n`);
+    try {
+      expect(resolveSubagentAutoPresetConfig(config.get<SubagentConfig>(SUBAGENT_SECTION))).toMatchObject({ deepseekPeakPolicy: policy, deepseekPeakPenalty: 60 });
+    } finally {
+      disposables.dispose();
+    }
+  });
+
+  it.each([0, 24, 1000])('round-trips explicit soft policy and a %s-point penalty without rewriting the legacy preference', async (penalty) => {
+    const { config, disposables, storage } = await createConfig({}, '[subagent.auto_preset]\ndeepseek_avoid_peak_hours = true\n');
+    try {
+      await config.set(SUBAGENT_SECTION, { autoPreset: { deepseekPeakPolicy: 'penalize', deepseekPeakPenalty: penalty } });
+      const onDisk = new TextDecoder().decode(await storage.read('', 'config.toml'));
+      expect(onDisk).toContain('deepseek_peak_policy = "penalize"');
+      expect(onDisk).toContain(`deepseek_peak_penalty = ${penalty}`);
+      expect(onDisk).toContain('deepseek_avoid_peak_hours = true');
+      await config.reload();
+      expect(resolveSubagentAutoPresetConfig(config.get<SubagentConfig>(SUBAGENT_SECTION))).toMatchObject({ deepseekPeakPolicy: 'penalize', deepseekPeakPenalty: penalty, deepseekAvoidPeakHours: true });
+    } finally {
+      disposables.dispose();
+    }
+  });
+
+  it('rejects invalid auto_preset weights, cooldowns, thresholds, candidates, and peak/reset priority knobs', async () => {
     const malformed = [
+      '[subagent.auto_preset]\ndeepseek_peak_policy = "unknown"\n',
+      '[subagent.auto_preset]\ndeepseek_peak_penalty = -1\n',
+      '[subagent.auto_preset]\ndeepseek_peak_penalty = 1001\n',
+      '[subagent.auto_preset]\ndeepseek_peak_penalty = inf\n',
+      '[subagent.auto_preset]\ndeepseek_peak_penalty = nan\n',
       '[subagent]\npreset = "balanced"\n\n[subagent.auto_preset]\nenabled = true\nquota_floor_percent = 120\n',
       '[subagent]\npreset = "balanced"\n\n[subagent.auto_preset]\nenabled = true\nlocal_usage_weight_percent = -1\n',
       '[subagent]\npreset = "balanced"\n\n[subagent.auto_preset]\nenabled = true\npriority_weight_percent = 101\n',
@@ -1960,6 +2011,12 @@ describe('subagent config section', () => {
       '[subagent]\npreset = "balanced"\n\n[subagent.auto_preset]\nenabled = true\ncircuit_breaker_cooldown_ms = -1\n',
       '[subagent]\npreset = "balanced"\n\n[subagent.auto_preset]\nenabled = true\ncandidates = ["kimi-heavy", "kimi-heavy"]\n',
       '[subagent]\npreset = "balanced"\n\n[subagent.auto_preset]\nenabled = true\ncandidates = ["", "balanced"]\n',
+      '[subagent]\npreset = "balanced"\n\n[subagent.auto_preset]\nenabled = true\nreset_priority_window_ms = 0\n',
+      '[subagent]\npreset = "balanced"\n\n[subagent.auto_preset]\nenabled = true\nreset_priority_window_ms = 2678400001\n',
+      '[subagent]\npreset = "balanced"\n\n[subagent.auto_preset]\nenabled = true\nreset_priority_exponent = 0.5\n',
+      '[subagent]\npreset = "balanced"\n\n[subagent.auto_preset]\nenabled = true\nreset_priority_exponent = 11\n',
+      '[subagent]\npreset = "balanced"\n\n[subagent.auto_preset]\nenabled = true\nreset_priority_max_bonus = -1\n',
+      '[subagent]\npreset = "balanced"\n\n[subagent.auto_preset]\nenabled = true\nreset_priority_max_bonus = 1001\n',
     ];
     for (const toml of malformed) {
       const { config, disposables } = await createConfig({}, toml);
@@ -2073,6 +2130,42 @@ describe('subagent config section', () => {
     } as unknown as IModelCatalog;
   }
 
+  it('persists an evaluated current-to-better switch with a missing unrelated native alias', async () => {
+    const { config, disposables } = await createConfig({}, [
+      'default_model = "main-model"',
+      '[thinking]', 'level = "low"',
+      '[subagent]', 'preset = "current"',
+      '[subagent.auto_preset]', 'enabled = true', 'manual_lock = false',
+      '[subagent.presets.current.coder]', 'model = "known"',
+      '[subagent.presets.better.coder]', 'model = "known"', 'thinking_effort = "high"',
+      '[subagent.presets.better.unrelated]', 'model = "missing"',
+    ].join('\n'));
+    try {
+      const ix = disposables.add(new TestInstantiationService());
+      const catalog = modelCatalogFor('known');
+      ix.stub(IConfigService, config);
+      ix.stub(IModelCatalog, catalog);
+      ix.set(ISubagentPresetActivationService, new SyncDescriptor(SubagentPresetActivationService));
+      const writer = ix.get(ISubagentPresetActivationService);
+      const before = config.get<SubagentConfig>(SUBAGENT_SECTION);
+      const mainBefore = config.get(DEFAULT_MODEL_SECTION);
+      const thinkingBefore = config.get(THINKING_SECTION);
+      expect(await writer.runExclusive((transaction) => transaction.activateEvaluated('better')))
+        .toEqual({ kind: 'activated' });
+      await config.reload();
+      const after = config.get<SubagentConfig>(SUBAGENT_SECTION);
+      expect(after).toEqual({ ...before, preset: 'better' });
+      expect(config.get(DEFAULT_MODEL_SECTION)).toEqual(mainBefore);
+      expect(config.get(THINKING_SECTION)).toEqual(thinkingBefore);
+      expect(writer.manualRevision).toBe(0);
+      expect(() => assertValidSubagentModelConfig(config, stubFlag(true), catalog)).not.toThrow();
+      expect(await writer.activate('better')).toMatchObject({ kind: 'failed', commitStarted: false });
+      expect(config.get<SubagentConfig>(SUBAGENT_SECTION)).toEqual(after);
+    } finally {
+      disposables.dispose();
+    }
+  });
+
   it('inherits the caller binding when no canonical or legacy route applies', async () => {
     const { config, disposables } = await createConfig({});
     const resolution = resolveSubagentBinding(config, secondaryModelFlags(), modelCatalogFor(), {
@@ -2089,6 +2182,55 @@ describe('subagent config section', () => {
       thinkingSource: 'caller',
     });
     disposables.dispose();
+  });
+
+  it.each([
+    { flag: true, enabled: true, manualLock: false, allowed: true },
+    { flag: false, enabled: true, manualLock: false, allowed: false },
+    { flag: true, enabled: false, manualLock: false, allowed: false },
+    { flag: true, enabled: true, manualLock: true, allowed: false },
+  ])('startup missing native routes obey automatic gates: %j', async ({ flag, enabled, manualLock, allowed }) => {
+    const { config, disposables } = await createConfig({});
+    try {
+      await config.set(SUBAGENT_SECTION, {
+        preset: 'partial', autoPreset: { enabled, manualLock },
+        agents: { explore: { model: 'missing-base' } },
+        presets: { partial: { coder: { model: 'known' }, unrelated: { model: 'missing-preset' } } },
+      });
+      const flags = stubFlag((id) => id === AUTO_SUBAGENT_PRESET_FLAG_ID && flag);
+      const validate = () => assertValidSubagentModelConfig(config, flags, modelCatalogFor('known'));
+      if (allowed) expect(validate).not.toThrow();
+      else expect(validate).toThrowError(expect.objectContaining({ code: ErrorCodes.CONFIG_INVALID }));
+      await config.replace(SUBAGENT_SECTION, {
+        ...config.get<SubagentConfig>(SUBAGENT_SECTION), agents: {},
+      });
+      if (allowed) expect(validate).not.toThrow();
+      else expect(validate).toThrowError(expect.objectContaining({ code: ErrorCodes.CONFIG_INVALID }));
+    } finally {
+      disposables.dispose();
+    }
+  });
+
+  it.each([
+    ['agents.main', 'model = "missing"'],
+    ['presets.partial.main', 'model = "missing"'],
+    ['agents.coder', 'model = "   "'],
+    ['presets.partial.coder', 'thinking_effort = "   "'],
+    ['agents.coder', 'model = 42'],
+    ['presets.partial.coder', 'thinking_effort = false'],
+  ])('automatic startup still rejects invalid %s: %s', async (route, entry) => {
+    const { config, disposables } = await createConfig({}, [
+      '[subagent]', 'preset = "partial"',
+      '[subagent.auto_preset]', 'enabled = true',
+      '[subagent.presets.partial]',
+      `[subagent.${route}]`, entry,
+    ].join('\n'));
+    try {
+      expect(() => assertValidSubagentModelConfig(config, stubFlag(true), modelCatalogFor()))
+        .toThrowError(expect.objectContaining({ code: ErrorCodes.CONFIG_INVALID }));
+    } finally {
+      disposables.dispose();
+    }
   });
 
   it('rejects an active preset that is not configured', async () => {
@@ -3129,6 +3271,51 @@ describe('ConfigService replaceSections', () => {
     expect(config.inspect<ThinkingConfig>(THINKING_SECTION).userValue).toEqual({ enabled: true });
 
     disposables.dispose();
+  });
+
+  it('keeps failed persisted replacements out of reads, events, and later unrelated saves', async () => {
+    const { config, disposables, store } = await createSectionsConfig();
+    try {
+      const original = await store.get('', 'config.toml');
+      const events: string[] = [];
+      disposables.add(config.onDidSectionChange((event) => events.push(event.domain)));
+      vi.spyOn(store, 'set').mockRejectedValueOnce(new Error('disk full'));
+
+      await expect(config.replaceSections({
+        [DEFAULT_MODEL_SECTION]: 'acme/m2',
+        [THINKING_SECTION]: { enabled: false },
+      })).rejects.toThrow('disk full');
+
+      expect(events).toEqual([]);
+      expect(config.inspect(DEFAULT_MODEL_SECTION).userValue).toBe('acme/m1');
+      expect(config.inspect(THINKING_SECTION).userValue).toEqual({ enabled: true });
+      expect(await store.get('', 'config.toml')).toEqual(original);
+      await config.set('unrelated', 1);
+      expect(config.get(DEFAULT_MODEL_SECTION)).toBe('acme/m1');
+      expect(config.get(THINKING_SECTION)).toEqual({ enabled: true });
+      expect(await store.get('', 'config.toml')).toEqual({ ...original as Record<string, unknown>, unrelated: 1 });
+    } finally {
+      disposables.dispose();
+    }
+  });
+
+  it('evaluates a Memory factory against the latest target layer without copying User values', async () => {
+    const { config, disposables, store } = await createSectionsConfig();
+    try {
+      const writes = vi.spyOn(store, 'set');
+      const prior = config.set(THINKING_SECTION, { effort: 'low' }, ConfigTarget.Memory);
+      const update = config.replaceSections((current) => {
+        expect(current[DEFAULT_MODEL_SECTION]).toBeUndefined();
+        expect(current[THINKING_SECTION]).toEqual({ effort: 'low' });
+        return { [THINKING_SECTION]: { ...current[THINKING_SECTION] as ThinkingConfig, enabled: false } };
+      }, ConfigTarget.Memory);
+      await Promise.all([prior, update]);
+      expect(config.inspect(THINKING_SECTION).memoryValue).toEqual({ effort: 'low', enabled: false });
+      expect(config.inspect(THINKING_SECTION).userValue).toEqual({ enabled: true });
+      expect(writes).not.toHaveBeenCalled();
+    } finally {
+      disposables.dispose();
+    }
   });
 
   it('leaves the user layer untouched when a later domain fails validation', async () => {

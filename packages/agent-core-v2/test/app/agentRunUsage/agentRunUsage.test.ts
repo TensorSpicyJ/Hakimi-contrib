@@ -251,6 +251,33 @@ describe('AgentRunUsageService (App ledger)', () => {
     expect(captured.some((message) => message.includes('agent-run usage ledger flush failed'))).toBe(true);
   });
 
+  it('announces an immutable live start once and keeps its original binding through completion', async () => {
+    const starts: AgentRunUsageStartedRecord[] = [];
+    const finishes: AgentRunUsageEntry[] = [];
+    disposables.add(service.onDidStartRun((entry) => starts.push(entry)));
+    disposables.add(service.onDidFinishRun((entry) => finishes.push(entry)));
+    const original = started('live-start', 1000);
+    service.appendStarted(original);
+    expect(starts).toEqual([original]);
+    expect(Object.isFrozen(starts[0])).toBe(true);
+    service.appendStarted({ ...original, modelAlias: 'other-model' });
+    service.appendFinished(finished('live-start', 1000));
+    expect(starts).toHaveLength(1);
+    expect(finishes[0]?.started.modelAlias).toBe(original.modelAlias);
+    const records = await readRaw();
+    expect(records[0]).toEqual(original);
+    expect(records[0]).not.toHaveProperty('account');
+    expect(records[0]).not.toHaveProperty('identity');
+  });
+
+  it('does not replay live start events when reading historical records', async () => {
+    ix.get(IAppendLogStore).append(SCOPE, AGENT_RUN_USAGE_LOG_KEY, started('old', 1000));
+    const listener = vi.fn();
+    disposables.add(service.onDidStartRun(listener));
+    expect(await service.read()).toHaveLength(1);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
   it('fires the completion event once per live runId and never for orphans', async () => {
     const seen: AgentRunUsageEntry[] = [];
     disposables.add(service.onDidFinishRun((entry) => seen.push(entry)));

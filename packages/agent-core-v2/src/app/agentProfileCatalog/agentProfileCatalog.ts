@@ -13,6 +13,9 @@
  * spawn time) together with the environment facts disclosed by that render.
  * `systemPrompt(context)` is the same render's text only — it is derived from
  * `renderSystemPrompt` at registration, so the two can never drift apart.
+ * Profiles opt in to alternate compact rendering: `renderCompactSystemPrompt` is
+ * used only by the experimental profile policy; the standard renderer and
+ * user-owned templates remain unchanged.
  * Profiles stay
  * independent of concrete model aliases. The builtin {@link DEFAULT_AGENT_PROFILE_NAME} (`agent`) is the
  * default profile used when an Agent is bound to a Model without naming a
@@ -99,6 +102,7 @@ export interface AgentProfile {
   readonly preserveBindingOnResume?: boolean;
   readonly systemPrompt: (context: AgentProfileContext) => string;
   readonly renderSystemPrompt: (context: AgentProfileContext) => SystemPromptRenderResult;
+  readonly renderCompactSystemPrompt?: (context: AgentProfileContext) => SystemPromptRenderResult;
   readonly promptPrefix?: (ctx: AgentProfilePromptPrefixContext) => Promise<string>;
   readonly summaryPolicy?: AgentProfileSummaryPolicy;
 }
@@ -137,6 +141,7 @@ export function normalizeAgentProfile(input: AgentProfileInput): AgentProfile {
     return {
       ...input,
       renderSystemPrompt: render,
+      renderCompactSystemPrompt: input.renderCompactSystemPrompt?.bind(input),
       systemPrompt: (context) => render(context).text,
     };
   }
@@ -145,6 +150,7 @@ export function normalizeAgentProfile(input: AgentProfileInput): AgentProfile {
     return {
       ...input,
       systemPrompt,
+      renderCompactSystemPrompt: input.renderCompactSystemPrompt?.bind(input),
       renderSystemPrompt: (context) => ({
         text: systemPrompt(context),
         environment: { cwd: context.cwd ?? '', date: { disclosed: false } },

@@ -1,5 +1,7 @@
 # AITP integration handoff
 
+> **Current status (2026-09-15):** the active integration is the official AITP plugin **1.1.0** — plugin id `aitp`, four core Skills (`aitp-memory`, `aitp-research`, `aitp-writing`, `aitp-distill`), and **no CLI, ledger, runtime, or session hook**. See the [compatibility-matrix amendment](compatibility-matrix.md#aitp-plugin-1-1-0-20260915) and [tracking amendment](TRACKING.md#aitp-plugin-1-1-0-20260915). Everything below is the historical handoff log for the retired adapter/CLI design (H0–H6b, plugin id `aitp-research-protocol`); it is preserved for traceability and is **not** the current contract. Upstream 1.1.0 also no longer ships a `docs/hakimi/` handoff directory, and the archive ships no CLI, so there is no upstream CLI counterpart to sync.
+
 Goal usage / Research revision repair (2026-09-06; delivered and clean-installed):
 ordinary token, turn and elapsed-time accounting publishes the full Research
 snapshot without advancing its optimistic-concurrency revision. Goal identity,

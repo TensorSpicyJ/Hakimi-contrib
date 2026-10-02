@@ -336,6 +336,13 @@ export class ApprovalPanelComponent extends Container implements Focusable {
       horizontalBar,
       indent(`${borderColorBold('▶')} ${borderColorBold(title)}`),
     ];
+    // A request raised by a session other than the one on screen (a
+    // handed-off background session) carries its identity: the user must see
+    // which project they are approving for, and "approve for this session"
+    // binds to that session alone.
+    if (data.session_label !== undefined) {
+      lines.push(indent(dim(`session: ${data.session_label}`)));
+    }
 
     const dedupedBlocks = data.display.filter(
       (block) => !isDuplicateBriefBlock(block, data.description),

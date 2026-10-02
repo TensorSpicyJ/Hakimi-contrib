@@ -29,6 +29,7 @@ const TOOL_LABEL_KEYS: Record<string, string> = {
   getgoal: 'tools.label.goal_get',
   setgoalbudget: 'tools.label.goal_budget',
   updategoal: 'tools.label.goal_update',
+  startsession: 'tools.label.start_session',
 };
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,7 @@ const NAME_ALIASES: Record<string, string> = {
   get_goal: 'getgoal',
   set_goal_budget: 'setgoalbudget',
   update_goal: 'updategoal',
+  start_session: 'startsession',
 };
 
 export function normalizeToolName(name: string): string {
@@ -105,6 +107,8 @@ const TOOL_GLYPH: Record<string, IconName> = {
   getgoal: 'target',
   setgoalbudget: 'target',
   updategoal: 'target',
+  // Starting an independent session reads as "new conversation".
+  startsession: 'chat-new',
   // Cron scheduling tools share a calendar motif: schedule / list / cancel.
   croncreate: 'calendar-schedule',
   cronlist: 'calendar-todo',
@@ -322,6 +326,12 @@ export function toolSummary(name: string, arg: string, full = false): string {
         if (full) return fallback();
         const status = goalStatusLabel(d.status);
         return status ? c(t('tools.goal.status', { status })) : fallback();
+      }
+      case 'startsession': {
+        // The collapsed header shows the target project; the expanded body
+        // still carries the full arguments.
+        const dir = str(d.work_dir) ?? str(d.workDir);
+        return dir ? c(dir) : '';
       }
       default:
         return fallback();

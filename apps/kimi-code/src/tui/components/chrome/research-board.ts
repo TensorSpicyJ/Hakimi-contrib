@@ -99,14 +99,14 @@ function renderHeader(snap: ResearchModeSnapshot, colors: ColorPalette): string 
 }
 
 function buildCompactHint(colors: ColorPalette): string {
-  return `  ${chalk.hex(colors.textDim)('Knowledge in plain files · memory via official AITP Skills/CLI')}`;
+  return `  ${chalk.hex(colors.textDim)('Knowledge in plain files · memory via official AITP Skills')}`;
 }
 
 function buildDetailRows(colors: ColorPalette): string[] {
   return [
     `  ${chalk.hex(colors.textDim)('Purpose:')} ${chalk.hex(colors.text)('local project knowledge + long-term research memory; no host research loop runs.')}`,
     `  ${chalk.hex(colors.textDim)('Knowledge:')} ${chalk.hex(colors.text)('read and write plain project files with the ordinary file tools.')}`,
-    `  ${chalk.hex(colors.textDim)('Memory:')} ${chalk.hex(colors.text)('the official AITP Skills (and their CLI) record meaningful deltas.')}`,
+    `  ${chalk.hex(colors.textDim)('Memory:')} ${chalk.hex(colors.text)('the official AITP Skills record meaningful deltas; start with aitp-memory.')}`,
     `  ${chalk.hex(colors.textDim)('History:')} ${chalk.hex(colors.textMuted)('legacy Research records are preserved read-only; they are not live state and never resume automatically.')}`,
   ];
 }

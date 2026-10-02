@@ -20,7 +20,7 @@ import {
 export class EnterAITPModeTool implements IEnterAITPModeTool {
   declare readonly _serviceBrand: undefined;
   readonly name = 'EnterAITPMode' as const;
-  readonly description = 'Enable Research Mode: use ordinary file tools for local knowledge and official AITP Skills with CLI fallback for long-term research memory. This toggle performs no AITP I/O and is not required for ordinary research or file tools. General Goal and Plan remain available.';
+  readonly description = 'Enable Research Mode: use ordinary file tools for local knowledge and the official AITP Skills for long-term research memory. This toggle performs no AITP I/O and is not required for ordinary research or file tools. General Goal and Plan remain available.';
   readonly parameters = toInputJsonSchema(EnterAITPModeInputSchema);
 
   constructor(@IAgentAitpModeService private readonly mode: IAgentAitpModeService) {}
@@ -33,8 +33,8 @@ export class EnterAITPModeTool implements IEnterAITPModeTool {
         await this.mode.enter({ actor: 'model' });
         return {
           output: (await this.mode.getSnapshot()).skillsAvailable
-            ? 'Research Mode enabled. Read project knowledge and use official AITP Skills for relevant memory. Save only new progress; no delta means no write. CLI health has not been checked.'
-            : 'Research Mode enabled for local knowledge. Official AITP Skills are unavailable; install or enable the official plugin to use research memory. CLI health has not been checked.',
+            ? 'Research Mode enabled. Read project knowledge and use the official AITP Skills for relevant memory. Save only genuinely new progress; no durable change means no write.'
+            : 'Research Mode enabled for local knowledge. Official AITP Skills are unavailable; install or enable the official `aitp` plugin to use research memory.',
         };
       },
     };

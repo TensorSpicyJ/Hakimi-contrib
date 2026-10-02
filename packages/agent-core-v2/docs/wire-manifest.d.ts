@@ -226,11 +226,19 @@ interface ContextAppendMessagePayload {
       name: string;
       description: string;
       parameters: Record<string, unknown>;
+      inputFormat?: {
+        type: 'text';
+        grammar?: {
+          syntax: 'lark';
+          definition: string;
+        };
+      };
       deferred?: true;
     }[];
     id?: string;
     providerMessageId?: string;
-    origin?: 'user' | 'skill_activation' | 'plugin_command' | 'injection' | 'shell_command' | 'compaction_summary' | 'system_trigger' | 'task' | 'cron_job' | 'cron_missed' | 'hook_result' | 'retry' | undefined;
+    /** | UserPromptOrigin | SkillActivationOrigin | PluginCommandOrigin | InjectionOri… | undefined */
+    origin?: unknown;
     isError?: boolean;
     note?: string;
   };
@@ -475,6 +483,13 @@ interface LlmToolsSnapshotPayload {
     name: string;
     description: string;
     parameters: Record<string, any>;
+    inputFormat?: {
+      type: 'text';
+      grammar?: {
+        syntax: 'lark';
+        definition: string;
+      };
+    };
   }[];
 }
 

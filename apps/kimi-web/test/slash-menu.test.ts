@@ -11,7 +11,8 @@ import {
   runResearchModeEnter,
   submitResearchSlashCommand,
 } from '../src/lib/researchCommand';
-import { parseSlash } from '../src/lib/slashCommands';
+import { buildSlashItems, parseSlash } from '../src/lib/slashCommands';
+import { availableAitpSkills, aitpPluginStatus } from '../src/lib/research';
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -453,5 +454,88 @@ describe('Research slash command', () => {
 
     await expect(outcome).resolves.toBe('handled');
     expect(researchSlashInputToRestore('/research off', await outcome)).toBeNull();
+  });
+});
+
+describe('Research plugin display and session skill menu', () => {
+  const skills = ['aitp-memory', 'aitp-research', 'aitp-writing', 'aitp-distill'].map((name) => ({
+    name, description: name, source: 'plugin',
+  }));
+
+  it('shows only returned core skills and uses the same /skill syntax as the composer', () => {
+    expect(availableAitpSkills([])).toEqual([]);
+    expect(availableAitpSkills(skills)).toEqual(skills);
+    expect(availableAitpSkills([skills[2]!, { name: 'other', source: 'plugin', description: '' }]))
+      .toEqual([skills[2]]);
+    const extraSourced = { ...skills[0]!, source: 'extra' };
+    expect(availableAitpSkills([extraSourced])).toEqual([extraSourced]);
+    expect(buildSlashItems(skills).filter((item) => item.isSkill).map((item) => item.name))
+      .toEqual(skills.map((skill) => `/skill:${skill.name}`));
+    expect(buildSlashItems([]).some((item) => item.name.includes('aitp-'))).toBe(false);
+  });
+
+  it('refreshes an already-open menu when async skills arrive or disappear without reopening a dismissed menu', async () => {
+    const currentSkills = ref<AppSkill[]>([]);
+    const menu = useSlashMenu({
+      text: ref('/'), textareaRef: ref(null), autosize: () => {},
+      skills: () => currentSkills.value, researchEnabled: () => true,
+      emitCommand: () => {}, historyPush: () => {},
+    });
+    menu.update();
+    currentSkills.value = skills;
+    await nextTick();
+    expect(menu.items.value.filter((item) => item.isSkill)).toHaveLength(4);
+    currentSkills.value = [];
+    await nextTick();
+    expect(menu.items.value.filter((item) => item.isSkill)).toHaveLength(0);
+    menu.open.value = false;
+    currentSkills.value = skills;
+    await nextTick();
+    expect(menu.open.value).toBe(false);
+  });
+
+  it.each([true, false])('recovers a skill prefix after async results arrive (initially populated: %s)', async (populated) => {
+    const currentSkills = ref<AppSkill[]>(populated ? skills : []);
+    const text = ref('/skill:aitp');
+    const menu = useSlashMenu({
+      text, textareaRef: ref(null), autosize: () => {},
+      skills: () => currentSkills.value, researchEnabled: () => true,
+      emitCommand: () => {}, historyPush: () => {},
+    });
+    menu.update();
+    expect(menu.open.value).toBe(populated);
+    currentSkills.value = [];
+    await nextTick();
+    expect(menu.open.value).toBe(false);
+    currentSkills.value = skills;
+    await nextTick();
+    expect(menu.open.value).toBe(true);
+    expect(menu.items.value).toHaveLength(4);
+    // Explicit dismissal remains distinct from temporarily having no matches.
+    menu.open.value = false;
+    currentSkills.value = [];
+    await nextTick();
+    currentSkills.value = skills;
+    await nextTick();
+    expect(menu.open.value).toBe(false);
+    text.value = '/skill:aitp-';
+    menu.update();
+    expect(menu.open.value).toBe(true);
+    text.value = '/skill:aitp-memory request';
+    menu.update();
+    currentSkills.value = [...skills];
+    await nextTick();
+    expect(menu.open.value).toBe(false);
+  });
+
+  it('distinguishes metadata availability, installation and runtime state', () => {
+    const plugin = { id: 'aitp', enabled: true, state: 'ok' as const };
+    expect(aitpPluginStatus(plugin)).toBe('unknown');
+    expect(aitpPluginStatus(null, 'loading')).toBe('loading');
+    expect(aitpPluginStatus(null, 'error')).toBe('unavailable');
+    expect(aitpPluginStatus(null, 'ready')).toBe('missing');
+    expect(aitpPluginStatus(plugin, 'ready')).toBe('enabled');
+    expect(aitpPluginStatus({ ...plugin, enabled: false }, 'ready')).toBe('disabled');
+    expect(aitpPluginStatus({ ...plugin, state: 'error' }, 'ready')).toBe('error');
   });
 });

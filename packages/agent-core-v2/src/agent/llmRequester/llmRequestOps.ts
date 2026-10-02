@@ -8,12 +8,14 @@
 import { z } from 'zod';
 
 import type { ThinkingEffort } from '#/kosong/contract/provider';
+import type { ToolInputFormat } from '#/kosong/contract/tool';
 import { defineModel } from '#/wire/model';
 
 export interface LlmRequestToolSchema {
   readonly name: string;
   readonly description: string;
   readonly parameters: Record<string, unknown>;
+  readonly inputFormat?: ToolInputFormat;
 }
 
 export interface LlmRequestTraceState {
@@ -29,6 +31,13 @@ const llmToolEntrySchema = z.object({
   name: z.string(),
   description: z.string(),
   parameters: z.record(z.string(), z.unknown()),
+  inputFormat: z.object({
+    type: z.literal('text'),
+    grammar: z.object({
+      syntax: z.literal('lark'),
+      definition: z.string(),
+    }).optional(),
+  }).optional(),
 });
 
 declare module '#/wire/types' {

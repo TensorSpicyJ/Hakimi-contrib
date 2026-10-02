@@ -118,6 +118,7 @@ import { CHROME_GUTTER } from './constant/rendering';
 import { MAX_TERMINAL_TITLE_LENGTH } from './constant/terminal';
 import { ActivityProgressController } from './controllers/activity-progress';
 import { AuthFlowController } from './controllers/auth-flow';
+import { BackgroundSessionsController } from './controllers/background-sessions';
 import { BtwPanelController } from './controllers/btw-panel';
 import { ClipboardImageHintController } from './controllers/clipboard-image-hint';
 import { EditorKeyboardController } from './controllers/editor-keyboard';
@@ -129,7 +130,7 @@ import { installRainbowDance } from './easter-eggs/dance';
 import { adaptPanelResponse } from './reverse-rpc/approval/adapter';
 import { ApprovalController } from './reverse-rpc/approval/controller';
 import { createApprovalRequestHandler } from './reverse-rpc/approval/handler';
-import { registerReverseRPCHandlers } from './reverse-rpc/index';
+import { createInteractionSettledHandler, registerReverseRPCHandlers } from './reverse-rpc/index';
 import { QuestionController } from './reverse-rpc/question/controller';
 import { createQuestionAskHandler } from './reverse-rpc/question/handler';
 import type { ApprovalPanelData, QuestionPanelData } from './reverse-rpc/types';
@@ -162,7 +163,7 @@ import { startupTrace } from '#/utils/startup-trace';
 import { REPLAY_FETCH_TURN_LIMIT } from './utils/message-replay';
 import { hasPatchChanges } from './utils/object-patch';
 import { beginScreenTakeover, endScreenTakeover, type ScreenTakeover } from './utils/screen-takeover';
-import { sessionRowsForPicker } from './utils/session-picker-rows';
+import { sessionRowsForPicker, type BackgroundSessionMarker } from './utils/session-picker-rows';
 import { formatStepRetryDetail, formatStepRetryLabel } from './utils/step-retry';
 import { formatBashOutputForDisplay } from './utils/shell-output';
 import { thinkingEffortFromConfig } from './utils/thinking-config';
@@ -355,6 +356,12 @@ export class KimiTUI {
   /** Harness-level narrow-event subscription for automatic subagent-preset
    *  switches; installed on start(), removed on stop(). */
   private subagentPresetUnsubscribe: (() => void) | undefined;
+  /**
+   * Harness-level subscription for pending requests the engine stopped waiting
+   * for; installed on start(), removed on stop(). Covers every session this
+   * process hosts — the foreground one and any handed-off background one.
+   */
+  private interactionSettledUnsubscribe: (() => void) | undefined;
   cancelInFlight: (() => void) | undefined;
   deferUserMessages = false;
   aborted = false;
@@ -389,6 +396,7 @@ export class KimiTUI {
   readonly sessionEventHandler: SessionEventHandler;
   readonly sessionReplay: SessionReplayRenderer;
   readonly tasksBrowserController: TasksBrowserController;
+  readonly backgroundSessions: BackgroundSessionsController;
   readonly editorKeyboard: EditorKeyboardController;
   readonly researchController: ResearchController;
 
@@ -477,6 +485,10 @@ export class KimiTUI {
     this.sessionEventHandler = new SessionEventHandler(this);
     this.sessionReplay = new SessionReplayRenderer(this);
     this.tasksBrowserController = new TasksBrowserController(this);
+    this.backgroundSessions = new BackgroundSessionsController(this, {
+      approval: this.approvalController,
+      question: this.questionController,
+    });
     this.editorKeyboard = new EditorKeyboardController(this, this.imageStore);
     this.researchController = new ResearchController(this);
     this.editorKeyboard.install();
@@ -634,6 +646,15 @@ export class KimiTUI {
     // switches — independent of any single session, so it outlives session
     // switches and only stops with the TUI itself.
     this.subagentPresetUnsubscribe = this.subscribeSubagentPresetChanges();
+    // Cross-project session handoff: opt this process in as a host before any
+    // session exists, so the main agent of a session started here can hand
+    // work to another project. A host that never opts in offers no host, and
+    // the engine then reports the handoff tool as unavailable.
+    this.backgroundSessions.attach();
+    // A pending approval/question the engine stops waiting for (cancelled turn,
+    // closed session) must not leave a panel on screen for any session,
+    // foreground or background.
+    this.subscribeInteractionSettled();
     // Outer try rolls back signal listeners on startup failure.
     try {
       // The workspace trust gate must run before anything else in startup —
@@ -693,6 +714,8 @@ export class KimiTUI {
     } catch (error) {
       this.subagentPresetUnsubscribe?.();
       this.subagentPresetUnsubscribe = undefined;
+      this.interactionSettledUnsubscribe?.();
+      this.interactionSettledUnsubscribe = undefined;
       this.unregisterSignalHandlers();
       throw error;
     }
@@ -1021,6 +1044,8 @@ export class KimiTUI {
     this.editorKeyboard.dispose();
     this.subagentPresetUnsubscribe?.();
     this.subagentPresetUnsubscribe = undefined;
+    this.interactionSettledUnsubscribe?.();
+    this.interactionSettledUnsubscribe = undefined;
     this.state.footer.dispose();
     for (const dispose of this.reverseRpcDisposers) {
       dispose();
@@ -1032,6 +1057,10 @@ export class KimiTUI {
     // raw mode with a hidden cursor.
     try {
       await this.closeSession('shutting down');
+      // Detach the handoff host and every background session's handlers before
+      // the harness closes them — a background session lives only as long as
+      // this process, and the exit hint says so.
+      this.backgroundSessions.dispose();
       await this.harness.close();
     } finally {
       this.sessionEventHandler.stopAllMcpServerStatusSpinners();
@@ -1060,6 +1089,19 @@ export class KimiTUI {
     return this.harness.onSubagentPresetChanged((event) => {
       this.handleSubagentPresetChanged(event);
     });
+  }
+
+  /**
+   * Subscribe to the settled-request channel. A host whose SDK predates it has
+   * no channel: the subscription is skipped rather than crashing startup. The
+   * channel covers every session this process hosts, so one handler drops the
+   * panels of both the session on screen and any handed-off background one.
+   */
+  private subscribeInteractionSettled(): void {
+    if (typeof this.harness.onSessionInteractionSettled !== 'function') return;
+    this.interactionSettledUnsubscribe = this.harness.onSessionInteractionSettled(
+      createInteractionSettledHandler(this.approvalController, this.questionController),
+    );
   }
 
   private handleSubagentPresetChanged(event: SubagentPresetChangedEvent): void {
@@ -2235,11 +2277,17 @@ export class KimiTUI {
     this.activityProgress.reset();
     this.sessionEventUnsubscribe?.();
     this.sessionEventUnsubscribe = undefined;
-    this.clearReverseRpcPanels();
     previous?.setApprovalHandler(undefined);
     previous?.setQuestionHandler(undefined);
-    this.approvalController.cancelAll(reason);
-    this.questionController.cancelAll(reason);
+    // Only this session's pending requests belong to this transition: a
+    // background (handed-off) session's approval must survive the foreground
+    // session being switched, closed, or cancelled. The reverse-rpc
+    // controllers drive the modal coordinator, so cancelling one session's
+    // requests either advances to the next session's panel or hides the panel.
+    if (previous !== undefined) {
+      this.approvalController.cancelForSession(previous.id, reason);
+      this.questionController.cancelForSession(previous.id, reason);
+    }
     this.session = undefined;
     this.researchController.clear();
     this.state.swarmModeEntry = undefined;
@@ -2248,20 +2296,19 @@ export class KimiTUI {
     return previous;
   }
 
-  private clearReverseRpcPanels(): void {
-    for (const dispose of this.reverseRpcDisposers) {
-      dispose();
-    }
-    this.reverseRpcDisposers.length = 0;
-  }
-
   private registerSessionHandlers(session: Session): void {
     session.setApprovalHandler(
-      createApprovalRequestHandler(this.approvalController, (request, response) => {
-        this.appendApprovalTranscriptEntry(request, response);
-      }),
+      createApprovalRequestHandler(
+        this.approvalController,
+        (request, response) => {
+          this.appendApprovalTranscriptEntry(request, response);
+        },
+        { sessionId: session.id },
+      ),
     );
-    session.setQuestionHandler(createQuestionAskHandler(this.questionController));
+    session.setQuestionHandler(
+      createQuestionAskHandler(this.questionController, { sessionId: session.id }),
+    );
   }
 
   async fetchSessions(scope: 'cwd' | 'all' = this.state.sessionsScope): Promise<void> {
@@ -2279,6 +2326,7 @@ export class KimiTUI {
         page.items,
         this.state.appState.sessionId,
         this.hasSessionContent(),
+        this.backgroundSessionMarkers(),
       );
     } catch (error) {
       // The picker must keep working (it renders the empty state), but a
@@ -2329,10 +2377,14 @@ export class KimiTUI {
       });
       if (requestToken !== this.sessionPickerScopeRequestToken) return false;
       this.state.sessionsNextCursor = page.nextCursor;
+      // The first page already folded in the live background sessions; skip
+      // anything already listed so a later page cannot duplicate a row.
+      const known = new Set(this.state.sessions.map((row) => row.id));
       const rows = sessionRowsForPicker(
-        page.items,
+        page.items.filter((item) => !known.has(item.id)),
         this.state.appState.sessionId,
         this.hasSessionContent(),
+        this.backgroundSessionMarkers(known),
       );
       this.state.sessions = [...this.state.sessions, ...rows];
       this.sessionPickerComponent?.appendSessions(rows);
@@ -2472,11 +2524,12 @@ export class KimiTUI {
   async reloadCurrentSessionView(session: Session, statusMessage: string): Promise<void> {
     this.sessionEventUnsubscribe?.();
     this.sessionEventUnsubscribe = undefined;
-    this.clearReverseRpcPanels();
     session.setApprovalHandler(undefined);
     session.setQuestionHandler(undefined);
-    this.approvalController.cancelAll('reloading session');
-    this.questionController.cancelAll('reloading session');
+    // Same per-session scope as `unloadCurrentSession`: reloading the session
+    // on screen must not answer a background session's pending requests.
+    this.approvalController.cancelForSession(session.id, 'reloading session');
+    this.questionController.cancelForSession(session.id, 'reloading session');
 
     this.resetSessionRuntime();
     this.session = session;
@@ -3690,6 +3743,15 @@ export class KimiTUI {
     readonly closeOnCancel: boolean;
     readonly forwardEditorExit: boolean;
   }): Promise<void> {
+    // A pending approval/question owns the editor area: mounting the picker
+    // over its panel would leave that request pending with no way to answer it
+    // (the engine waits forever), so refuse instead. The other direction is
+    // handled by `prepareForReverseRpcPanel`, which dismisses the picker and
+    // the background viewer when a request arrives.
+    if (this.approvalController.hasPending() || this.questionController.hasPending()) {
+      this.showStatus('Answer the pending approval or question first.', 'warning');
+      return;
+    }
     this.sessionPickerOptions = options;
     await this.fetchSessions('cwd');
     this.mountSessionPicker({
@@ -3797,6 +3859,14 @@ export class KimiTUI {
     session: SessionRow,
     applyStartupModes: boolean,
   ): Promise<void> {
+    // A session this process adopted from a handoff is already live here: open
+    // its read-only viewer instead of resuming it (which would try to switch
+    // the foreground session to another project's cwd). The handoff session
+    // keeps running; closing the viewer returns to the current session.
+    if (this.backgroundSessions.view(session.id)) {
+      this.hideSessionPicker();
+      return;
+    }
     if (resolve(session.work_dir) !== resolve(this.state.appState.workDir)) {
       await this.showResumeOtherWorkDirHint(session);
       if (applyStartupModes) await this.stop(0);
@@ -3812,7 +3882,45 @@ export class KimiTUI {
     this.hideSessionPicker();
   }
 
+  /**
+   * The live background sessions the picker marks, keyed by session id.
+   * `exclude` drops ids already present in the picker's row list.
+   */
+  private backgroundSessionMarkers(
+    exclude: ReadonlySet<string> = new Set(),
+  ): ReadonlyMap<string, BackgroundSessionMarker> {
+    const markers = new Map<string, BackgroundSessionMarker>();
+    for (const row of this.backgroundSessions.pickerRows()) {
+      if (exclude.has(row.sessionId)) continue;
+      markers.set(row.sessionId, {
+        workDir: row.workDir,
+        title: row.title,
+        status: row.status,
+      });
+    }
+    return markers;
+  }
+
+  /** Exit hint for the CLI: background sessions stop with this process. */
+  getBackgroundSessionExitHint(): string | undefined {
+    return this.backgroundSessions.exitHint();
+  }
+
+  /**
+   * A reverse-rpc panel takes over the editor area. A background session's
+   * request can arrive at any moment, so free that area first: close the
+   * read-only background viewer and dismiss an open session picker rather than
+   * mounting the panel on top of them (which would leave the picker's state
+   * dangling). The requests themselves stay serialised by the reverse-rpc
+   * controllers — this only clears non-request UI.
+   */
+  private prepareForReverseRpcPanel(): void {
+    this.backgroundSessions.dismissView();
+    if (this.state.activeDialog === 'session-picker') this.hideSessionPicker();
+  }
+
   private showApprovalPanel(payload: ApprovalPanelData): void {
+    this.prepareForReverseRpcPanel();
     this.patchLivePane({ pendingApproval: { data: payload } });
     notifyTerminalOnce(this.state, `approval:${payload.id}`, {
       title: `${PRODUCT_NAME} approval required`,
@@ -3876,6 +3984,7 @@ export class KimiTUI {
   }
 
   private showQuestionDialog(payload: QuestionPanelData): void {
+    this.prepareForReverseRpcPanel();
     this.patchLivePane({ pendingQuestion: { data: payload } });
     notifyTerminalOnce(this.state, `question:${payload.id}`, {
       title: `${PRODUCT_NAME} needs your answer`,

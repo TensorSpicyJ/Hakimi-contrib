@@ -11,6 +11,8 @@ import {
   applyOpenAICodexConfig,
   extractOpenAICodexAccountId,
   fetchCodexUsage,
+  getMissingOpenAICodexModels,
+  KIMI_CODE_PROVIDER_NAME,
   OFFICIAL_CODEX_USAGE_URL,
   officialCodexUsageUrl,
   OPENAI_CODEX_OAUTH_KEY,
@@ -18,9 +20,11 @@ import {
   OAuthUnauthorizedError,
   OpenAICodexOAuthToolkit,
   parseCodexUsagePayload,
+  refreshProviderModels,
   removeOpenAICodexConfig,
   requestOpenAICodexDeviceAuthorization,
   type ManagedKimiConfigShape,
+  type RefreshProviderHost,
   type TokenInfo,
   type TokenStorage,
 } from '../src';
@@ -310,25 +314,51 @@ describe('OpenAI Codex managed config', () => {
       supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
       defaultEffort: 'low',
     });
+    // gpt-6-sol/gpt-6-luna mirror the official catalog: 272k context, no
+    // separate input limit (maxInputSize stays unset rather than invented).
+    expect(config.models?.['openai-codex/gpt-6-sol']).toMatchObject({
+      provider: OPENAI_CODEX_PROVIDER_NAME,
+      model: 'gpt-6-sol',
+      maxContextSize: 272_000,
+      capabilities: ['thinking', 'always_thinking', 'tool_use', 'image_in'],
+      supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      defaultEffort: 'medium',
+      displayName: 'GPT-6 Sol (ChatGPT)',
+    });
+    expect(config.models?.['openai-codex/gpt-6-sol']?.['maxInputSize']).toBeUndefined();
+    expect(config.models?.['openai-codex/gpt-6-luna']).toMatchObject({
+      provider: OPENAI_CODEX_PROVIDER_NAME,
+      model: 'gpt-6-luna',
+      maxContextSize: 272_000,
+      capabilities: ['thinking', 'always_thinking', 'tool_use', 'image_in'],
+      supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'medium',
+      displayName: 'GPT-6 Luna (ChatGPT)',
+    });
+    expect(config.models?.['openai-codex/gpt-6-luna']?.['maxInputSize']).toBeUndefined();
     expect(result.models).toEqual([
       'gpt-5.6-sol',
       'gpt-5.6-terra',
       'gpt-5.6-luna',
       'gpt-6-astra',
+      'gpt-6-sol',
+      'gpt-6-luna',
     ]);
     expect(config.models?.['keep/model']).toBeDefined();
-    expect(config.defaultModel).toBe('openai-codex/gpt-5.6-sol');
+    expect(config.defaultModel).toBe('openai-codex/gpt-6-sol');
 
     removeOpenAICodexConfig(config);
 
     expect(config.providers[OPENAI_CODEX_PROVIDER_NAME]).toBeUndefined();
     expect(config.models?.['openai-codex/gpt-5.6-sol']).toBeUndefined();
     expect(config.models?.['openai-codex/gpt-6-astra']).toBeUndefined();
+    expect(config.models?.['openai-codex/gpt-6-sol']).toBeUndefined();
+    expect(config.models?.['openai-codex/gpt-6-luna']).toBeUndefined();
     expect(config.models?.['keep/model']).toBeDefined();
     expect(config.defaultModel).toBeUndefined();
   });
 
-  it('falls back to GPT-5.6 Sol when a preserved Codex default was removed', () => {
+  it('falls back to GPT-6 Sol when a preserved Codex default was removed', () => {
     const config: ManagedKimiConfigShape = {
       providers: {
         [OPENAI_CODEX_PROVIDER_NAME]: {
@@ -348,7 +378,50 @@ describe('OpenAI Codex managed config', () => {
 
     applyOpenAICodexConfig(config, { preserveDefaultModel: true });
 
-    expect(config.defaultModel).toBe('openai-codex/gpt-5.6-sol');
+    expect(config.defaultModel).toBe('openai-codex/gpt-6-sol');
+  });
+
+  it('preserves a still-catalogued Codex default and its thinking when asked to', () => {
+    const config: ManagedKimiConfigShape = {
+      providers: {},
+      models: {
+        'openai-codex/gpt-6-luna': {
+          provider: OPENAI_CODEX_PROVIDER_NAME,
+          model: 'gpt-6-luna',
+          maxContextSize: 272_000,
+        },
+      },
+      defaultModel: 'openai-codex/gpt-6-luna',
+      thinking: { enabled: true, effort: 'high' },
+    };
+
+    applyOpenAICodexConfig(config, { preserveDefaultModel: true });
+
+    // The preserved key is re-provisioned, so it survives the refresh and
+    // neither the model nor the user's thinking config is overwritten.
+    expect(config.defaultModel).toBe('openai-codex/gpt-6-luna');
+    expect(config.thinking).toEqual({ enabled: true, effort: 'high' });
+    expect(config.models?.['openai-codex/gpt-6-luna']).toBeDefined();
+  });
+
+  it('replaces the default with GPT-6 Sol and its thinking when preservation is off', () => {
+    const config: ManagedKimiConfigShape = {
+      providers: {},
+      models: {
+        'openai-codex/gpt-6-luna': {
+          provider: OPENAI_CODEX_PROVIDER_NAME,
+          model: 'gpt-6-luna',
+          maxContextSize: 272_000,
+        },
+      },
+      defaultModel: 'openai-codex/gpt-6-luna',
+      thinking: { enabled: false },
+    };
+
+    applyOpenAICodexConfig(config);
+
+    expect(config.defaultModel).toBe('openai-codex/gpt-6-sol');
+    expect(config.thinking).toEqual({ enabled: true, effort: 'medium' });
   });
 
   it('preserves an unrelated default model when removing the managed provider', () => {
@@ -374,6 +447,319 @@ describe('OpenAI Codex managed config', () => {
 
     expect(config.defaultModel).toBe('builtin/default-model');
     expect(config.thinking).toEqual({ enabled: true });
+  });
+});
+
+describe('getMissingOpenAICodexModels', () => {
+  // An install provisioned before gpt-6-sol / gpt-6-luna joined the catalog:
+  // the provider is there, the two newest aliases are not.
+  function legacyCodexConfig(): ManagedKimiConfigShape {
+    const config: ManagedKimiConfigShape = { providers: {} };
+    applyOpenAICodexConfig(config);
+    delete config.models?.['openai-codex/gpt-6-sol'];
+    delete config.models?.['openai-codex/gpt-6-luna'];
+    config.defaultModel = 'openai-codex/gpt-5.6-sol';
+    return config;
+  }
+
+  it('backfills exactly the two newest catalog entries for a pre-update install', () => {
+    const config = legacyCodexConfig();
+    const before = structuredClone(config);
+
+    const missing = getMissingOpenAICodexModels(config);
+
+    expect(Object.keys(missing).toSorted()).toEqual([
+      'openai-codex/gpt-6-luna',
+      'openai-codex/gpt-6-sol',
+    ]);
+    expect(missing['openai-codex/gpt-6-sol']).toMatchObject({
+      provider: OPENAI_CODEX_PROVIDER_NAME,
+      model: 'gpt-6-sol',
+      maxContextSize: 272_000,
+      capabilities: ['thinking', 'always_thinking', 'tool_use', 'image_in'],
+      supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      defaultEffort: 'medium',
+      displayName: 'GPT-6 Sol (ChatGPT)',
+    });
+    expect(missing['openai-codex/gpt-6-sol']?.['maxInputSize']).toBeUndefined();
+    expect(missing['openai-codex/gpt-6-luna']).toMatchObject({
+      provider: OPENAI_CODEX_PROVIDER_NAME,
+      model: 'gpt-6-luna',
+      maxContextSize: 272_000,
+      capabilities: ['thinking', 'always_thinking', 'tool_use', 'image_in'],
+      supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'medium',
+      displayName: 'GPT-6 Luna (ChatGPT)',
+    });
+    // Pure: the input config is never mutated.
+    expect(config).toEqual(before);
+  });
+
+  it('returns nothing once the catalog is fully provisioned', () => {
+    const config: ManagedKimiConfigShape = { providers: {} };
+    applyOpenAICodexConfig(config);
+
+    expect(getMissingOpenAICodexModels(config)).toEqual({});
+  });
+
+  it('backfills only the keys that are actually absent', () => {
+    const config = legacyCodexConfig();
+    // Same key owned by another provider: kept, never overwritten.
+    config.models!['openai-codex/gpt-6-sol'] = {
+      provider: 'other-provider',
+      model: 'gpt-6-sol',
+      maxContextSize: 1_000,
+    };
+
+    const missing = getMissingOpenAICodexModels(config);
+
+    expect(Object.keys(missing)).toEqual(['openai-codex/gpt-6-luna']);
+    expect(config.models!['openai-codex/gpt-6-sol']).toMatchObject({
+      provider: 'other-provider',
+      maxContextSize: 1_000,
+    });
+  });
+
+  it('keeps user-edited aliases and custom aliases untouched', () => {
+    const config = legacyCodexConfig();
+    // User-edited canonical alias: excluded from the backfill, kept verbatim.
+    config.models!['openai-codex/gpt-6-sol'] = {
+      provider: OPENAI_CODEX_PROVIDER_NAME,
+      model: 'gpt-6-sol',
+      maxContextSize: 123_456,
+      displayName: 'My Sol',
+    };
+    config.models!['openai-codex/gpt-6-luna'] = {
+      provider: OPENAI_CODEX_PROVIDER_NAME,
+      model: 'gpt-6-luna',
+      maxContextSize: 99_999,
+    };
+    // Custom alias under a different key is irrelevant to the backfill.
+    config.models!['my-codex'] = {
+      provider: OPENAI_CODEX_PROVIDER_NAME,
+      model: 'gpt-6-sol',
+      maxContextSize: 272_000,
+    };
+
+    expect(getMissingOpenAICodexModels(config)).toEqual({});
+    expect(config.models!['openai-codex/gpt-6-sol']).toMatchObject({
+      displayName: 'My Sol',
+      maxContextSize: 123_456,
+    });
+    expect(config.models!['my-codex']).toMatchObject({ model: 'gpt-6-sol' });
+  });
+
+  it('no-ops without a configured provider, an oauth ref, or when pinned static', () => {
+    expect(getMissingOpenAICodexModels({ providers: {} })).toEqual({});
+    expect(
+      getMissingOpenAICodexModels({
+        providers: { [OPENAI_CODEX_PROVIDER_NAME]: { type: 'openai_responses' } },
+      }),
+    ).toEqual({});
+    expect(
+      getMissingOpenAICodexModels({
+        providers: {
+          [OPENAI_CODEX_PROVIDER_NAME]: {
+            type: 'openai_responses',
+            oauth: { storage: 'file', key: OPENAI_CODEX_OAUTH_KEY },
+            modelSource: 'static',
+          },
+        },
+      }),
+    ).toEqual({});
+    // A wrong protocol is not catalog-synced either.
+    expect(
+      getMissingOpenAICodexModels({
+        providers: {
+          [OPENAI_CODEX_PROVIDER_NAME]: {
+            type: 'openai',
+            oauth: { storage: 'file', key: OPENAI_CODEX_OAUTH_KEY },
+          },
+        },
+      }),
+    ).toEqual({});
+  });
+
+  it('leaves provider, defaultModel, thinking, and preset-like keys untouched', () => {
+    const config = legacyCodexConfig();
+    config.thinking = { enabled: false, effort: 'high' };
+    config['preset'] = { some: 'user-preset' };
+    const before = structuredClone(config);
+
+    const missing = getMissingOpenAICodexModels(config);
+
+    expect(Object.keys(missing)).toHaveLength(2);
+    expect(config).toEqual(before);
+    expect(missing).not.toHaveProperty('defaultModel');
+    expect(missing).not.toHaveProperty('thinking');
+  });
+});
+
+describe('refreshProviderModels Codex catalog backfill', () => {
+  function legacyCodexConfig(): ManagedKimiConfigShape {
+    const config: ManagedKimiConfigShape = { providers: {} };
+    applyOpenAICodexConfig(config);
+    delete config.models?.['openai-codex/gpt-6-sol'];
+    delete config.models?.['openai-codex/gpt-6-luna'];
+    config.defaultModel = 'openai-codex/gpt-5.6-sol';
+    return config;
+  }
+
+  function makeRefreshHost(initial: ManagedKimiConfigShape) {
+    let current = initial;
+    const getConfig = vi.fn(async () => current);
+    const setConfig = vi.fn(async (patch: ManagedKimiConfigShape) => {
+      current = {
+        ...current,
+        ...patch,
+        providers: patch.providers ?? current.providers,
+        models: patch.models ?? current.models,
+      };
+      return current;
+    });
+    const removeProvider = vi.fn(async () => current);
+    const resolveOAuthToken = vi.fn(async () => {
+      throw new Error('no token in test');
+    });
+    const host: RefreshProviderHost = { getConfig, setConfig, removeProvider, resolveOAuthToken };
+    return { host, setConfig, removeProvider, resolveOAuthToken, readConfig: () => current };
+  }
+
+  it('adds the missing aliases via setConfig without network or credentials', async () => {
+    const initial = legacyCodexConfig();
+    initial.thinking = { enabled: true, effort: 'high' };
+    initial['preset'] = { some: 'user-preset' };
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const { host, setConfig, removeProvider, resolveOAuthToken, readConfig } =
+      makeRefreshHost(initial);
+
+    const result = await refreshProviderModels(host);
+
+    expect(result.changed).toEqual([
+      {
+        providerId: OPENAI_CODEX_PROVIDER_NAME,
+        providerName: 'OpenAI Codex',
+        added: 2,
+        removed: 0,
+      },
+    ]);
+    expect(result.unchanged).toEqual([]);
+    expect(result.failed).toEqual([]);
+    expect(setConfig).toHaveBeenCalledTimes(1);
+    const patch = setConfig.mock.calls[0]?.[0];
+    // Only the merged models and the original providers are written; the
+    // user's default model and thinking are never part of the patch.
+    expect(patch).not.toHaveProperty('defaultModel');
+    expect(patch).not.toHaveProperty('thinking');
+    expect(patch?.providers).toEqual(initial.providers);
+    expect(patch?.models?.['openai-codex/gpt-5.6-sol']).toBeDefined();
+    expect(patch?.models?.['openai-codex/gpt-6-sol']).toMatchObject({ model: 'gpt-6-sol' });
+    expect(patch?.models?.['openai-codex/gpt-6-luna']).toMatchObject({ model: 'gpt-6-luna' });
+    // No removal, no token resolution, no network.
+    expect(removeProvider).not.toHaveBeenCalled();
+    expect(resolveOAuthToken).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // The user's default, thinking, and preset survive the host merge.
+    expect(readConfig().defaultModel).toBe('openai-codex/gpt-5.6-sol');
+    expect(readConfig().thinking).toEqual({ enabled: true, effort: 'high' });
+    expect(readConfig()['preset']).toEqual({ some: 'user-preset' });
+  });
+
+  it('reports unchanged and writes nothing when the catalog is complete', async () => {
+    const initial: ManagedKimiConfigShape = { providers: {} };
+    applyOpenAICodexConfig(initial);
+    const { host, setConfig } = makeRefreshHost(initial);
+
+    const result = await refreshProviderModels(host);
+
+    expect(result.unchanged).toEqual([OPENAI_CODEX_PROVIDER_NAME]);
+    expect(result.changed).toEqual([]);
+    expect(result.failed).toEqual([]);
+    expect(setConfig).not.toHaveBeenCalled();
+  });
+
+  it('is idempotent: a second refresh writes nothing', async () => {
+    const { host, setConfig } = makeRefreshHost(legacyCodexConfig());
+
+    const first = await refreshProviderModels(host);
+    const second = await refreshProviderModels(host);
+
+    expect(first.changed).toHaveLength(1);
+    expect(second.unchanged).toEqual([OPENAI_CODEX_PROVIDER_NAME]);
+    expect(second.changed).toEqual([]);
+    expect(setConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it('respects targeted and oauth scopes without touching other providers', async () => {
+    // Targeted at Codex: the backfill runs.
+    const targeted = makeRefreshHost(legacyCodexConfig());
+    const targetedResult = await refreshProviderModels(targeted.host, {
+      providerId: OPENAI_CODEX_PROVIDER_NAME,
+    });
+    expect(targetedResult.changed).toHaveLength(1);
+    expect(targeted.setConfig).toHaveBeenCalledTimes(1);
+
+    // Targeted at another provider: Codex is untouched.
+    const other = makeRefreshHost(legacyCodexConfig());
+    const otherResult = await refreshProviderModels(other.host, {
+      providerId: 'managed:kimi-code',
+    });
+    expect(otherResult.changed).toEqual([]);
+    expect(otherResult.unchanged).toEqual([]);
+    expect(otherResult.failed).toEqual([]);
+    expect(other.setConfig).not.toHaveBeenCalled();
+
+    // oauth scope: Codex is an oauth provider, so the backfill runs and the
+    // network branches are skipped entirely.
+    const oauthScope = makeRefreshHost(legacyCodexConfig());
+    const oauthResult = await refreshProviderModels(oauthScope.host, { scope: 'oauth' });
+    expect(oauthResult.changed).toHaveLength(1);
+    expect(oauthScope.setConfig).toHaveBeenCalledTimes(1);
+    expect(oauthScope.resolveOAuthToken).not.toHaveBeenCalled();
+  });
+
+  it('no-ops when the provider is missing, oauth-less, or pinned static', async () => {
+    const cases: ManagedKimiConfigShape[] = [
+      { providers: {} },
+      { providers: { [OPENAI_CODEX_PROVIDER_NAME]: { type: 'openai_responses' } } },
+      {
+        providers: {
+          [OPENAI_CODEX_PROVIDER_NAME]: {
+            type: 'openai_responses',
+            oauth: { storage: 'file', key: OPENAI_CODEX_OAUTH_KEY },
+            modelSource: 'static',
+          },
+        },
+      },
+    ];
+
+    for (const initial of cases) {
+      const { host, setConfig } = makeRefreshHost(initial);
+
+      const result = await refreshProviderModels(host);
+
+      expect(result).toEqual({ changed: [], unchanged: [], failed: [] });
+      expect(setConfig).not.toHaveBeenCalled();
+    }
+  });
+
+  it('counts a failed backfill per provider without blocking other providers', async () => {
+    const initial = legacyCodexConfig();
+    initial.providers[KIMI_CODE_PROVIDER_NAME] = {
+      type: 'kimi',
+      oauth: { storage: 'file', key: 'oauth/kimi-code' },
+    };
+    const { host, setConfig } = makeRefreshHost(initial);
+    setConfig.mockRejectedValue(new Error('disk full'));
+
+    const result = await refreshProviderModels(host, { scope: 'oauth' });
+
+    expect(result.changed).toEqual([]);
+    expect(result.failed).toEqual([
+      { provider: OPENAI_CODEX_PROVIDER_NAME, reason: 'disk full' },
+      { provider: KIMI_CODE_PROVIDER_NAME, reason: 'no token in test' },
+    ]);
   });
 });
 

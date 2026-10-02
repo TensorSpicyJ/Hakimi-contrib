@@ -1,24 +1,39 @@
 /**
  * `providerUsageLedger` domain — DeepSeek pricing and Asia/Shanghai clock.
  *
- * Pure functions only: a strict model-name → tier table (no fuzzy matching, no
- * back-dating of unverified historical rates), a fixed-precision CNY cost in
- * integer nano-yuan (1 CNY = 10^9 nanos) so per-request amounts are never
- * rounded to cents before aggregation, and the Asia/Shanghai wall-clock
- * helpers used to group attempts into calendar days/months and to select the
- * official peak/off-peak rate. The rate snapshot is versioned and dated.
+ * Pure functions only: an exact (never prefix-matched) model-name → dated rate
+ * schedule, a fixed-precision CNY cost in integer nano-yuan (1 CNY = 10^9 nanos)
+ * so per-request amounts are never rounded to cents before aggregation, and the
+ * Asia/Shanghai wall-clock helpers used to group attempts into calendar
+ * days/months and to select the official peak/off-peak rate.
+ *
+ * Current rates verified 2026-09-21 against
+ * https://api-docs.deepseek.com/zh-cn/quick_start/pricing and
+ * https://api-docs.deepseek.com/updates. The V4.1 release date has day granularity;
+ * its schedule starts at Shanghai midnight. The older Flash rates retain the
+ * existing local snapshot rather than claiming a newly verified historical rate:
+ *   2026-09-07 — retained snapshot for `deepseek-v4-pro`, `deepseek-v4-flash`, and
+ *                `deepseek-v4-flash-vision-exp`.
+ *   2026-09-10 — V4.1 release: `deepseek-flash` becomes billable, and the two
+ *                legacy flash names begin routing to V4.1 at the new rates.
+ *                `deepseek-v4-pro` rates are unchanged.
+ * A request outside its model's schedule stays unpriced instead of borrowing a
+ * neighbouring rate. Peak windows ignore the Chinese public-holiday exclusions
+ * the vendor also applies.
  */
 
 import type { TokenUsage } from '#/kosong/contract/usage';
 
-export const PRICING_SNAPSHOT_VERSION = '2026-09-07';
-export const PRICING_SNAPSHOT_VALID_FROM = Date.parse(`${PRICING_SNAPSHOT_VERSION}T00:00:00+08:00`);
+export const LEGACY_PRICING_VERSION = '2026-09-07';
+export const LEGACY_PRICING_VALID_FROM = Date.parse(
+  `${LEGACY_PRICING_VERSION}T00:00:00+08:00`,
+);
+export const V41_PRICING_VERSION = '2026-09-10';
+export const V41_PRICING_VALID_FROM = Date.parse(`${V41_PRICING_VERSION}T00:00:00+08:00`);
 
 const NANOS_PER_CNY = 1_000_000_000n;
 const MILLIS_PER_HOUR = 3_600_000;
 const SHANGHAI_UTC_OFFSET_MS = 8 * MILLIS_PER_HOUR;
-
-export type DeepSeekModelKind = 'pro' | 'flash' | 'flash-vision';
 
 interface TierRate {
   readonly cacheHitNanosPerToken: bigint;
@@ -26,65 +41,94 @@ interface TierRate {
   readonly outputNanosPerToken: bigint;
 }
 
-const FLASH_PEAK: TierRate = {
-  cacheHitNanosPerToken: 100n,
-  cacheMissNanosPerToken: 3000n,
-  outputNanosPerToken: 9000n,
-};
-
-const FLASH_OFF_PEAK: TierRate = {
-  cacheHitNanosPerToken: 50n,
-  cacheMissNanosPerToken: 1500n,
-  outputNanosPerToken: 4500n,
-};
-
-const PRO_PEAK: TierRate = {
-  cacheHitNanosPerToken: 300n,
-  cacheMissNanosPerToken: 9000n,
-  outputNanosPerToken: 27000n,
-};
-
-const PRO_OFF_PEAK: TierRate = {
-  cacheHitNanosPerToken: 150n,
-  cacheMissNanosPerToken: 4500n,
-  outputNanosPerToken: 13500n,
-};
-
-const MODEL_KIND_BY_NAME: Readonly<Record<string, DeepSeekModelKind>> = {
-  'deepseek-v4-pro': 'pro',
-  'deepseek-v4-flash': 'flash',
-  'deepseek-v4-flash-vision-exp': 'flash-vision',
-};
-
-export function resolveDeepSeekModelKind(modelName: string): DeepSeekModelKind | undefined {
-  if (!Object.prototype.hasOwnProperty.call(MODEL_KIND_BY_NAME, modelName)) return undefined;
-  return MODEL_KIND_BY_NAME[modelName];
+interface RateSchedule {
+  readonly pricingVersion: string;
+  readonly validFromEpochMs: number;
+  readonly peak: TierRate;
+  readonly offPeak: TierRate;
 }
 
-function rateFor(kind: DeepSeekModelKind, peak: boolean): TierRate {
-  switch (kind) {
-    case 'pro':
-      return peak ? PRO_PEAK : PRO_OFF_PEAK;
-    case 'flash':
-    case 'flash-vision':
-      return peak ? FLASH_PEAK : FLASH_OFF_PEAK;
-  }
+const LEGACY_FLASH_SCHEDULE: RateSchedule = {
+  pricingVersion: LEGACY_PRICING_VERSION,
+  validFromEpochMs: LEGACY_PRICING_VALID_FROM,
+  peak: {
+    cacheHitNanosPerToken: 100n,
+    cacheMissNanosPerToken: 3000n,
+    outputNanosPerToken: 9000n,
+  },
+  offPeak: {
+    cacheHitNanosPerToken: 50n,
+    cacheMissNanosPerToken: 1500n,
+    outputNanosPerToken: 4500n,
+  },
+};
+
+const V41_FLASH_SCHEDULE: RateSchedule = {
+  pricingVersion: V41_PRICING_VERSION,
+  validFromEpochMs: V41_PRICING_VALID_FROM,
+  peak: {
+    cacheHitNanosPerToken: 40n,
+    cacheMissNanosPerToken: 2000n,
+    outputNanosPerToken: 8000n,
+  },
+  offPeak: {
+    cacheHitNanosPerToken: 20n,
+    cacheMissNanosPerToken: 1000n,
+    outputNanosPerToken: 4000n,
+  },
+};
+
+const PRO_SCHEDULE: RateSchedule = {
+  pricingVersion: LEGACY_PRICING_VERSION,
+  validFromEpochMs: LEGACY_PRICING_VALID_FROM,
+  peak: {
+    cacheHitNanosPerToken: 300n,
+    cacheMissNanosPerToken: 9000n,
+    outputNanosPerToken: 27000n,
+  },
+  offPeak: {
+    cacheHitNanosPerToken: 150n,
+    cacheMissNanosPerToken: 4500n,
+    outputNanosPerToken: 13500n,
+  },
+};
+
+const MODEL_SCHEDULES: Readonly<Record<string, readonly RateSchedule[]>> = {
+  'deepseek-v4-pro': [PRO_SCHEDULE],
+  'deepseek-v4-flash': [LEGACY_FLASH_SCHEDULE, V41_FLASH_SCHEDULE],
+  'deepseek-v4-flash-vision-exp': [LEGACY_FLASH_SCHEDULE, V41_FLASH_SCHEDULE],
+  'deepseek-flash': [V41_FLASH_SCHEDULE],
+};
+
+export interface DeepSeekAttemptPrice {
+  readonly pricingVersion: string;
+  readonly costNanos: bigint;
 }
 
-export function computeCostNanos(
-  kind: DeepSeekModelKind,
-  peak: boolean,
+export function resolveDeepSeekPrice(
+  modelName: string,
+  startedAtEpochMs: number,
   usage: TokenUsage,
-): bigint {
-  const rate = rateFor(kind, peak);
+): DeepSeekAttemptPrice | undefined {
+  if (!Object.prototype.hasOwnProperty.call(MODEL_SCHEDULES, modelName)) return undefined;
+  const schedules = MODEL_SCHEDULES[modelName];
+  if (schedules === undefined) return undefined;
+  let selected: RateSchedule | undefined;
+  for (const schedule of schedules) {
+    if (schedule.validFromEpochMs <= startedAtEpochMs) selected = schedule;
+  }
+  if (selected === undefined) return undefined;
+  const rate = isDeepSeekPeak(startedAtEpochMs) ? selected.peak : selected.offPeak;
   const cacheRead = toNonNegative(usage.inputCacheRead);
   const inputOther = toNonNegative(usage.inputOther) + toNonNegative(usage.inputCacheCreation);
   const output = toNonNegative(usage.output);
-  return (
-    BigInt(cacheRead) * rate.cacheHitNanosPerToken +
-    BigInt(inputOther) * rate.cacheMissNanosPerToken +
-    BigInt(output) * rate.outputNanosPerToken
-  );
+  return {
+    pricingVersion: selected.pricingVersion,
+    costNanos:
+      BigInt(cacheRead) * rate.cacheHitNanosPerToken +
+      BigInt(inputOther) * rate.cacheMissNanosPerToken +
+      BigInt(output) * rate.outputNanosPerToken,
+  };
 }
 
 function toNonNegative(value: number): number {

@@ -161,6 +161,176 @@ describe('SessionEventWiring status snapshot fold', () => {
   });
 });
 
+describe('SessionEventWiring pending interaction bridge', () => {
+  it('bridges interactions already pending when the wiring is installed', async () => {
+    const agent = new FakeAgentHandle('main');
+    const approvals: string[] = [];
+    const session = makeSessionWithInteractions(agent, [
+      {
+        id: 'ix-1',
+        kind: 'approval',
+        origin: { agentId: 'main' },
+        payload: {
+          toolCallId: 'tc-1',
+          toolName: 'Bash',
+          action: 'run command',
+          display: { kind: 'generic', summary: 'run command' },
+        },
+      },
+    ]);
+    const wiring = new SessionEventWiring(session, {
+      receiveEvent: () => undefined,
+      requestApproval: (request) => {
+        approvals.push(request.toolCallId);
+        return Promise.resolve({ decision: 'approved' });
+      },
+      requestQuestion: () => Promise.resolve(null),
+      toolCall: () => Promise.resolve({ output: 'not supported', isError: true }),
+    });
+    try {
+      // The interaction was parked before the wiring existed (a handed-off
+      // target adopted between creation and its first prompt): the bridge must
+      // pick it up at construction instead of waiting for a change that may
+      // never come — otherwise the engine request hangs and a no-handler
+      // cancellation is the closest a host can get.
+      await Promise.resolve();
+      expect(approvals).toEqual(['tc-1']);
+    } finally {
+      wiring.dispose();
+    }
+  });
+
+  it('bridges each pending interaction once and reports settled ones once', async () => {
+    const agent = new FakeAgentHandle('main');
+    const approvals: string[] = [];
+    const settled: string[][] = [];
+    const interactions = new FakeInteractions(agent);
+    const wiring = new SessionEventWiring(interactions.session(), {
+      receiveEvent: () => undefined,
+      requestApproval: (request) => {
+        approvals.push(request.toolCallId);
+        return Promise.resolve({ decision: 'approved' });
+      },
+      requestQuestion: () => Promise.resolve(null),
+      toolCall: () => Promise.resolve({ output: 'not supported', isError: true }),
+      notifyInteractionSettled: (_sessionId, toolCallIds) => {
+        settled.push([...toolCallIds]);
+      },
+    });
+    try {
+      interactions.park({
+        id: 'ix-1',
+        kind: 'approval',
+        origin: { agentId: 'main' },
+        payload: {
+          toolCallId: 'tc-1',
+          toolName: 'Bash',
+          action: 'run command',
+          display: { kind: 'generic', summary: 'run command' },
+        },
+      });
+      interactions.notify();
+      // The kernel re-fires the whole pending set on every change.
+      interactions.notify();
+      await Promise.resolve();
+      expect(approvals).toEqual(['tc-1']);
+      expect(settled).toEqual([]);
+
+      // The kernel dropped it (turn cancelled): the host learns which panel to
+      // discard, exactly once.
+      interactions.settle('ix-1');
+      interactions.notify();
+      interactions.notify();
+      expect(settled).toEqual([['tc-1']]);
+      expect(approvals).toEqual(['tc-1']);
+    } finally {
+      wiring.dispose();
+    }
+  });
+});
+
+/**
+ * A session fixture whose interaction kernel can park, settle and notify, so
+ * the bridge's initial pickup / dedupe / settled reporting can be driven
+ * without an engine.
+ */
+class FakeInteractions {
+  private readonly pending = new Map<string, unknown>();
+  private readonly listeners: Array<() => void> = [];
+
+  constructor(private readonly agent: FakeAgentHandle) {}
+
+  session(): ISessionScopeHandle {
+    const lifecycle = {
+      list: () => [this.agent],
+      onDidCreate: () => ({ dispose: () => undefined }),
+      onDidDispose: () => ({ dispose: () => undefined }),
+    };
+    const interactions = {
+      onDidChangePending: (listener: () => void) => {
+        this.listeners.push(listener);
+        return {
+          dispose: () => {
+            const index = this.listeners.indexOf(listener);
+            if (index >= 0) this.listeners.splice(index, 1);
+          },
+        };
+      },
+      listPending: () => [...this.pending.values()],
+      decide: () => undefined,
+    };
+    const accessor = {
+      get: (token: unknown): unknown => {
+        if (token === IAgentLifecycleService) return lifecycle;
+        if (token === ISessionInteractionService) return interactions;
+        return undefined;
+      },
+    };
+    return { id: 's1', kind: 1, accessor, dispose: () => undefined } as unknown as ISessionScopeHandle;
+  }
+
+  park(interaction: {
+    id: string;
+    kind: string;
+    origin: { agentId: string };
+    payload: Record<string, unknown>;
+  }): void {
+    this.pending.set(interaction.id, interaction);
+  }
+
+  settle(id: string): void {
+    this.pending.delete(id);
+  }
+
+  notify(): void {
+    for (const listener of [...this.listeners]) listener();
+  }
+}
+
+function makeSessionWithInteractions(
+  agent: FakeAgentHandle,
+  pending: readonly unknown[],
+): ISessionScopeHandle {
+  const lifecycle = {
+    list: () => [agent],
+    onDidCreate: () => ({ dispose: () => undefined }),
+    onDidDispose: () => ({ dispose: () => undefined }),
+  };
+  const interactions = {
+    onDidChangePending: () => ({ dispose: () => undefined }),
+    listPending: () => pending,
+    decide: () => undefined,
+  };
+  const accessor = {
+    get: (token: unknown): unknown => {
+      if (token === IAgentLifecycleService) return lifecycle;
+      if (token === ISessionInteractionService) return interactions;
+      return undefined;
+    },
+  };
+  return { id: 's1', kind: 1, accessor, dispose: () => undefined } as unknown as ISessionScopeHandle;
+}
+
 describe('SessionEventWiring research / aitp_mode event forwarding', () => {
   it('drops the internal revision signal and keeps forwarding the public Research snapshot', () => {
     const agent = new FakeAgentHandle('main');

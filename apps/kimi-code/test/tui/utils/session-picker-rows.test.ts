@@ -61,4 +61,48 @@ describe('sessionRowsForPicker', () => {
 
     expect(rows.map((row) => row.id)).toEqual(['ses_previous_empty']);
   });
+
+  it('marks a session this process adopted from a handoff', () => {
+    const rows = sessionRowsForPicker(
+      [summary({ id: 'ses_a' }), summary({ id: 'ses_b' })],
+      'ses_a',
+      true,
+      new Map([
+        [
+          'ses_b',
+          { workDir: '/tmp/project-b', title: 'Port the parser', status: 'running' },
+        ],
+      ]),
+    );
+
+    expect(rows).toEqual([
+      expect.objectContaining({ id: 'ses_a', background: undefined }),
+      expect.objectContaining({ id: 'ses_b', background: { status: 'running' } }),
+    ]);
+  });
+
+  it('folds live background sessions from another project into the page', () => {
+    // A handed-off session runs in another cwd, so the cwd-scoped page never
+    // lists it; the picker must still be able to show and open it.
+    const rows = sessionRowsForPicker(
+      [summary({ id: 'ses_a' })],
+      'ses_a',
+      true,
+      new Map([
+        [
+          'ses_b',
+          { workDir: '/tmp/project-b', title: 'Port the parser', status: 'waiting' },
+        ],
+      ]),
+    );
+
+    expect(rows.map((row) => row.id)).toEqual(['ses_b', 'ses_a']);
+    expect(rows[0]).toEqual(
+      expect.objectContaining({
+        work_dir: '/tmp/project-b',
+        title: 'Port the parser',
+        background: { status: 'waiting' },
+      }),
+    );
+  });
 });

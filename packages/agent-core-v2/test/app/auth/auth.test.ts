@@ -333,6 +333,22 @@ describe('OAuthService', () => {
       supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
       defaultEffort: 'low',
     });
+    expect(models['openai-codex/gpt-6-sol']).toMatchObject({
+      provider: OPENAI_OAUTH_PROVIDER,
+      model: 'gpt-6-sol',
+      maxContextSize: 272_000,
+      capabilities: ['thinking', 'always_thinking', 'tool_use', 'image_in'],
+      supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      defaultEffort: 'medium',
+    });
+    expect(models['openai-codex/gpt-6-luna']).toMatchObject({
+      provider: OPENAI_OAUTH_PROVIDER,
+      model: 'gpt-6-luna',
+      maxContextSize: 272_000,
+      capabilities: ['thinking', 'always_thinking', 'tool_use', 'image_in'],
+      supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'medium',
+    });
     expect(
       Object.keys(models)
         .filter((id) => id.startsWith('openai-codex/'))
@@ -342,8 +358,35 @@ describe('OAuthService', () => {
       'gpt-5.6-terra',
       'gpt-5.6-luna',
       'gpt-6-astra',
+      'gpt-6-sol',
+      'gpt-6-luna',
     ]);
-    expect(defaultModel).toBe('openai-codex/gpt-5.6-sol');
+    expect(defaultModel).toBe('openai-codex/gpt-6-sol');
+  });
+
+  it('preserves an existing valid default and thinking when provisioning Codex models', async () => {
+    models['existing/model'] = {
+      provider: NON_OAUTH_PROVIDER,
+      model: 'existing-model',
+      maxContextSize: 100_000,
+    };
+    defaultModel = 'existing/model';
+    thinking = { enabled: false, effort: 'low' };
+    toolkit.login.mockImplementation((_provider, options) => {
+      options.onDeviceCode(deviceAuth);
+      return Promise.resolve({ providerName: OPENAI_OAUTH_PROVIDER, ok: true });
+    });
+    const svc = createService();
+
+    await svc.startLogin(OPENAI_OAUTH_PROVIDER);
+    await vi.waitFor(() =>
+      expect(svc.getFlow(OPENAI_OAUTH_PROVIDER)?.status).toBe('authenticated'),
+    );
+
+    expect(models['openai-codex/gpt-6-sol']).toBeDefined();
+    expect(models['openai-codex/gpt-6-luna']).toBeDefined();
+    expect(defaultModel).toBe('existing/model');
+    expect(thinking).toEqual({ enabled: false, effort: 'low' });
   });
 
   it('startLogin resolves an env-scoped oauth ref for the managed provider without oauth config', async () => {

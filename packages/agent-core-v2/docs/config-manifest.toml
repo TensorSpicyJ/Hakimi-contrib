@@ -388,6 +388,10 @@ timeout_ms = 7200000
 # [subagent.auto_preset]
   # enabled: boolean (default: false)
   # manual_lock: boolean (default: false)
+  # role_weights: record<string, number>
+  # deepseek_avoid_peak_hours: boolean (default: true)
+  # deepseek_peak_policy: "block" | "penalize" | "off"
+  # deepseek_peak_penalty: number (default: 60)
   # candidates: string[]
   # quota_floor_percent: number (default: 25)
   # switch_margin_percent: number (default: 10)
@@ -402,6 +406,9 @@ timeout_ms = 7200000
   # refresh_interval_ms: integer (default: 300000)
   # query_timeout_ms: integer (default: 5000)
   # allow_extra_usage: boolean (default: false)
+  # reset_priority_window_ms: integer (default: 259200000)
+  # reset_priority_exponent: number (default: 3)
+  # reset_priority_max_bonus: number (default: 200)
 
 # ##########################################################################
 # task

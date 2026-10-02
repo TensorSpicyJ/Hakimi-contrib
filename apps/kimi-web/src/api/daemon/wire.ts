@@ -19,6 +19,14 @@ export interface WirePage<T> {
   has_more: boolean;
 }
 
+/** GET /plugins uses camelCase plugin summaries; only consumed fields are mirrored. */
+export interface WirePluginSummary {
+  id: string;
+  version?: string;
+  enabled: boolean;
+  state: 'ok' | 'error';
+}
+
 // ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
@@ -442,9 +450,16 @@ export interface WireSubagentModelConfig {
 export interface WireSubagentAutoPresetConfig {
   enabled?: boolean;
   manualLock?: boolean;
+  roleWeights?: Record<string, number>;
+  deepseekAvoidPeakHours?: boolean;
+  deepseekPeakPolicy?: 'block' | 'penalize' | 'off';
+  deepseekPeakPenalty?: number;
   candidates?: string[];
   quotaFloorPercent?: number;
   switchMarginPercent?: number;
+  resetPriorityWindowMs?: number;
+  resetPriorityExponent?: number;
+  resetPriorityMaxBonus?: number;
   localUsageWindowMs?: number;
   localUsageWeightPercent?: number;
   priorityWeightPercent?: number;
@@ -530,42 +545,118 @@ export type WireAutoSubagentPresetReasonCode =
   | 'activation_failed'
   | 'activation_no_effect';
 
+export type WireSubagentRouteKind = 'agent' | 'swarm' | 'tower_worker' | 'tower_reviewer';
+export type WireSubagentBindingSource = 'preset' | 'agents' | 'legacy-secondary' | 'caller' | 'auto-fallback';
+export type WireAutoSubagentPresetRouteAvailability =
+  | 'healthy' | 'route_unresolved' | 'quota_unknown' | 'quota_below_floor' | 'circuit_open'
+  | 'balance_empty' | 'balance_unknown' | 'balance_invalid' | 'account_unavailable'
+  | 'time_restricted' | 'capability_unavailable' | 'provider_unsupported' | 'model_disabled';
+export type WireLocalMeteredUsage = Omit<WireProviderMeteredUsage, 'balance'>;
+/** Exponential expiring-quota priority evidence for one subscription window.
+ *  Optional for backward compatibility; when present every field is strict. */
+export interface WireAutoSubagentPresetResetPriority {
+  window: { duration: number; unit: 'minute' | 'hour' | 'day' | 'week' };
+  reset_at: number;
+  remaining_percent: number;
+  horizon_ms: number;
+  bonus: number;
+  floor_relaxed: boolean;
+}
+export type WireAutoSubagentPresetResourceEvidence = (
+  | { kind: 'subscription'; resource_score?: number; quota_remaining_percent?: number; quota_reset_at?: number; reset_priority?: WireAutoSubagentPresetResetPriority }
+  | {
+      kind: 'metered';
+      currency: 'CNY';
+      balance_cny?: string;
+      is_available?: boolean;
+      balance_status: 'known' | 'query_failed' | 'invalid' | 'missing';
+      resource_score?: 0 | 100;
+      resource_score_basis: 'funded_account';
+      metered_usage?: WireLocalMeteredUsage;
+      peak_penalty?: { points: number; until: number };
+    }
+  | { kind: 'unknown'; reason: 'missing' | 'query_failed' | 'unsupported' }
+) & { blocked_until?: number };
+export interface WireAutoSubagentPresetScoreContributions {
+  quota_remaining?: number;
+  resource_score?: number;
+  priority_bonus: number;
+  reset_bonus: number;
+  route_fit_bonus: number;
+  token_penalty: number;
+  reliability_penalty: number;
+  latency_penalty: number;
+  peak_penalty?: number;
+}
+export interface WireAutoSubagentPresetLocalEvidence {
+  scope: 'profile' | 'provider' | 'none';
+  sample_count: number;
+  failure_count: number;
+  adjusted_failure_rate: number;
+  token_count: number;
+  average_first_token_latency_ms?: number;
+  first_token_latency_sample_count: number;
+  llm_request_count: number;
+}
+export interface WireAutoSubagentPresetRouteScore {
+  model?: string;
+  thinking?: string;
+  provider?: string;
+  source?: WireSubagentBindingSource;
+  model_source?: WireSubagentBindingSource;
+  thinking_source?: WireSubagentBindingSource;
+  availability: WireAutoSubagentPresetRouteAvailability;
+  score?: number;
+  contributions: WireAutoSubagentPresetScoreContributions;
+  local_evidence: WireAutoSubagentPresetLocalEvidence;
+  resource: WireAutoSubagentPresetResourceEvidence;
+  circuit_breaker_open_until?: number;
+}
+export interface WireAutoSubagentPresetRoleScore {
+  key: string;
+  route: WireSubagentRouteKind;
+  profile_name?: string;
+  weight: number;
+  original: WireAutoSubagentPresetRouteScore;
+  effective: WireAutoSubagentPresetRouteScore;
+  effective_score: number;
+  fallback_penalty: number;
+  fallback?: {
+    source_preset?: string;
+    source_role: string;
+    reason: Exclude<WireAutoSubagentPresetRouteAvailability, 'healthy'>;
+  };
+}
 export interface WireAutoSubagentPresetCandidateScore {
   preset: string;
   provider?: string;
-  availability:
-    | 'healthy'
-    | 'route_unresolved'
-    | 'quota_unknown'
-    | 'quota_below_floor'
-    | 'circuit_open';
+  availability: WireAutoSubagentPresetRouteAvailability | 'partial' | 'unavailable';
   selectable: boolean;
   score?: number;
   quota_remaining_percent?: number;
   quota_reset_at?: number;
   circuit_breaker_open_until?: number;
-  contributions: {
-    quota_remaining?: number;
-    priority_bonus: number;
-    reset_bonus: number;
-    route_fit_bonus: number;
-    token_penalty: number;
-    reliability_penalty: number;
-    latency_penalty: number;
+  contributions: WireAutoSubagentPresetScoreContributions;
+  local_evidence: WireAutoSubagentPresetLocalEvidence;
+  participating?: boolean;
+  native_score?: number;
+  role_scores?: WireAutoSubagentPresetRoleScore[];
+  coverage?: {
+    resource_provider_count: number;
+    total_provider_count: number;
+    local_evidence_role_count: number;
+    total_role_count: number;
   };
-  local_evidence: {
-    scope: 'profile' | 'provider' | 'none';
-    sample_count: number;
-    failure_count: number;
-    adjusted_failure_rate: number;
-    token_count: number;
-    average_first_token_latency_ms?: number;
-    first_token_latency_sample_count: number;
-    llm_request_count: number;
-  };
+  role_count?: number;
+  native_available_role_count?: number;
+  fallback_role_count?: number;
+  unavailable_role_count?: number;
+  total_role_weight?: number;
+  deepseek_role_share?: number;
 }
 
 export interface WireAutoSubagentPresetStatus {
+  evaluation_scope?: 'preset';
   evaluated_at: number;
   route: 'agent' | 'swarm' | 'tower_worker' | 'tower_reviewer';
   profile_name?: string;
@@ -580,6 +671,15 @@ export interface WireAutoSubagentPresetStatus {
   switch_cooldown_until?: number;
   candidates: WireAutoSubagentPresetCandidateScore[];
   policy: {
+    role_weights?: Record<string, number>;
+    deepseek_avoid_peak_hours?: boolean;
+    deepseek_peak_policy?: 'block' | 'penalize' | 'off';
+    deepseek_peak_penalty?: number;
+    fallback_penalty?: number;
+    metered_funded_resource_score?: number;
+    reset_priority_window_ms?: number;
+    reset_priority_exponent?: number;
+    reset_priority_max_bonus?: number;
     quota_floor_percent: number;
     switch_margin_percent: number;
     local_usage_window_ms: number;
@@ -598,6 +698,10 @@ export type WireAutoSubagentPresetStatusResponse = WireAutoSubagentPresetStatus 
 export interface WireSubagentPresetActivation {
   config: WireConfig;
   warning?: string;
+}
+
+export interface WireAutoSubagentPresetSelection extends WireSubagentPresetActivation {
+  status: WireAutoSubagentPresetStatus;
 }
 
 export interface WireProviderUsageRow {

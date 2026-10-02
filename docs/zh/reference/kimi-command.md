@@ -153,7 +153,7 @@ hakimi login --provider openai-codex --no-open
 | `--enable-experimental` | 已废弃的兼容选项，不产生任何作用。 |
 | `--no-open` | 打印设备授权地址和用户码，不尝试打开浏览器。 |
 
-ChatGPT / OpenAI Codex OAuth 无需实验性开关即可使用。登录后会生成 `openai-codex/gpt-5.6-sol`、`openai-codex/gpt-5.6-terra`、`openai-codex/gpt-5.6-luna` 和 `openai-codex/gpt-6-astra` 模型别名。OAuth 网络活动只会由显式登录，或需要鉴权的 API/token request 触发；Hakimi 绝不会仅因为启动就登录。轮询期间随时按 `Ctrl-C` 可取消登录；取消或失败时退出码为 `1`，成功为 `0`。
+ChatGPT / OpenAI Codex OAuth 无需实验性开关即可使用。登录后会生成 `openai-codex/gpt-6-sol`、`openai-codex/gpt-6-luna` 和 `openai-codex/gpt-6-astra`，以及已有的 GPT-5.6 Sol、Terra 和 Luna 模型别名。首次登录 Codex 会将默认模型设为 GPT-6 Sol。已配置的 Codex OAuth 供应商会在启动或刷新模型列表时补齐缺失的内置别名，无需再次登录；除非主动修改，已有模型参数和选择保持不变。设置了 `model_source = "static"` 的供应商仍由用户手动管理。OAuth 网络活动只会由显式登录，或需要鉴权的 API/token request 触发；Hakimi 绝不会仅因为启动就登录。轮询期间随时按 `Ctrl-C` 可取消登录；取消或失败时退出码为 `1`，成功为 `0`。
 
 ### `hakimi acp`
 

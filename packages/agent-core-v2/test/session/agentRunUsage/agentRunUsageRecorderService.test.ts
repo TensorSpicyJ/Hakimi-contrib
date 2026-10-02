@@ -73,6 +73,7 @@ class FakeSubagentService implements ISessionSubagentService {
 class FakeUsageService implements IAgentRunUsageService {
   declare readonly _serviceBrand: undefined;
   readonly appended: AgentRunUsageRecord[] = [];
+  readonly onDidStartRun = Event.None as Event<AgentRunUsageStartedRecord>;
   readonly onDidFinishRun = Event.None as Event<AgentRunUsageEntry>;
 
   appendStarted(record: AgentRunUsageStartedRecord): void {

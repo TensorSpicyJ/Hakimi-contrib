@@ -33,7 +33,7 @@ cd /path/to/your/project
 hakimi
 ```
 
-Use `/login` in the TUI to authenticate with Kimi Code OAuth, a Kimi Platform API key, or a ChatGPT / OpenAI Codex OAuth account. Codex login provisions the `openai-codex/gpt-5.6-sol`, `openai-codex/gpt-5.6-terra`, `openai-codex/gpt-5.6-luna`, and `openai-codex/gpt-6-astra` model aliases; OAuth login is always explicit and never starts at launch. Common entry points include:
+Use `/login` in the TUI to authenticate with Kimi Code OAuth, a Kimi Platform API key, or a ChatGPT / OpenAI Codex OAuth account. Codex login provisions `openai-codex/gpt-6-sol`, `openai-codex/gpt-6-luna`, and `openai-codex/gpt-6-astra`, alongside the existing GPT-5.6 Sol, Terra, and Luna aliases. The first Codex login sets GPT-6 Sol as the default. For an already-configured Codex OAuth provider, startup and model-list refresh add missing built-in models without another login or changes to existing settings; an explicit `model_source = "static"` opts out. OAuth login is always explicit and never starts at launch. Common entry points include:
 
 ```text
 /help              Show commands and keyboard shortcuts
@@ -47,20 +47,11 @@ Use `hakimi -p "<instruction>"` for a non-interactive run and `hakimi -c` to res
 
 ## Research Mode
 
-Research Mode and the `EnterAITPMode` capability are discoverable by default. New sessions start `inactive`, while hydration preserves the persisted mode. Inactive hydration and GET/snapshot reads do not probe AITP or perform AITP I/O; a persisted active session remains active after cold restore, re-probes AITP, and reruns the read-only `enter` → `check` maintenance cycle. The Research Board plus other Research/AITP tools remain hidden until explicit entry. After `/research on` or `EnterAITPMode`, the adapter probes AITP and, after a ready probe, performs the read-only `enter` → `check` cycle. Entry requires Python 3.11 or later, the `aitp-research-protocol` plugin, and an initialized AITP workspace:
+Research Mode is a lightweight visibility toggle for the official [AITP](https://github.com/bhjia-phys/AITP-Research-Protocol) plugin `aitp`. Install the plugin first, then use `/research on`, `/research off`, or `/research status`; new sessions start with the mode off. Turning the mode on exposes the plugin's four core Skills — `aitp-memory`, `aitp-research`, `aitp-writing`, and `aitp-distill` — and turning it off hides them again without touching existing project knowledge.
 
-```sh
-cd /path/to/initialized-aitp-workspace
-hakimi
-```
+AITP 1.1.0 has no CLI, ledger, runtime, or session hook: long-term memory is an editable research note (`research.md`, or an established TeX main note) that the agent reads and writes with ordinary file tools, entering through `aitp-memory`. Enabling the mode installs nothing, runs no external process, and writes no memory file; status reads, session restore, and turn boundaries stay local. Ordinary Goal, Plan, and permission behavior is unchanged.
 
-```text
-/research on
-/research status
-/research manage
-```
-
-The normal bounded-action path is `BeginResearchAction` → perform the scientific work → `ConcludeResearchAction`, which records the physical work, result, tests or derivation, limitations, mainline impact, and next step in one Research transition. It does not submit or poll scheduler jobs, write AITP, or change a question's assessment automatically. Before each admitted Research answer, the shared coordinator reconciles only deterministic local Line/Action/phase/period/cursor structure; stale checkpoint proposals remain blocked and are labelled historical rather than silently committed or discarded. The expanded Board also separates AITP read readiness from adapter-contract-0.2 scoped checkpoint-write capability. The Research Loop can review typed child evidence packets without implicit state writes and record explicit, action-bound HPC observations. For sustained theoretical-physics work, the optional bundled `theory-physics` plugin is the upper-layer entry: it admits the request when Research Mode is warranted, aligns Line / Question / Focus / Goal, and delegates durable deltas to the external `using-aitp` skill or reusable-method candidates to `distilling-methods` on demand. One-off physics answers need not enter Research Mode. The plugin adds literature-routing, derivation-checking, numerical/HPC evidence, and science-first reporting guidance without adding another runtime or database. See the [English Research Mode guide](../../docs/en/guides/research-mode.md) or [中文研究模式指南](../../docs/zh/guides/research-mode.md) for prerequisites, the Research Board, steering commands, persistence barriers, and degraded behavior.
+For prerequisites, the workflow, and the remaining boundaries, see the [English Research Mode guide](../../docs/en/guides/research-mode.md) or [中文研究模式指南](../../docs/zh/guides/research-mode.md).
 
 ## User manual
 

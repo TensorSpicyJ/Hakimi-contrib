@@ -833,6 +833,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters ?? EMPTY_TOOL_PARAMETERS,
+        inputFormat: tool.inputFormat,
         deferred: tool.deferred,
       }));
   }
@@ -877,7 +878,9 @@ function providerVisibleTools(tools: readonly Tool[]): readonly Tool[] {
 }
 
 function toolSignature(tools: readonly Tool[]): readonly LlmRequestToolSchema[] {
-  return tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
+  return tools.map(({ name, description, parameters, inputFormat }) => ({
+    name, description, parameters, inputFormat,
+  }));
 }
 
 function requestKindForRecord(fields: AgentLLMRequestLogFields): PayloadOf<typeof llmRequest>['kind'] {

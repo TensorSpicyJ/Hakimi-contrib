@@ -57,6 +57,67 @@ terminal surface are v1-only and live in the legacy suites.
 
 ## Command reference
 
+- `pnpm --filter @moonshot-ai/klient bench:gpt-capability -- --dry-run --split all`
+  plans the separate 24-task capability matrix (six categories, six procedural
+  acceptance tasks). See `examples/gpt-capability-bench.md` for selftest, stub,
+  smoke, variants and reporting. Baseline/catalog share `apply_patch=true` and
+  one frozen engine/dependency snapshot. `--live` requires explicit batch run,
+  request and time ceilings; all requests use a durable host-only ledger.
+  Missing/corrupt resume ledgers and existing locks fail closed. `--report`
+  reconstructs committed and interrupted observations without model calls.
+  All output paths are repository-relative and scratch belongs under
+  `.tmp/hakimi-benchmark-v2/`. Old benchmark tasks/results remain frozen.
+
+  Task suites are versioned through `gpt-capability-bench.suites.ts`:
+  `--suite v3` is the default; `--suite v1|v2` selects historical corpora but
+  never bypasses frozen-source resume checks. Missing suite fields in old
+  observations mean v1; do not rewrite those files. v2 clarifies P02/R03;
+  v3 only revises L02's first/second-stage visible contract under a new id,
+  keeping the original third prompt, grader, fixtures and other 23 v2 tasks.
+  Reports isolate all three suite versions; keep different engine
+  snapshots in separate reports, with no cross-suite pairing or pooling.
+  The six acceptance tasks observed in v1/v2 are not a fresh v3 holdout.
+  MCP checks here are benchmark measurement safeguards, not a claim that the
+  underlying product runtime registration/readiness race has been repaired.
+  v3 F02 uses the same local fixture via a public new-session MCP overlay.
+  Its asserted fresh-session/single-prompt/no-compaction contract lets the
+  host check the initial main provider request before quota/auth/fetch.
+  A failed check stays latched and rejects later attempts; success allows
+  later restricted-child requests without imposing the main MCP tool set.
+  The scorer still requires a real successful MCP call. A readiness failure
+  is independently `invalid`, retained, and stops the batch without rerunning;
+  initial names/hashes/reasons are stored in `mcpReadiness`. F02 has no restore
+  step; do not describe this as fixing restored-session MCP readiness.
+  `manifest.config.mcpReadinessPolicy` binds this v3-only guard; keep the
+  optional policy/measurements absent from v1/v2 historical output.
+  New paid batches require new explicit finite authorization. New executable
+  batches preserve host-only `control-source/` with controls, selected tasks,
+  dependency lock and noncredential model catalog; never mount this archive
+  into an agent workspace. `--report` remains read-only for historical runs.
+
+- `pnpm --filter @moonshot-ai/klient bench:gpt-harness -- --dry-run` plans the
+  separate Codex / production Hakimi / opt-in `apply_patch` comparison. Unlike
+  the adapter benchmark below, it uses the normal tool sets and prompt profiles.
+  All arms run in Linux with Node >=24.15, `bwrap`, `socat`, and `rg` available.
+  Install a pinned Linux Codex CLI into an isolated directory and pass its npm
+  prefix with `--codex-root`. `--selftest` validates hidden graders offline.
+  `--live --auth-file /path/to/codex/auth.json --out /path/to/new-run` explicitly
+  enables remote calls; the host-only login authenticates a shared Responses
+  proxy, never the agent sandbox. The official model catalog and engine source
+  are frozen; model/effort are checked on every request. Request and wall-clock
+  limits are hard, while token usage is observed after each response (not an
+  in-flight token cap). Future prompts and hidden graders stay outside the
+  agent's filesystem. Both harnesses restart/resume for each follow-up.
+  Infrastructure/measurement failures are invalid results and stop the batch;
+  budget exhaustion is recorded separately. Results are synthetic diagnostics,
+  not evidence of general parity with Codex. Scratch and reports belong in `.tmp/`.
+  `--arms hakimi-patch,hakimi-catalog` compares the same patch-enabled engine
+  with `tool_catalog` off/on; use `--repeats 2` for paired AB/BA ordering.
+  `H01-catalog-discovery` additionally requires the real TodoList tool and is
+  restricted to Hakimi arms. It reuses the queue task's unchanged hidden grader;
+  both correctness and the requested tool use must pass. This probe tests tool
+  availability, not broad coding capability.
+
 - `pnpm --filter @moonshot-ai/klient test` — all Vitest suites (unit +
   conformance + e2e; live cases skip without their env).
 - `KIMI_SERVER_URL=http://127.0.0.1:58627 pnpm --filter @moonshot-ai/klient test`
@@ -76,3 +137,47 @@ terminal surface are v1-only and live in the legacy suites.
   the kimi-only wire encoding of dynamic tool declarations, then runs a live
   two-step select→use flow per real kimi model (see
   `examples/kimi-select-tools.ts`).
+- `pnpm --filter @moonshot-ai/klient bench:gpt-adaptation -- <args>` — the GPT
+  adaptation paired benchmark (see `examples/gpt-adaptation-bench.ts` and
+  `test/gpt-adaptation-bench.test.ts`). Freeze once per run id
+  (`--freeze --freeze-mode live|offline`), then run 12 synthetic TypeScript
+  tasks on 2 arms × 2 repeats in task-pair blocks (rep 0 AB, rep 1 BA, adjacent),
+  8 cache-affinity session pairs, and the deterministic replay/fidelity scripts.
+  **Default is `--dry-run`: no network, no credentials, no auth.** `--stub`
+  serves each arm its own deterministic Responses fixture on loopback, so the
+  real engine loop, tools, persistence and grader run with no HTTP leaving the
+  process; those artifacts are `offline` and are only evidence, never an
+  official score (a run directory that mixes modes is flagged). Only `--live`
+  leaves the machine: it uses the engine's own managed OAuth on a separate
+  `--auth-home` (the benchmark's home, sessions, index and logs stay per-run),
+  never falls back to another model, and every request is ticketed before
+  dispatch against a per-run cap and an output-directory-wide durable ledger
+  (`ledger.jsonl`) that a restart cannot refund. `--report <run-dir>` rebuilds a
+  report read-only.
+- Both `bench_run_tests` and the hidden grader execute in a fresh chroot with
+  unprivileged user/mount/PID/network namespaces, private `/proc`, dropped
+  capabilities and `no_new_privs` (`examples/gpt-adaptation-bench.sandbox.ts`).
+  Only the staged workspace and required runtime files are available; host
+  files and network access are unavailable. The grader is staged only after
+  the agent finishes and its output is not returned to the model. This is not
+  proof against arbitrary grader-aware cheating. If isolation cannot be
+  established, tests and live runs fail closed. `--selftest` runs scorer
+  positive/negative controls and sandbox escape probes; scratch stays in the
+  repository's `.tmp/gpt-adaptation-bench/` directory.
+- Each arm uses the frozen baseline source and dependencies. The candidate
+  overlays only `src/kosong/contract/{message,generate}.ts`,
+  `src/kosong/provider/bases/openai/openai-responses.ts`,
+  its model-family helper `openai-common.ts` and the companion
+  `openai-legacy.ts` importer (v3 keeps this dependency closure consistent),
+  `src/agent/contextProjector/contextProjectorService.ts` and
+  `src/agent/loop/loopService.ts`. Workspace-source and overlay hashes are
+  checked before execution, and the arm loader pins workspace dependencies.
+  Cache ablation uses identical candidate code and removes only `session-id`
+  at the fetch boundary. The observer must preserve streaming and distinguish
+  first-byte latency from the first visible text delta.
+- Live model/effort and the request cap are frozen. Use `--live --preflight`
+  before formal runs (at most four preflight requests within the 356-request
+  total). Missing measurement, authentication or quota failures stop the run;
+  ordinary graded failures remain results. Replay scripts always run offline,
+  including inside a live invocation. Reports never score offline tasks or
+  caches as live results, and include failed contracts and missing observations.

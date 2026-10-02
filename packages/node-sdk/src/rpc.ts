@@ -71,6 +71,8 @@ import type {
   SkillSummary,
   SubagentPresetChangedEvent,
   SubagentPresetEvaluatedEvent,
+  SessionHandoffHostOptions,
+  SessionInteractionSettledEvent,
   PluginCommandDef,
   Unsubscribe,
   WorkspaceTrustInfo,
@@ -168,6 +170,10 @@ export abstract class SDKRpcClientBase {
   >();
   private readonly approvalHandlers = new Map<string, ApprovalHandler>();
   private readonly questionHandlers = new Map<string, QuestionHandler>();
+  /** v2-only: pending interactions the engine stopped waiting for. */
+  private readonly interactionSettledListeners = new Set<
+    (event: SessionInteractionSettledEvent) => void
+  >();
 
   get interactiveAgentId(): string {
     return this.interactiveAgentScope.getStore() ?? MAIN_AGENT_ID;
@@ -1049,6 +1055,41 @@ export abstract class SDKRpcClientBase {
   clearSessionHandlers(sessionId: string): void {
     this.approvalHandlers.delete(sessionId);
     this.questionHandlers.delete(sessionId);
+  }
+
+  /**
+   * Whether this client can host a cross-project session handoff (the
+   * `StartSession` tool with a host that takes over the created session).
+   * The legacy v1 engine cannot, so the base answers false.
+   */
+  supportsSessionHandoff(): boolean {
+    return false;
+  }
+
+  /**
+   * Opt in to hosting handoffs. Without this call no host is registered, so
+   * the engine reports the handoff as unsupported and never opens the tool.
+   * Returns false when the client cannot host one.
+   */
+  enableSessionHandoff(_options: SessionHandoffHostOptions): boolean {
+    return false;
+  }
+
+  /** Subscribe to pending interactions the engine stopped waiting for. */
+  onSessionInteractionSettled(
+    listener: (event: SessionInteractionSettledEvent) => void,
+  ): Unsubscribe {
+    this.interactionSettledListeners.add(listener);
+    return () => {
+      this.interactionSettledListeners.delete(listener);
+    };
+  }
+
+  /** Feed the settled channel (called by the per-session interaction bridge). */
+  receiveSessionInteractionSettled(event: SessionInteractionSettledEvent): void {
+    for (const listener of this.interactionSettledListeners) {
+      listener(event);
+    }
   }
 
   async requestApproval(

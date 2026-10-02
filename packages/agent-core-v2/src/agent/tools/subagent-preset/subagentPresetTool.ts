@@ -5,7 +5,7 @@
  * Validates a configured routing preset through `config` and `modelCatalog`,
  * then delegates activation to the shared App-scope preset writer. The writer
  * serializes manual and automatic selection, revalidates against live config,
- * atomically commits the preset with a persistent manual lock, and best-effort
+ * atomically commits only the preset without changing the manual lock, and best-effort
  * aligns an existing Memory overlay. The result never reports cancellation
  * after the User-layer commit starts, never changes the main/default model or
  * global thinking, and reports
@@ -71,7 +71,9 @@ export class SetSubagentPresetTool implements ISetSubagentPresetTool {
     args: SetSubagentPresetInput,
     { signal }: ExecutableToolContext,
   ): Promise<ExecutableToolResult> {
-    const result = await this.activation.activate(args.preset, signal);
+    const result = await this.activation.runExclusive((transaction) =>
+      transaction.activate(args.preset, signal),
+    );
     if (result.kind !== 'activated') {
       return { isError: true, output: result.message };
     }

@@ -242,6 +242,10 @@ export async function runShell(
     if (sessionId !== '' && hasContent) {
       hints.push(`${gutter}To resume this session: hakimi --session ${sessionId}`);
     }
+    const backgroundHint = tui.getBackgroundSessionExitHint();
+    if (backgroundHint !== undefined) {
+      hints.push(`${gutter}${backgroundHint}`);
+    }
     if (tui.exitOpenUrl !== undefined) {
       hints.push(`${gutter}open ${toTerminalHyperlink(tui.exitOpenUrl, tui.exitOpenUrl)}`);
     }
